@@ -1,0 +1,12 @@
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  errors:
+    # An unawaited future in a player is usually a transport call that
+    # will land at an unpredictable moment. Worth stopping the build for.
+    unawaited_futures: error
+
+linter:
+  rules:
+    - prefer_single_quotes
+    - unawaited_futures

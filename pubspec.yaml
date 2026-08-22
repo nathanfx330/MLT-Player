@@ -1,0 +1,29 @@
+name: mlt_player
+description: >
+  A desktop media player with Flutter for the interface and MLT for the media.
+
+publish_to: none
+
+version: 0.5.0+1
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # Dart's foreign function interface, used to reach libmlt_bridge.so.
+  ffi: ^2.1.0
+
+  # Native desktop file chooser.
+  file_selector: ^1.0.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
