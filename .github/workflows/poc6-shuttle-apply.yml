@@ -1,0 +1,43 @@
+name: POC6 shuttle patch apply
+
+on:
+  push:
+    branches:
+      - poc6-frame-step
+    paths:
+      - .github/workflows/poc6-shuttle-apply.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: poc6-frame-step
+          fetch-depth: 0
+
+      - name: Verify patch applies cleanly
+        run: git apply --check tools/poc6_jkl.patch
+
+      - name: Apply JKL shuttle phase
+        run: git apply tools/poc6_jkl.patch
+
+      - name: Sanity-check expected API and shortcuts
+        run: |
+          grep -q 'mlt_bridge_set_speed' native/mlt_bridge.c
+          grep -q 'mlt_bridge_speed' native/mlt_bridge.h
+          grep -q 'shuttleForward' lib/main.dart
+          grep -q 'shuttleReverse' lib/main.dart
+          grep -q 'LogicalKeyboardKey.keyK' lib/main.dart
+
+      - name: Commit verified source changes
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add lib/main.dart native/mlt_bridge.c native/mlt_bridge.h
+          git commit -m 'POC 6: add JKL shuttle transport'
+          git push origin HEAD:poc6-frame-step
