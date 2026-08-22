@@ -70,6 +70,32 @@ mlt_bridge_play(void);
 MLT_BRIDGE_EXPORT int
 mlt_bridge_pause(void);
 
+/*
+ * Set shuttle speed. Positive values play forward, negative values play
+ * backward, and magnitudes above 1.0 increase shuttle speed. Use pause()
+ * for speed zero so the currently displayed frame is parked precisely.
+ */
+MLT_BRIDGE_EXPORT int
+mlt_bridge_set_speed(
+    double speed
+);
+
+MLT_BRIDGE_EXPORT double
+mlt_bridge_speed(void);
+
+/*
+ * QuickTime-style Play All Frames. When enabled, the preview consumer uses
+ * MLT real_time=-1 so video frames are never dropped to maintain wall-clock
+ * speed; playback is allowed to slow down instead.
+ */
+MLT_BRIDGE_EXPORT int
+mlt_bridge_set_play_all_frames(
+    int enabled
+);
+
+MLT_BRIDGE_EXPORT int
+mlt_bridge_play_all_frames(void);
+
 MLT_BRIDGE_EXPORT int
 mlt_bridge_seek_ms(
     int64_t milliseconds
@@ -108,6 +134,87 @@ mlt_bridge_has_audio(void);
 /* ------------------------------------------------------------------------- */
 /* Media properties                                                          */
 /* ------------------------------------------------------------------------- */
+
+/*
+ * Read-only stream inspection. Stream indices are absolute container stream
+ * indices as reported by the avformat producer. Codec strings are empty when
+ * the loaded producer does not expose that metadata.
+ */
+MLT_BRIDGE_EXPORT int
+mlt_bridge_stream_count(void);
+
+MLT_BRIDGE_EXPORT int
+mlt_bridge_video_stream_index(void);
+
+MLT_BRIDGE_EXPORT int
+mlt_bridge_audio_stream_index(void);
+
+MLT_BRIDGE_EXPORT const char *
+mlt_bridge_video_codec_name(void);
+
+MLT_BRIDGE_EXPORT const char *
+mlt_bridge_video_codec_long_name(void);
+
+MLT_BRIDGE_EXPORT const char *
+mlt_bridge_audio_codec_name(void);
+
+MLT_BRIDGE_EXPORT const char *
+mlt_bridge_audio_codec_long_name(void);
+
+/*
+ * Per-stream inspection. Index is the absolute container stream index.
+ * MLT 7.22 explicitly labels video/audio stream types; other stream types
+ * remain enumerable and are reported as "other" when no type label exists.
+ */
+MLT_BRIDGE_EXPORT const char *
+mlt_bridge_stream_type(int index);
+
+MLT_BRIDGE_EXPORT const char *
+mlt_bridge_stream_codec_name(int index);
+
+MLT_BRIDGE_EXPORT const char *
+mlt_bridge_stream_codec_long_name(int index);
+
+MLT_BRIDGE_EXPORT const char *
+mlt_bridge_stream_language(int index);
+
+MLT_BRIDGE_EXPORT int
+mlt_bridge_stream_channels(int index);
+
+MLT_BRIDGE_EXPORT int
+mlt_bridge_stream_sample_rate(int index);
+
+MLT_BRIDGE_EXPORT int
+mlt_bridge_stream_width(int index);
+
+MLT_BRIDGE_EXPORT int
+mlt_bridge_stream_height(int index);
+
+MLT_BRIDGE_EXPORT int64_t
+mlt_bridge_stream_bit_rate(int index);
+
+/*
+ * Source video format/color metadata for the selected video stream.
+ * Strings are empty and integer identifiers are -1 when unavailable.
+ */
+MLT_BRIDGE_EXPORT const char *
+mlt_bridge_video_pixel_format(void);
+
+MLT_BRIDGE_EXPORT int
+mlt_bridge_video_colorspace(void);
+
+MLT_BRIDGE_EXPORT int
+mlt_bridge_video_color_trc(void);
+
+MLT_BRIDGE_EXPORT const char *
+mlt_bridge_video_color_range(void);
+
+/*
+ * Embedded/source starting timecode as reported by the loaded producer.
+ * Returns an empty string when the file does not expose a timecode tag.
+ */
+MLT_BRIDGE_EXPORT const char *
+mlt_bridge_source_timecode(void);
 
 MLT_BRIDGE_EXPORT int64_t
 mlt_bridge_duration_frames(void);
