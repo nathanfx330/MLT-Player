@@ -327,6 +327,61 @@ class _PlayerPageState extends State<PlayerPage>
     _engine.startExport(outputPath);
   }
 
+  Future<void> _exportCurrentFrame() async {
+    final media = _engine.media;
+    if (media == null ||
+        media.isStill ||
+        !media.hasVideo ||
+        _engine.exporting) {
+      return;
+    }
+
+    /*
+     * Snapshot the native visible position before opening the save dialog.
+     * Playback is allowed to continue while the user chooses a filename, but
+     * the exported PNG remains the frame that was current when this command
+     * was invoked.
+     */
+    final sourceFrame = _engine.captureCurrentSourceFrame();
+    if (sourceFrame == null) {
+      return;
+    }
+
+    _showOverlay();
+
+    final name = media.name;
+    final dot = name.lastIndexOf('.');
+    final stem = dot > 0 ? name.substring(0, dot) : name;
+    final clipFrameNumber =
+        _engine.clipFrameForSourceFrame(sourceFrame) + 1;
+    final frameLabel = clipFrameNumber.toString().padLeft(6, '0');
+
+    final location = await getSaveLocation(
+      confirmButtonText: 'Export Frame',
+      suggestedName: '${stem}_frame_$frameLabel.png',
+      acceptedTypeGroups: <XTypeGroup>[
+        XTypeGroup(
+          label: 'PNG Image',
+          extensions: <String>['png'],
+        ),
+      ],
+    );
+
+    if (location == null) {
+      return;
+    }
+
+    var outputPath = location.path;
+    if (!outputPath.toLowerCase().endsWith('.png')) {
+      outputPath = '$outputPath.png';
+    }
+
+    _engine.startFrameExport(
+      outputPath,
+      sourceFrame: sourceFrame,
+    );
+  }
+
   void _toggleInfo() {
     setState(() => _infoOpen = !_infoOpen);
     if (_infoOpen) {
@@ -379,6 +434,16 @@ class _PlayerPageState extends State<PlayerPage>
         controlPressed &&
         key == LogicalKeyboardKey.keyZ) {
       _engine.undo();
+      return KeyEventResult.handled;
+    }
+
+    if (event is KeyDownEvent &&
+        controlPressed &&
+        shiftPressed &&
+        key == LogicalKeyboardKey.keyE) {
+      if (!_engine.exporting) {
+        _exportCurrentFrame();
+      }
       return KeyEventResult.handled;
     }
 
@@ -1198,6 +1263,14 @@ class _PlayerPageState extends State<PlayerPage>
             onPressed: _engine.exporting
                 ? _engine.cancelExport
                 : _exportActiveClip,
+          ),
+          const SizedBox(width: 2),
+          _OverlayButton(
+            icon: Icons.photo_camera_outlined,
+            tooltip: 'Export current frame as PNG (Ctrl+Shift+E)',
+            onPressed: !_engine.exporting && media.hasVideo
+                ? _exportCurrentFrame
+                : null,
           ),
           const SizedBox(width: 2),
           _OverlayButton(

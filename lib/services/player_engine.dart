@@ -671,6 +671,62 @@ class PlayerEngine extends ChangeNotifier {
     return true;
   }
 
+  int? captureCurrentSourceFrame() {
+    final media = _media;
+    if (_opening ||
+        media == null ||
+        media.isStill ||
+        !media.hasVideo ||
+        media.frames <= 0 ||
+        media.fps <= 0 ||
+        _trimOutFrame < _trimInFrame) {
+      return null;
+    }
+
+    final position = bridge.positionMs;
+    final frame = _frameAtPosition(media, position);
+    return frame.clamp(_trimInFrame, _trimOutFrame);
+  }
+
+  bool startFrameExport(String outputPath, {required int sourceFrame}) {
+    final media = _media;
+
+    if (!initialized ||
+        media == null ||
+        media.isStill ||
+        !media.hasVideo ||
+        media.frames <= 0 ||
+        sourceFrame < _trimInFrame ||
+        sourceFrame > _trimOutFrame ||
+        _exporting) {
+      return false;
+    }
+
+    _exportSucceeded = false;
+    _exportError = null;
+    _exportProgress = 0.0;
+    _exportPath = outputPath;
+
+    final started = bridge.startFrameExport(
+      sourcePath: media.path,
+      outputPath: outputPath,
+      frame: sourceFrame,
+    );
+
+    if (!started) {
+      _exporting = false;
+      _exportError = bridge.exportError.isEmpty
+          ? 'MLT could not start frame export.'
+          : bridge.exportError;
+      notifyListeners();
+      return false;
+    }
+
+    _exporting = true;
+    notifyListeners();
+    return true;
+  }
+
   bool startExport(String outputPath) {
     final media = _media;
 

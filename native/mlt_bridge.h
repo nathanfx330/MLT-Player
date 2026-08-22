@@ -64,6 +64,17 @@ mlt_bridge_export_start(
     int64_t out_frame
 );
 
+/*
+ * Export one exact absolute source frame as a PNG using the same independent
+ * background export machinery. Preview playback is not disturbed.
+ */
+MLT_BRIDGE_EXPORT int
+mlt_bridge_export_frame_start(
+    const char *source_path,
+    const char *output_path,
+    int64_t frame
+);
+
 MLT_BRIDGE_EXPORT void
 mlt_bridge_export_cancel(void);
 

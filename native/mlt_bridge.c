@@ -114,11 +114,17 @@ static int export_cancel_requested = 0;
 static double export_progress = 0.0;
 static char export_error[512] = "";
 
+typedef enum _ExportKind {
+    EXPORT_KIND_MP4 = 0,
+    EXPORT_KIND_PNG_FRAME = 1
+} ExportKind;
+
 typedef struct _ExportJob {
     char *source_path;
     char *output_path;
     int64_t in_frame;
     int64_t out_frame;
+    ExportKind kind;
 } ExportJob;
 
 /* ------------------------------------------------------------------------- */
@@ -1674,17 +1680,37 @@ static gpointer export_worker(gpointer data)
     mlt_properties properties =
         MLT_CONSUMER_PROPERTIES(export_consumer);
 
-    /*
-     * POC 9 starts with one dependable delivery preset. The UI can expose
-     * codec/container profiles after the independent render path is proven.
-     */
-    mlt_properties_set(properties, "f", "mp4");
-    mlt_properties_set(properties, "vcodec", "libx264");
-    mlt_properties_set(properties, "acodec", "aac");
-    mlt_properties_set(properties, "pix_fmt", "yuv420p");
-    mlt_properties_set(properties, "preset", "medium");
-    mlt_properties_set_int(properties, "crf", 18);
-    mlt_properties_set(properties, "movflags", "+faststart");
+    if (job->kind == EXPORT_KIND_PNG_FRAME) {
+        /*
+         * A still export is rendered from the source graph, not copied from
+         * Flutter's display texture. That keeps source dimensions and avoids
+         * inheriting any viewport scaling. RGBA also preserves source alpha
+         * when the decoder provides it.
+         */
+        mlt_properties_set(properties, "f", "image2");
+        mlt_properties_set(properties, "vcodec", "png");
+        mlt_properties_set(properties, "pix_fmt", "rgba");
+        mlt_properties_set_int(properties, "an", 1);
+        mlt_properties_set(properties, "mlt_image_format", "rgba");
+
+        /* Match the progressive frame the viewer presents. */
+        mlt_properties_set(properties, "rescale", "bilinear");
+        mlt_properties_set(properties, "deinterlacer", MLT_BRIDGE_DEINTERLACER);
+        mlt_properties_set_int(properties, "top_field_first", -1);
+        mlt_properties_set_int(properties, "progressive", 1);
+    } else {
+        /*
+         * POC 9 starts with one dependable delivery preset. The UI can expose
+         * codec/container profiles after the independent render path is proven.
+         */
+        mlt_properties_set(properties, "f", "mp4");
+        mlt_properties_set(properties, "vcodec", "libx264");
+        mlt_properties_set(properties, "acodec", "aac");
+        mlt_properties_set(properties, "pix_fmt", "yuv420p");
+        mlt_properties_set(properties, "preset", "medium");
+        mlt_properties_set_int(properties, "crf", 18);
+        mlt_properties_set(properties, "movflags", "+faststart");
+    }
 
     /* Export never drops frames. */
     mlt_properties_set_int(properties, "real_time", -1);
@@ -1967,12 +1993,12 @@ void mlt_bridge_shutdown(void)
 /* Export                                                                    */
 /* ------------------------------------------------------------------------- */
 
-MLT_BRIDGE_EXPORT
-int mlt_bridge_export_start(
+static int start_export_job(
     const char *source_path,
     const char *output_path,
     int64_t in_frame,
-    int64_t out_frame)
+    int64_t out_frame,
+    ExportKind kind)
 {
     ensure_locks();
 
@@ -2026,6 +2052,7 @@ int mlt_bridge_export_start(
     job->output_path = g_strdup(output_path);
     job->in_frame = in_frame;
     job->out_frame = out_frame;
+    job->kind = kind;
 
     if (job->source_path == NULL ||
         job->output_path == NULL) {
@@ -2061,6 +2088,37 @@ int mlt_bridge_export_start(
     g_mutex_unlock(&export_mutex);
 
     return 1;
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_export_start(
+    const char *source_path,
+    const char *output_path,
+    int64_t in_frame,
+    int64_t out_frame)
+{
+    return start_export_job(
+        source_path,
+        output_path,
+        in_frame,
+        out_frame,
+        EXPORT_KIND_MP4
+    );
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_export_frame_start(
+    const char *source_path,
+    const char *output_path,
+    int64_t frame)
+{
+    return start_export_job(
+        source_path,
+        output_path,
+        frame,
+        frame,
+        EXPORT_KIND_PNG_FRAME
+    );
 }
 
 MLT_BRIDGE_EXPORT
