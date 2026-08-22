@@ -1,505 +1,17 @@
 // lib/main.dart
 
 import 'dart:async';
-import 'dart:ffi';
-import 'dart:isolate';
 import 'dart:ui' show FontFeature;
 
-import 'package:ffi/ffi.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-// ---------------------------------------------------------------------------
-// Native bindings
-// ---------------------------------------------------------------------------
-
-typedef _IntNative = Int32 Function();
-typedef _IntDart = int Function();
-
-typedef _Int64Native = Int64 Function();
-typedef _Int64Dart = int Function();
-
-typedef _DoubleNative = Double Function();
-typedef _DoubleDart = double Function();
-
-typedef _StringNative = Pointer<Utf8> Function();
-typedef _StringDart = Pointer<Utf8> Function();
-
-typedef _VoidNative = Void Function();
-typedef _VoidDart = void Function();
-
-typedef _OpenNative = Int32 Function(Pointer<Utf8>);
-typedef _OpenDart = int Function(Pointer<Utf8>);
-
-typedef _SeekNative = Int32 Function(Int64);
-typedef _SeekDart = int Function(int);
-
-typedef _SetVolumeNative = Void Function(Double);
-typedef _SetVolumeDart = void Function(double);
-
-/// Thin wrapper over libmlt_bridge.so.
-///
-/// The library is resolved out of the running process rather than opened
-/// by path. The Linux runner already links it, so it is loaded before Dart
-/// starts, and looking it up this way guarantees Dart and the runner share
-/// one copy of the bridge's state. Opening it by path would work only as
-/// long as the path resolved to the same file the runner linked, and the
-/// failure mode when it does not is silent: two independent players, one
-/// of which owns the texture and the other of which owns the media.
-class MltBridge {
-  MltBridge() : _library = DynamicLibrary.process() {
-    _init = _library.lookupFunction<_IntNative, _IntDart>('mlt_bridge_init');
-    _shutdown =
-        _library.lookupFunction<_VoidNative, _VoidDart>('mlt_bridge_shutdown');
-    _version = _library
-        .lookupFunction<_StringNative, _StringDart>('mlt_bridge_version');
-    _lastError = _library
-        .lookupFunction<_StringNative, _StringDart>('mlt_bridge_last_error');
-
-    _textureId = _library
-        .lookupFunction<_Int64Native, _Int64Dart>('mlt_bridge_texture_id');
-
-    _open = _library.lookupFunction<_OpenNative, _OpenDart>('mlt_bridge_open');
-    _closeMedia = _library
-        .lookupFunction<_VoidNative, _VoidDart>('mlt_bridge_close_media');
-
-    _play = _library.lookupFunction<_IntNative, _IntDart>('mlt_bridge_play');
-    _pause = _library.lookupFunction<_IntNative, _IntDart>('mlt_bridge_pause');
-    _seek = _library.lookupFunction<_SeekNative, _SeekDart>('mlt_bridge_seek_ms');
-
-    _positionMs = _library
-        .lookupFunction<_Int64Native, _Int64Dart>('mlt_bridge_position_ms');
-    _isPlaying =
-        _library.lookupFunction<_IntNative, _IntDart>('mlt_bridge_is_playing');
-    _isEof = _library.lookupFunction<_IntNative, _IntDart>('mlt_bridge_is_eof');
-
-    _setVolume = _library.lookupFunction<_SetVolumeNative, _SetVolumeDart>(
-        'mlt_bridge_set_volume');
-    _volume = _library
-        .lookupFunction<_DoubleNative, _DoubleDart>('mlt_bridge_volume');
-    _hasAudio =
-        _library.lookupFunction<_IntNative, _IntDart>('mlt_bridge_has_audio');
-
-    _durationFrames = _library
-        .lookupFunction<_Int64Native, _Int64Dart>('mlt_bridge_duration_frames');
-    _durationMs = _library
-        .lookupFunction<_Int64Native, _Int64Dart>('mlt_bridge_duration_ms');
-    _fps = _library.lookupFunction<_DoubleNative, _DoubleDart>('mlt_bridge_fps');
-    _width = _library.lookupFunction<_IntNative, _IntDart>('mlt_bridge_width');
-    _height = _library.lookupFunction<_IntNative, _IntDart>('mlt_bridge_height');
-    _displayAspect = _library.lookupFunction<_DoubleNative, _DoubleDart>(
-        'mlt_bridge_display_aspect');
-    _isStill =
-        _library.lookupFunction<_IntNative, _IntDart>('mlt_bridge_is_still');
-  }
-
-  final DynamicLibrary _library;
-
-  late final _IntDart _init;
-  late final _VoidDart _shutdown;
-  late final _StringDart _version;
-  late final _StringDart _lastError;
-  late final _Int64Dart _textureId;
-  late final _OpenDart _open;
-  late final _VoidDart _closeMedia;
-  late final _IntDart _play;
-  late final _IntDart _pause;
-  late final _SeekDart _seek;
-  late final _Int64Dart _positionMs;
-  late final _IntDart _isPlaying;
-  late final _IntDart _isEof;
-  late final _SetVolumeDart _setVolume;
-  late final _DoubleDart _volume;
-  late final _IntDart _hasAudio;
-  late final _Int64Dart _durationFrames;
-  late final _Int64Dart _durationMs;
-  late final _DoubleDart _fps;
-  late final _IntDart _width;
-  late final _IntDart _height;
-  late final _DoubleDart _displayAspect;
-  late final _IntDart _isStill;
-
-  bool initialize() => _init() != 0;
-  void shutdown() => _shutdown();
-
-  String get version => _version().toDartString();
-  String get lastError => _lastError().toDartString();
-
-  int get textureId => _textureId();
-
-  bool open(String path) {
-    final nativePath = path.toNativeUtf8(allocator: malloc);
-    try {
-      return _open(nativePath) != 0;
-    } finally {
-      malloc.free(nativePath);
-    }
-  }
-
-  void closeMedia() => _closeMedia();
-
-  bool play() => _play() != 0;
-  bool pause() => _pause() != 0;
-  bool seekMs(int milliseconds) => _seek(milliseconds) != 0;
-
-  int get positionMs => _positionMs();
-  bool get isPlaying => _isPlaying() != 0;
-  bool get isEof => _isEof() != 0;
-
-  set volume(double value) => _setVolume(value);
-  double get volume => _volume();
-  bool get hasAudio => _hasAudio() != 0;
-
-  int get durationFrames => _durationFrames();
-  int get durationMs => _durationMs();
-  double get fps => _fps();
-  int get width => _width();
-  int get height => _height();
-  double get displayAspect => _displayAspect();
-  bool get isStill => _isStill() != 0;
-}
-
-/// Entry point for the helper isolate that performs the open.
-///
-/// Opening a file probes the container twice and starts the audio consumer,
-/// which takes long enough to be visible as a stall. Running it here keeps
-/// the frame pump alive so the progress indicator is honest.
-///
-/// The isolate looks the library up in the same process, so it operates on
-/// exactly the same engine state as the main isolate. The native side
-/// serialises the call.
-bool _openOnHelperIsolate(String path) => MltBridge().open(path);
-
-// ---------------------------------------------------------------------------
-// Host channel
-// ---------------------------------------------------------------------------
-
-/// Talks to the GTK runner for the things Dart cannot reach: the external
-/// texture id, window state, and files dropped onto the window.
-class HostChannel {
-  HostChannel({
-    required this.onTextureRegistered,
-    required this.onPathOpened,
-  }) {
-    _channel.setMethodCallHandler(_handle);
-  }
-
-  static const MethodChannel _channel = MethodChannel('mlt_player/host');
-
-  final void Function(int textureId) onTextureRegistered;
-  final void Function(String path) onPathOpened;
-
-  Future<dynamic> _handle(MethodCall call) async {
-    switch (call.method) {
-      case 'textureRegistered':
-        final id = call.arguments as int?;
-        if (id != null) {
-          onTextureRegistered(id);
-        }
-        return null;
-      case 'openPath':
-        final path = call.arguments as String?;
-        if (path != null && path.isNotEmpty) {
-          onPathOpened(path);
-        }
-        return null;
-      default:
-        throw MissingPluginException('Unknown method ${call.method}');
-    }
-  }
-
-  Future<int> textureId() async {
-    try {
-      final id = await _channel.invokeMethod<int>('getTextureId');
-      return id ?? -1;
-    } on PlatformException {
-      return -1;
-    } on MissingPluginException {
-      return -1;
-    }
-  }
-
-  Future<void> setFullscreen(bool fullscreen) async {
-    try {
-      await _channel.invokeMethod<void>('setFullscreen', fullscreen);
-    } on PlatformException {
-      // The window simply stays as it is.
-    } on MissingPluginException {
-      // Ditto.
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Model
-// ---------------------------------------------------------------------------
-
-class MediaInfo {
-  const MediaInfo({
-    required this.path,
-    required this.width,
-    required this.height,
-    required this.displayAspect,
-    required this.fps,
-    required this.frames,
-    required this.durationMs,
-    required this.hasAudio,
-    required this.isStill,
-  });
-
-  final String path;
-  final int width;
-  final int height;
-  final double displayAspect;
-  final double fps;
-  final int frames;
-  final int durationMs;
-  final bool hasAudio;
-  final bool isStill;
-
-  String get name {
-    final normalised = path.replaceAll('\\', '/');
-    final slash = normalised.lastIndexOf('/');
-    return slash == -1 ? normalised : normalised.substring(slash + 1);
-  }
-
-  bool get hasVideo => width > 0 && height > 0;
-
-  /// Pixel dimensions divided by display aspect tells you whether the
-  /// source is anamorphic, which the viewport has to correct for.
-  bool get isAnamorphic {
-    if (!hasVideo || displayAspect <= 0) {
-      return false;
-    }
-    final pixelAspect = width / height;
-    return (pixelAspect - displayAspect).abs() > 0.01;
-  }
-
-  double get viewportAspect {
-    if (displayAspect > 0) {
-      return displayAspect;
-    }
-    if (hasVideo) {
-      return width / height;
-    }
-    return 16 / 9;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Engine
-// ---------------------------------------------------------------------------
-
-/// Owns the native player and the polling loop, and nothing about layout.
-class PlayerEngine extends ChangeNotifier {
-  PlayerEngine(this.bridge, {required this.initialized}) {
-    _volume = initialized ? bridge.volume : 1.0;
-    _poll = Timer.periodic(const Duration(milliseconds: 100), (_) => _tick());
-  }
-
-  final MltBridge bridge;
-  final bool initialized;
-
-  Timer? _poll;
-
-  MediaInfo? _media;
-  String? _error;
-
-  bool _opening = false;
-  bool _playing = false;
-  bool _eof = false;
-
-  int _positionMs = 0;
-  int _textureId = -1;
-
-  double _volume = 1.0;
-  double _volumeBeforeMute = 1.0;
-  bool _muted = false;
-
-  MediaInfo? get media => _media;
-  String? get error => _error;
-  bool get opening => _opening;
-  bool get playing => _playing;
-  bool get eof => _eof;
-  int get positionMs => _positionMs;
-  int get textureId => _textureId;
-  double get volume => _volume;
-  bool get muted => _muted;
-  bool get hasMedia => _media != null;
-
-  int get durationMs => _media?.durationMs ?? 0;
-  bool get hasTimeline => durationMs > 0;
-
-  set textureId(int value) {
-    if (value != _textureId) {
-      _textureId = value;
-      notifyListeners();
-    }
-  }
-
-  void _tick() {
-    // Every native getter takes the engine lock, which open() holds for
-    // its whole duration. Polling through an open would serialise the
-    // main isolate against it and undo the point of the helper isolate.
-    if (_opening || _media == null) {
-      return;
-    }
-
-    final position = bridge.positionMs;
-    final playing = bridge.isPlaying;
-    final eof = bridge.isEof;
-
-    if (position != _positionMs || playing != _playing || eof != _eof) {
-      _positionMs = position;
-      _playing = playing;
-      _eof = eof;
-      notifyListeners();
-    }
-  }
-
-  Future<bool> open(String path) async {
-    if (!initialized || _opening) {
-      return false;
-    }
-
-    _opening = true;
-    _error = null;
-    notifyListeners();
-
-    bool opened;
-    try {
-      opened = await Isolate.run(() => _openOnHelperIsolate(path));
-    } catch (error) {
-      _opening = false;
-      _error = error.toString();
-      notifyListeners();
-      return false;
-    }
-
-    _opening = false;
-
-    if (!opened) {
-      _media = null;
-      _playing = false;
-      _eof = false;
-      _positionMs = 0;
-      _error = bridge.lastError.isEmpty
-          ? 'MLT could not open that file.'
-          : bridge.lastError;
-      notifyListeners();
-      return false;
-    }
-
-    _media = MediaInfo(
-      path: path,
-      width: bridge.width,
-      height: bridge.height,
-      displayAspect: bridge.displayAspect,
-      fps: bridge.fps,
-      frames: bridge.durationFrames,
-      durationMs: bridge.durationMs,
-      hasAudio: bridge.hasAudio,
-      isStill: bridge.isStill,
-    );
-
-    _playing = false;
-    _eof = false;
-    _positionMs = 0;
-    _error = null;
-
-    final id = bridge.textureId;
-    if (id > 0) {
-      _textureId = id;
-    }
-
-    // Volume survives the new consumer, but read it back rather than
-    // assuming, so the slider always shows what the engine actually has.
-    _volume = bridge.volume;
-    _muted = _volume <= 0.0;
-
-    notifyListeners();
-    return true;
-  }
-
-  void togglePlayback() {
-    final media = _media;
-    if (media == null || media.isStill) {
-      return;
-    }
-
-    final ok = _playing ? bridge.pause() : bridge.play();
-    if (!ok) {
-      _error = bridge.lastError;
-      notifyListeners();
-      return;
-    }
-
-    _playing = !_playing;
-    _positionMs = bridge.positionMs;
-    _eof = bridge.isEof;
-    _error = null;
-    notifyListeners();
-  }
-
-  void seekTo(int targetMs) {
-    final media = _media;
-    if (media == null || media.durationMs <= 0) {
-      return;
-    }
-
-    final clamped = targetMs.clamp(0, media.durationMs);
-    if (!bridge.seekMs(clamped)) {
-      _error = bridge.lastError;
-      notifyListeners();
-      return;
-    }
-
-    _positionMs = clamped;
-    _eof = false;
-    _error = null;
-    notifyListeners();
-  }
-
-  void seekBy(int deltaMs) => seekTo(_positionMs + deltaMs);
-
-  void setVolume(double value) {
-    final clamped = value.clamp(0.0, 1.0);
-    _volume = clamped;
-    _muted = clamped <= 0.0;
-    if (!_muted) {
-      _volumeBeforeMute = clamped;
-    }
-    bridge.volume = clamped;
-    notifyListeners();
-  }
-
-  void adjustVolume(double delta) => setVolume(_volume + delta);
-
-  void toggleMute() {
-    if (_muted || _volume <= 0.0) {
-      setVolume(_volumeBeforeMute <= 0.0 ? 1.0 : _volumeBeforeMute);
-    } else {
-      _volumeBeforeMute = _volume;
-      setVolume(0.0);
-    }
-  }
-
-  void clearError() {
-    if (_error != null) {
-      _error = null;
-      notifyListeners();
-    }
-  }
-
-  @override
-  void dispose() {
-    _poll?.cancel();
-    _poll = null;
-    bridge.shutdown();
-    super.dispose();
-  }
-}
+import 'models/media_info.dart';
+import 'services/host_channel.dart';
+import 'services/mlt_bridge.dart';
+import 'services/player_engine.dart';
+import 'ui/widgets/media_inspector.dart';
 
 // ---------------------------------------------------------------------------
 // Application
@@ -577,8 +89,6 @@ class PlayerPage extends StatefulWidget {
 class _PlayerPageState extends State<PlayerPage>
     with TickerProviderStateMixin {
   static const Duration _overlayLinger = Duration(milliseconds: 2600);
-  static const int _shortStepMs = 5000;
-  static const int _longStepMs = 10000;
 
   late final PlayerEngine _engine;
   late final HostChannel _host;
@@ -599,6 +109,8 @@ class _PlayerPageState extends State<PlayerPage>
 
   bool _scrubbing = false;
   double _scrubMs = 0;
+
+  bool _showTransportTimecode = false;
 
   @override
   void initState() {
@@ -811,32 +323,36 @@ class _PlayerPageState extends State<PlayerPage>
     }
 
     final key = event.logicalKey;
-    final shift = HardwareKeyboard.instance.isShiftPressed;
 
     _showOverlay();
 
-    if (key == LogicalKeyboardKey.space || key == LogicalKeyboardKey.keyK) {
+    if (key == LogicalKeyboardKey.space) {
       _engine.togglePlayback();
       return KeyEventResult.handled;
     }
 
+    if (key == LogicalKeyboardKey.keyK) {
+      _engine.pausePlayback();
+      return KeyEventResult.handled;
+    }
+
     if (key == LogicalKeyboardKey.arrowLeft) {
-      _engine.seekBy(shift ? -_longStepMs : -_shortStepMs);
+      _engine.stepFrames(-1);
       return KeyEventResult.handled;
     }
 
     if (key == LogicalKeyboardKey.arrowRight) {
-      _engine.seekBy(shift ? _longStepMs : _shortStepMs);
+      _engine.stepFrames(1);
       return KeyEventResult.handled;
     }
 
     if (key == LogicalKeyboardKey.keyJ) {
-      _engine.seekBy(-_longStepMs);
+      _engine.shuttleReverse();
       return KeyEventResult.handled;
     }
 
     if (key == LogicalKeyboardKey.keyL) {
-      _engine.seekBy(_longStepMs);
+      _engine.shuttleForward();
       return KeyEventResult.handled;
     }
 
@@ -907,6 +423,70 @@ class _PlayerPageState extends State<PlayerPage>
       return '${hours.toString().padLeft(2, '0')}:$mm:$ss';
     }
     return '$mm:$ss';
+  }
+
+  static int _frameForPosition(MediaInfo media, int milliseconds) {
+    if (media.frames <= 0 || media.fps <= 0) {
+      return 0;
+    }
+
+    final frame = ((milliseconds / 1000.0) * media.fps).round();
+    return frame.clamp(0, media.frames - 1);
+  }
+
+  String _formatTransportReadout(MediaInfo media, int milliseconds) {
+    final frame = _frameForPosition(media, milliseconds);
+    final speed = _engine.speed;
+
+    final speedText = speed == 0.0
+        ? 'Paused'
+        : '${speed > 0 ? '+' : ''}${speed.toStringAsFixed(0)}×';
+
+    if (_showTransportTimecode) {
+      return 'TC ${_formatClipTimecode(media, frame)}  ·  $speedText';
+    }
+
+    return 'Frame ${frame + 1} / ${media.frames}  ·  $speedText';
+  }
+
+  static String _formatClipTimecode(MediaInfo media, int frame) {
+    final nominalFps = media.fps.round();
+    if (nominalFps <= 0) {
+      return '00:00:00:00';
+    }
+
+    final framesPer24Hours = nominalFps * 60 * 60 * 24;
+    var value = frame % framesPer24Hours;
+    if (value < 0) {
+      value += framesPer24Hours;
+    }
+
+    final hours = value ~/ (nominalFps * 3600);
+    value %= nominalFps * 3600;
+    final minutes = value ~/ (nominalFps * 60);
+    value %= nominalFps * 60;
+    final seconds = value ~/ nominalFps;
+    final frames = value % nominalFps;
+
+    final hh = hours.toString().padLeft(2, '0');
+    final mm = minutes.toString().padLeft(2, '0');
+    final ss = seconds.toString().padLeft(2, '0');
+    final ff = frames.toString().padLeft(2, '0');
+
+    return '$hh:$mm:$ss:$ff';
+  }
+
+  static String? _formatSourceTimecode(
+    MediaInfo media,
+    int milliseconds,
+  ) {
+    final source = media.sourceTimecode;
+    if (source == null) {
+      return null;
+    }
+
+    final frame = _frameForPosition(media, milliseconds);
+    return source.atOffset(frame);
   }
 
   // -------------------------------------------------------------------------
@@ -1121,7 +701,7 @@ class _PlayerPageState extends State<PlayerPage>
           ),
         );
       },
-      child: _InfoPanel(media: media),
+      child: MediaInspector(media: media),
     );
   }
 
@@ -1157,19 +737,79 @@ class _PlayerPageState extends State<PlayerPage>
 
     final showHours = durationMs >= 3600000;
 
+    final displayPositionMs =
+        _scrubbing ? _scrubMs.round() : _positionForDisplay();
+
     return Row(
       children: [
         SizedBox(
-          width: showHours ? 66 : 48,
-          child: Text(
-            _formatClock(
-              _scrubbing ? _scrubMs.round() : _positionForDisplay(),
-              forceHours: showHours,
-            ),
-            style: const TextStyle(
-              fontSize: 12,
-              fontFeatures: [FontFeature.tabularFigures()],
-            ),
+          width: showHours ? 190 : 172,
+          child: Builder(
+            builder: (context) {
+              final sourceTimecode =
+                  _formatSourceTimecode(media, displayPositionMs);
+
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    _formatClock(
+                      displayPositionMs,
+                      forceHours: showHours,
+                    ),
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontFeatures: [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                  const SizedBox(height: 1),
+                  Tooltip(
+                    message: _showTransportTimecode
+                        ? 'Click to show frame number'
+                        : 'Click to show clip timecode',
+                    child: MouseRegion(
+                      cursor: SystemMouseCursors.click,
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: () {
+                          setState(() {
+                            _showTransportTimecode =
+                                !_showTransportTimecode;
+                          });
+                          _showOverlay();
+                        },
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 2),
+                          child: Text(
+                            _formatTransportReadout(
+                              media,
+                              displayPositionMs,
+                            ),
+                            style: const TextStyle(
+                              fontSize: 10,
+                              color: Colors.white54,
+                              fontFeatures: [FontFeature.tabularFigures()],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  if (sourceTimecode != null) ...[
+                    const SizedBox(height: 1),
+                    Text(
+                      'SRC $sourceTimecode',
+                      style: const TextStyle(
+                        fontSize: 10,
+                        color: Colors.white70,
+                        fontFeatures: [FontFeature.tabularFigures()],
+                      ),
+                    ),
+                  ],
+                ],
+              );
+            },
           ),
         ),
         Expanded(
@@ -1235,15 +875,34 @@ class _PlayerPageState extends State<PlayerPage>
             onPressed: _engine.togglePlayback,
           ),
           _OverlayButton(
-            icon: Icons.replay_10,
-            tooltip: 'Back 10 seconds (J)',
-            onPressed: () => _engine.seekBy(-_longStepMs),
+            icon: Icons.fast_rewind,
+            tooltip: 'Shuttle reverse (J)',
+            onPressed: _engine.shuttleReverse,
           ),
           _OverlayButton(
-            icon: Icons.forward_10,
-            tooltip: 'Forward 10 seconds (L)',
-            onPressed: () => _engine.seekBy(_longStepMs),
+            icon: Icons.fast_forward,
+            tooltip: 'Shuttle forward (L)',
+            onPressed: _engine.shuttleForward,
           ),
+          const SizedBox(width: 4),
+          _ModeButton(
+            label: 'ALL FRAMES',
+            tooltip: _engine.playAllFrames
+                ? 'Play All Frames is on — click for real-time playback'
+                : 'Play All Frames — never drop video frames',
+            active: _engine.playAllFrames,
+            onPressed: _engine.togglePlayAllFrames,
+          ),
+          const SizedBox(width: 4),
+          _ModeButton(
+            label: 'LOOP',
+            tooltip: _engine.repeatMode == PlaybackRepeatMode.loop
+                ? 'Loop playback is on'
+                : 'Loop playback at the media boundaries',
+            active: _engine.repeatMode == PlaybackRepeatMode.loop,
+            onPressed: _engine.toggleLoop,
+          ),
+          const SizedBox(width: 4),
           if (media.hasAudio) _buildVolume(),
         ],
         const Spacer(),
@@ -1352,6 +1011,48 @@ class _OverlayFade extends StatelessWidget {
   }
 }
 
+class _ModeButton extends StatelessWidget {
+  const _ModeButton({
+    required this.label,
+    required this.tooltip,
+    required this.active,
+    required this.onPressed,
+  });
+
+  final String label;
+  final String tooltip;
+  final bool active;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: TextButton(
+        onPressed: onPressed,
+        style: TextButton.styleFrom(
+          foregroundColor: active ? Colors.black : Colors.white70,
+          backgroundColor: active ? const Color(0xFFE8A33D) : Colors.white10,
+          minimumSize: const Size(0, 30),
+          padding: const EdgeInsets.symmetric(horizontal: 9),
+          visualDensity: VisualDensity.compact,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(6),
+          ),
+        ),
+        child: Text(
+          label,
+          style: const TextStyle(
+            fontSize: 10,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 0.45,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _OverlayButton extends StatelessWidget {
   const _OverlayButton({
     required this.icon,
@@ -1375,101 +1076,6 @@ class _OverlayButton extends StatelessWidget {
       visualDensity: VisualDensity.compact,
       icon: Icon(icon),
       onPressed: onPressed,
-    );
-  }
-}
-
-class _InfoPanel extends StatelessWidget {
-  const _InfoPanel({required this.media});
-
-  final MediaInfo media;
-
-  @override
-  Widget build(BuildContext context) {
-    final items = <Widget>[
-      _InfoItem(
-        label: 'Resolution',
-        value: media.hasVideo ? '${media.width} x ${media.height}' : 'None',
-      ),
-      _InfoItem(
-        label: 'Display aspect',
-        value: media.displayAspect > 0
-            ? media.displayAspect.toStringAsFixed(4) +
-                (media.isAnamorphic ? '  (anamorphic)' : '')
-            : 'Unknown',
-      ),
-      _InfoItem(
-        label: 'Frame rate',
-        value: media.fps > 0 ? '${media.fps.toStringAsFixed(3)} fps' : 'None',
-      ),
-      _InfoItem(
-        label: 'Frames',
-        value: media.frames > 0 ? media.frames.toString() : 'None',
-      ),
-      _InfoItem(
-        label: 'Audio',
-        value: media.hasAudio ? 'Present' : 'None',
-      ),
-      _InfoItem(
-        label: 'Kind',
-        value: media.isStill ? 'Still image' : 'Timed media',
-      ),
-    ];
-
-    return Container(
-      width: double.infinity,
-      margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
-      decoration: BoxDecoration(
-        color: const Color(0xE01A1A1A),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: Colors.white12),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            media.name,
-            style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
-          ),
-          const SizedBox(height: 4),
-          SelectableText(
-            media.path,
-            style: const TextStyle(fontSize: 11, color: Colors.white54),
-          ),
-          const SizedBox(height: 14),
-          Wrap(spacing: 28, runSpacing: 14, children: items),
-        ],
-      ),
-    );
-  }
-}
-
-class _InfoItem extends StatelessWidget {
-  const _InfoItem({required this.label, required this.value});
-
-  final String label;
-  final String value;
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      width: 160,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            label.toUpperCase(),
-            style: const TextStyle(
-              fontSize: 10,
-              letterSpacing: 0.8,
-              color: Colors.white38,
-            ),
-          ),
-          const SizedBox(height: 3),
-          Text(value, style: const TextStyle(fontSize: 13)),
-        ],
-      ),
     );
   }
 }
