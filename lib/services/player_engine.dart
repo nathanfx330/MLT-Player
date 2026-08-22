@@ -1221,6 +1221,16 @@ class PlayerEngine extends ChangeNotifier {
     return frame.clamp(0, media.frames - 1);
   }
 
+  @visibleForTesting
+  static int midpointMsForFrameForTesting(MediaInfo media, int frame) {
+    return _midpointMsForFrame(media, frame);
+  }
+
+  @visibleForTesting
+  static int frameAtPositionForTesting(MediaInfo media, int positionMs) {
+    return _frameAtPosition(media, positionMs);
+  }
+
   void stepFrames(int deltaFrames) {
     final media = _media;
     if (media == null || media.isStill || media.frames <= 0 || media.fps <= 0) {

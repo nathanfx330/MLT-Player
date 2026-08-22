@@ -143,6 +143,8 @@ typedef struct _FrameSlot {
  * held. Only the index swap is contended.
  */
 static GMutex frame_mutex;
+static GCond frame_idle_cond;
+static int active_frame_readers = 0;
 
 static FrameSlot slots[MLT_BRIDGE_SLOT_COUNT];
 
@@ -201,6 +203,7 @@ static void ensure_locks(void)
     if (g_once_init_enter(&locks_initialized)) {
         g_mutex_init(&engine_mutex);
         g_mutex_init(&frame_mutex);
+        g_cond_init(&frame_idle_cond);
         g_mutex_init(&texture_mutex);
         g_mutex_init(&export_mutex);
 
@@ -233,11 +236,24 @@ static void set_error(
 /* Frame slots                                                               */
 /* ------------------------------------------------------------------------- */
 
+/*
+ * Free the shared frame buffers only after the MLT consumer has stopped.
+ * The producer callback can then no longer own slot_write. A Flutter raster
+ * callback may still be finishing an upload, so wait for every active reader
+ * to leave before invalidating any slot storage.
+ */
 static void release_slots(void)
 {
     ensure_locks();
 
     g_mutex_lock(&frame_mutex);
+
+    while (active_frame_readers > 0) {
+        g_cond_wait(
+            &frame_idle_cond,
+            &frame_mutex
+        );
+    }
 
     for (int index = 0;
          index < MLT_BRIDGE_SLOT_COUNT;
@@ -316,6 +332,8 @@ static gboolean mlt_video_texture_populate(
     const int display_index =
         slot_display;
 
+    active_frame_readers += 1;
+
     g_mutex_unlock(&frame_mutex);
 
     FrameSlot *slot =
@@ -324,6 +342,16 @@ static gboolean mlt_video_texture_populate(
     if (slot->data == NULL ||
         slot->width <= 0 ||
         slot->height <= 0) {
+        g_mutex_lock(&frame_mutex);
+
+        active_frame_readers -= 1;
+
+        if (active_frame_readers == 0) {
+            g_cond_broadcast(&frame_idle_cond);
+        }
+
+        g_mutex_unlock(&frame_mutex);
+
         return FALSE;
     }
 
@@ -410,6 +438,16 @@ static gboolean mlt_video_texture_populate(
     *name = self->gl_texture_id;
     *width = (uint32_t)slot->width;
     *height = (uint32_t)slot->height;
+
+    g_mutex_lock(&frame_mutex);
+
+    active_frame_readers -= 1;
+
+    if (active_frame_readers == 0) {
+        g_cond_broadcast(&frame_idle_cond);
+    }
+
+    g_mutex_unlock(&frame_mutex);
 
     return TRUE;
 }
@@ -640,6 +678,9 @@ static void on_consumer_frame_show(
     notify_flutter_frame_available();
 }
 
+/* close_consumer_locked() is defined with the producer helpers below. */
+static void close_consumer_locked(void);
+
 /* ------------------------------------------------------------------------- */
 /* Flutter texture registration                                              */
 /* ------------------------------------------------------------------------- */
@@ -716,6 +757,18 @@ MLT_BRIDGE_EXPORT
 void mlt_bridge_unregister_flutter_texture(void)
 {
     ensure_locks();
+
+    /*
+     * Slot storage is shared with the MLT frame callback. Stop and join the
+     * consumer before detaching the Flutter texture so the writer cannot be
+     * inside realloc()/memcpy() when release_slots() frees the buffers.
+     *
+     * This is intentionally safe to call after mlt_bridge_shutdown(): in that
+     * case the consumer is already NULL and close_consumer_locked() is a no-op.
+     */
+    g_mutex_lock(&engine_mutex);
+    close_consumer_locked();
+    g_mutex_unlock(&engine_mutex);
 
     g_mutex_lock(&texture_mutex);
 
