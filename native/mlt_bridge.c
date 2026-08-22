@@ -58,8 +58,40 @@ static int has_audio = 0;
 static int is_still = 0;
 
 static double requested_volume = 1.0;
+static int requested_play_all_frames = 0;
+
+/* Read-only stream inspection captured when a producer is opened. */
+static int stream_count = 0;
+static int selected_video_stream_index = -1;
+static int selected_audio_stream_index = -1;
+
+static char video_codec_name[128] = "";
+static char video_codec_long_name[256] = "";
+static char audio_codec_name[128] = "";
+static char audio_codec_long_name[256] = "";
+
+static char video_pixel_format[128] = "";
+static int video_colorspace = -1;
+static int video_color_trc = -1;
+static char video_color_range[32] = "";
+
+typedef struct _StreamInspection {
+    char type[32];
+    char codec_name[128];
+    char codec_long_name[256];
+    char language[64];
+    int channels;
+    int sample_rate;
+    int width;
+    int height;
+    int64_t bit_rate;
+} StreamInspection;
+
+static StreamInspection *stream_inspection = NULL;
+static int stream_inspection_count = 0;
 
 static char last_error[512] = "";
+static char source_timecode[128] = "";
 
 /* Published for the frame callback without taking engine_mutex. */
 static gint target_width = 0;
@@ -739,6 +771,26 @@ static void close_producer_locked(void)
     has_audio = 0;
     is_still = 0;
 
+    stream_count = 0;
+    selected_video_stream_index = -1;
+    selected_audio_stream_index = -1;
+
+    video_codec_name[0] = '\0';
+    video_codec_long_name[0] = '\0';
+    audio_codec_name[0] = '\0';
+    audio_codec_long_name[0] = '\0';
+
+    video_pixel_format[0] = '\0';
+    video_colorspace = -1;
+    video_color_trc = -1;
+    video_color_range[0] = '\0';
+
+    free(stream_inspection);
+    stream_inspection = NULL;
+    stream_inspection_count = 0;
+
+    source_timecode[0] = '\0';
+
     g_atomic_int_set(&target_width, 0);
     g_atomic_int_set(&target_height, 0);
 }
@@ -829,6 +881,325 @@ static MediaKind classify_producer_locked(
     return MEDIA_UNSUPPORTED;
 }
 
+/*
+ * Copy the codec metadata for one absolute stream index into bridge-owned
+ * storage. avformat publishes both a short decoder name (for example
+ * "h264") and a human-readable long name. Keeping our own copy means Dart
+ * never holds a pointer into producer properties after the engine lock is
+ * released.
+ */
+static void read_codec_metadata_locked(
+    mlt_properties properties,
+    int stream_index,
+    char *short_name,
+    size_t short_name_size,
+    char *long_name,
+    size_t long_name_size)
+{
+    short_name[0] = '\0';
+    long_name[0] = '\0';
+
+    if (properties == NULL || stream_index < 0) {
+        return;
+    }
+
+    char key[128];
+
+    snprintf(
+        key,
+        sizeof(key),
+        "meta.media.%d.codec.name",
+        stream_index
+    );
+
+    const char *value =
+        mlt_properties_get(properties, key);
+
+    if (value != NULL && value[0] != '\0') {
+        snprintf(
+            short_name,
+            short_name_size,
+            "%s",
+            value
+        );
+    }
+
+    snprintf(
+        key,
+        sizeof(key),
+        "meta.media.%d.codec.long_name",
+        stream_index
+    );
+
+    value = mlt_properties_get(properties, key);
+
+    if (value != NULL && value[0] != '\0') {
+        snprintf(
+            long_name,
+            long_name_size,
+            "%s",
+            value
+        );
+    }
+}
+
+/*
+ * Capture the selected video stream's source pixel/color description.
+ * MLT's avformat producer publishes the source pixel format, an MLT
+ * colorspace identifier, and (when the source declares it) a transfer
+ * characteristic. Color range is copied when MLT exposes it; otherwise we
+ * only infer full range for pixel formats whose naming makes that explicit.
+ */
+static void read_video_color_metadata_locked(
+    mlt_properties properties,
+    int stream_index)
+{
+    video_pixel_format[0] = '\0';
+    video_colorspace = -1;
+    video_color_trc = -1;
+    video_color_range[0] = '\0';
+
+    if (properties == NULL || stream_index < 0) {
+        return;
+    }
+
+    char key[128];
+
+    snprintf(
+        key,
+        sizeof(key),
+        "meta.media.%d.codec.pix_fmt",
+        stream_index
+    );
+
+    const char *value =
+        mlt_properties_get(properties, key);
+
+    if (value != NULL && value[0] != '\0') {
+        snprintf(
+            video_pixel_format,
+            sizeof(video_pixel_format),
+            "%s",
+            value
+        );
+    }
+
+    snprintf(
+        key,
+        sizeof(key),
+        "meta.media.%d.codec.colorspace",
+        stream_index
+    );
+
+    if (mlt_properties_get(properties, key) != NULL) {
+        video_colorspace =
+            mlt_properties_get_int(properties, key);
+    }
+
+    snprintf(
+        key,
+        sizeof(key),
+        "meta.media.%d.codec.color_trc",
+        stream_index
+    );
+
+    if (mlt_properties_get(properties, key) != NULL) {
+        video_color_trc =
+            mlt_properties_get_int(properties, key);
+    }
+
+    value =
+        mlt_properties_get(
+            properties,
+            "meta.media.color_range"
+        );
+
+    if (value != NULL && value[0] != '\0') {
+        if (strcmp(value, "full") == 0 ||
+            strcmp(value, "jpeg") == 0) {
+            snprintf(
+                video_color_range,
+                sizeof(video_color_range),
+                "%s",
+                "Full"
+            );
+        } else if (strcmp(value, "limited") == 0 ||
+                   strcmp(value, "mpeg") == 0) {
+            snprintf(
+                video_color_range,
+                sizeof(video_color_range),
+                "%s",
+                "Limited"
+            );
+        } else {
+            snprintf(
+                video_color_range,
+                sizeof(video_color_range),
+                "%s",
+                value
+            );
+        }
+    } else if (video_pixel_format[0] != '\0' &&
+               (strncmp(video_pixel_format, "yuvj", 4) == 0 ||
+                strstr(video_pixel_format, "rgb") != NULL ||
+                strstr(video_pixel_format, "gbr") != NULL)) {
+        snprintf(
+            video_color_range,
+            sizeof(video_color_range),
+            "%s",
+            "Full"
+        );
+    }
+}
+
+/*
+ * Snapshot every avformat stream into bridge-owned storage. Dart reads this
+ * once when MediaInfo is constructed, so the inspector never polls producer
+ * properties during playback.
+ */
+static void read_stream_inspection_locked(
+    mlt_properties properties)
+{
+    free(stream_inspection);
+    stream_inspection = NULL;
+    stream_inspection_count = 0;
+
+    if (properties == NULL || stream_count <= 0) {
+        return;
+    }
+
+    stream_inspection =
+        calloc((size_t)stream_count, sizeof(StreamInspection));
+
+    if (stream_inspection == NULL) {
+        return;
+    }
+
+    stream_inspection_count = stream_count;
+
+    for (int inspection_index = 0;
+         inspection_index < stream_inspection_count;
+         inspection_index++) {
+        StreamInspection *info = &stream_inspection[inspection_index];
+        char key[160];
+        const char *value = NULL;
+
+        snprintf(
+            key,
+            sizeof(key),
+            "meta.media.%d.stream.type",
+            inspection_index
+        );
+        value = mlt_properties_get(properties, key);
+        snprintf(
+            info->type,
+            sizeof(info->type),
+            "%s",
+            value != NULL && value[0] != '\0' ? value : "other"
+        );
+
+        snprintf(
+            key,
+            sizeof(key),
+            "meta.media.%d.codec.name",
+            inspection_index
+        );
+        value = mlt_properties_get(properties, key);
+        if (value != NULL && value[0] != '\0') {
+            snprintf(info->codec_name, sizeof(info->codec_name), "%s", value);
+        }
+
+        snprintf(
+            key,
+            sizeof(key),
+            "meta.media.%d.codec.long_name",
+            inspection_index
+        );
+        value = mlt_properties_get(properties, key);
+        if (value != NULL && value[0] != '\0') {
+            snprintf(
+                info->codec_long_name,
+                sizeof(info->codec_long_name),
+                "%s",
+                value
+            );
+        }
+
+        snprintf(
+            key,
+            sizeof(key),
+            "meta.attr.%d.stream.language.markup",
+            inspection_index
+        );
+        value = mlt_properties_get(properties, key);
+        if (value != NULL && value[0] != '\0') {
+            snprintf(info->language, sizeof(info->language), "%s", value);
+        }
+
+        snprintf(
+            key,
+            sizeof(key),
+            "meta.media.%d.codec.channels",
+            inspection_index
+        );
+        if (mlt_properties_get(properties, key) != NULL) {
+            info->channels = mlt_properties_get_int(properties, key);
+        }
+
+        snprintf(
+            key,
+            sizeof(key),
+            "meta.media.%d.codec.sample_rate",
+            inspection_index
+        );
+        if (mlt_properties_get(properties, key) != NULL) {
+            info->sample_rate = mlt_properties_get_int(properties, key);
+        }
+
+        snprintf(
+            key,
+            sizeof(key),
+            "meta.media.%d.codec.width",
+            inspection_index
+        );
+        if (mlt_properties_get(properties, key) != NULL) {
+            info->width = mlt_properties_get_int(properties, key);
+        }
+
+        snprintf(
+            key,
+            sizeof(key),
+            "meta.media.%d.codec.height",
+            inspection_index
+        );
+        if (mlt_properties_get(properties, key) != NULL) {
+            info->height = mlt_properties_get_int(properties, key);
+        }
+
+        snprintf(
+            key,
+            sizeof(key),
+            "meta.media.%d.codec.bit_rate",
+            inspection_index
+        );
+        if (mlt_properties_get(properties, key) != NULL) {
+            info->bit_rate = mlt_properties_get_int64(properties, key);
+        }
+    }
+}
+
+static const StreamInspection *stream_inspection_at_locked(int index)
+{
+    if (producer == NULL ||
+        stream_inspection == NULL ||
+        index < 0 ||
+        index >= stream_inspection_count) {
+        return NULL;
+    }
+
+    return &stream_inspection[index];
+}
+
 static int create_consumer_locked(void)
 {
     if (producer == NULL ||
@@ -862,13 +1233,15 @@ static int create_consumer_locked(void)
         MLT_CONSUMER_PROPERTIES(consumer);
 
     /*
-     * Asynchronous with frame dropping. Use -1 to forbid dropping,
-     * or a value above 1 to spread rendering over that many threads.
+     * Normal playback is asynchronous and may drop video frames to keep
+     * real time. QuickTime-style Play All Frames flips MLT to -1, which
+     * disables frame dropping; if rendering cannot keep up, playback slows
+     * instead of skipping pictures.
      */
     mlt_properties_set_int(
         properties,
         "real_time",
-        1
+        requested_play_all_frames ? -1 : 1
     );
 
     /*
@@ -1255,6 +1628,169 @@ int mlt_bridge_open(
                 "audio_index") >= 0;
     }
 
+    /*
+     * Capture the read-only stream topology and codec labels exposed by
+     * avformat. video_index and audio_index are absolute container stream
+     * indices, which is exactly what the inspector should report.
+     */
+    stream_count = 0;
+    selected_video_stream_index = -1;
+    selected_audio_stream_index = -1;
+
+    video_codec_name[0] = '\0';
+    video_codec_long_name[0] = '\0';
+    audio_codec_name[0] = '\0';
+    audio_codec_long_name[0] = '\0';
+
+    video_pixel_format[0] = '\0';
+    video_colorspace = -1;
+    video_color_trc = -1;
+    video_color_range[0] = '\0';
+
+    if (!is_still) {
+        if (mlt_properties_get(
+                producer_properties,
+                "meta.media.nb_streams") != NULL) {
+            stream_count =
+                mlt_properties_get_int(
+                    producer_properties,
+                    "meta.media.nb_streams"
+                );
+        }
+
+        if (mlt_properties_get(
+                producer_properties,
+                "video_index") != NULL) {
+            selected_video_stream_index =
+                mlt_properties_get_int(
+                    producer_properties,
+                    "video_index"
+                );
+        }
+
+        if (mlt_properties_get(
+                producer_properties,
+                "audio_index") != NULL) {
+            selected_audio_stream_index =
+                mlt_properties_get_int(
+                    producer_properties,
+                    "audio_index"
+                );
+        }
+
+        read_codec_metadata_locked(
+            producer_properties,
+            selected_video_stream_index,
+            video_codec_name,
+            sizeof(video_codec_name),
+            video_codec_long_name,
+            sizeof(video_codec_long_name)
+        );
+
+        read_video_color_metadata_locked(
+            producer_properties,
+            selected_video_stream_index
+        );
+
+        read_codec_metadata_locked(
+            producer_properties,
+            selected_audio_stream_index,
+            audio_codec_name,
+            sizeof(audio_codec_name),
+            audio_codec_long_name,
+            sizeof(audio_codec_long_name)
+        );
+
+        read_stream_inspection_locked(producer_properties);
+    }
+
+    /*
+     * avformat passes FFmpeg metadata through as meta.attr.*.markup.
+     * Prefer the selected video stream's timecode, then the container tag,
+     * then any stream-level timecode if the selected stream has none.
+     */
+    source_timecode[0] = '\0';
+
+    const char *timecode = NULL;
+
+    if (!is_still) {
+        const int video_index =
+            mlt_properties_get_int(
+                producer_properties,
+                "video_index"
+            );
+
+        if (video_index >= 0) {
+            char key[128];
+
+            snprintf(
+                key,
+                sizeof(key),
+                "meta.attr.%d.stream.timecode.markup",
+                video_index
+            );
+
+            timecode =
+                mlt_properties_get(
+                    producer_properties,
+                    key
+                );
+        }
+
+        if (timecode == NULL ||
+            timecode[0] == '\0') {
+            timecode =
+                mlt_properties_get(
+                    producer_properties,
+                    "meta.attr.timecode.markup"
+                );
+        }
+
+        if (timecode == NULL ||
+            timecode[0] == '\0') {
+            const int timecode_scan_stream_count =
+                mlt_properties_get_int(
+                    producer_properties,
+                    "meta.media.nb_streams"
+                );
+
+            for (int index = 0;
+                 index < timecode_scan_stream_count;
+                 index++) {
+                char key[128];
+
+                snprintf(
+                    key,
+                    sizeof(key),
+                    "meta.attr.%d.stream.timecode.markup",
+                    index
+                );
+
+                const char *candidate =
+                    mlt_properties_get(
+                        producer_properties,
+                        key
+                    );
+
+                if (candidate != NULL &&
+                    candidate[0] != '\0') {
+                    timecode = candidate;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (timecode != NULL &&
+        timecode[0] != '\0') {
+        snprintf(
+            source_timecode,
+            sizeof(source_timecode),
+            "%s",
+            timecode
+        );
+    }
+
     if (mlt_producer_get_length(producer) <= 0) {
         set_error("The media reports no duration.");
 
@@ -1328,19 +1864,138 @@ void mlt_bridge_close_media(void)
     release_slots();
 }
 
-/* ------------------------------------------------------------------------- */
-/* Transport                                                                 */
-/* ------------------------------------------------------------------------- */
-
 MLT_BRIDGE_EXPORT
-int mlt_bridge_play(void)
+int mlt_bridge_set_play_all_frames(
+    int enabled)
 {
     ensure_locks();
 
     g_mutex_lock(&engine_mutex);
 
-    if (producer == NULL) {
-        set_error("No media is loaded.");
+    const int requested = enabled != 0;
+    const int previous_requested = requested_play_all_frames;
+
+    if (requested == previous_requested) {
+        g_mutex_unlock(&engine_mutex);
+
+        return 1;
+    }
+
+    requested_play_all_frames = requested;
+
+    /*
+     * MLT copies real_time into consumer-private state when the consumer
+     * starts, so changing the property on a running consumer is not enough.
+     * Rebuild only the consumer, preserving the viewer-visible frame and the
+     * producer's current shuttle speed.
+     */
+    if (producer != NULL && consumer != NULL) {
+        const double speed =
+            mlt_producer_get_speed(producer);
+
+        const mlt_position length =
+            mlt_producer_get_length(producer);
+
+        mlt_position position =
+            mlt_producer_position(producer);
+
+        if (!mlt_consumer_is_stopped(consumer) &&
+            speed != 0.0) {
+            position =
+                mlt_consumer_position(consumer);
+
+            if (speed > 0.0) {
+                position += 1;
+            } else {
+                position -= 1;
+            }
+        }
+
+        if (position < 0) {
+            position = 0;
+        }
+
+        if (length > 0 &&
+            position >= length) {
+            position = length - 1;
+        }
+
+        mlt_producer_set_speed(producer, 0.0);
+        close_consumer_locked();
+        mlt_producer_seek(producer, position);
+
+        if (!create_consumer_locked()) {
+            requested_play_all_frames = previous_requested;
+
+            g_mutex_unlock(&engine_mutex);
+
+            invalidate_frames();
+
+            return 0;
+        }
+
+        mlt_producer_set_speed(producer, speed);
+
+        if (mlt_consumer_start(consumer) != 0) {
+            set_error(
+                "MLT could not restart playback "
+                "after changing Play All Frames."
+            );
+
+            close_consumer_locked();
+            requested_play_all_frames = previous_requested;
+
+            g_mutex_unlock(&engine_mutex);
+
+            invalidate_frames();
+
+            return 0;
+        }
+
+        refresh_locked();
+        set_error(NULL);
+    }
+
+    g_mutex_unlock(&engine_mutex);
+
+    invalidate_frames();
+
+    return 1;
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_play_all_frames(void)
+{
+    ensure_locks();
+
+    g_mutex_lock(&engine_mutex);
+
+    const int enabled =
+        requested_play_all_frames;
+
+    g_mutex_unlock(&engine_mutex);
+
+    return enabled;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Transport                                                                 */
+/* ------------------------------------------------------------------------- */
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_set_speed(
+    double speed)
+{
+    if (speed == 0.0) {
+        return mlt_bridge_pause();
+    }
+
+    ensure_locks();
+
+    g_mutex_lock(&engine_mutex);
+
+    if (producer == NULL || is_still) {
+        set_error("No timed media is loaded.");
 
         g_mutex_unlock(&engine_mutex);
 
@@ -1353,23 +2008,67 @@ int mlt_bridge_play(void)
         return 0;
     }
 
+    const double current_speed =
+        mlt_producer_get_speed(producer);
+
     const mlt_position length =
         mlt_producer_get_length(producer);
 
-    const mlt_position position =
+    mlt_position position =
         mlt_producer_position(producer);
 
-    int rewound = 0;
+    int repositioned = 0;
 
-    if (length > 0 &&
+    /*
+     * The producer can be several frames ahead of what the consumer has
+     * actually shown. When shuttle speed changes, anchor the producer to
+     * the visible position before changing direction or magnitude. This
+     * avoids a small but very noticeable jump when tapping J or L.
+     */
+    if (consumer != NULL &&
+        !mlt_consumer_is_stopped(consumer) &&
+        current_speed != 0.0) {
+        position =
+            mlt_consumer_position(consumer);
+
+        if (current_speed > 0.0) {
+            position += 1;
+        } else {
+            position -= 1;
+        }
+
+        if (position < 0) {
+            position = 0;
+        }
+
+        if (length > 0 &&
+            position >= length) {
+            position = length - 1;
+        }
+
+        mlt_consumer_purge(consumer);
+        mlt_producer_seek(producer, position);
+
+        repositioned = 1;
+    }
+
+    if (speed > 0.0 &&
+        length > 0 &&
         position >= length - 1) {
         mlt_consumer_purge(consumer);
         mlt_producer_seek(producer, 0);
 
-        rewound = 1;
+        repositioned = 1;
+    } else if (speed < 0.0 &&
+               length > 0 &&
+               position <= 0) {
+        mlt_consumer_purge(consumer);
+        mlt_producer_seek(producer, length - 1);
+
+        repositioned = 1;
     }
 
-    mlt_producer_set_speed(producer, 1.0);
+    mlt_producer_set_speed(producer, speed);
 
     if (!ensure_consumer_running_locked()) {
         g_mutex_unlock(&engine_mutex);
@@ -1383,11 +2082,36 @@ int mlt_bridge_play(void)
 
     g_mutex_unlock(&engine_mutex);
 
-    if (rewound) {
+    if (repositioned) {
         invalidate_frames();
     }
 
     return 1;
+}
+
+MLT_BRIDGE_EXPORT
+double mlt_bridge_speed(void)
+{
+    ensure_locks();
+
+    g_mutex_lock(&engine_mutex);
+
+    const double speed =
+        producer != NULL &&
+        consumer != NULL &&
+        !mlt_consumer_is_stopped(consumer)
+            ? mlt_producer_get_speed(producer)
+            : 0.0;
+
+    g_mutex_unlock(&engine_mutex);
+
+    return speed;
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_play(void)
+{
+    return mlt_bridge_set_speed(1.0);
 }
 
 MLT_BRIDGE_EXPORT
@@ -1413,10 +2137,19 @@ int mlt_bridge_pause(void)
 
     /*
      * The consumer has already shown the frame it reports, so the
-     * paused position is the next one.
+     * parked position is the next frame in the direction we were moving.
      */
+    const double speed =
+        mlt_producer_get_speed(producer);
+
     mlt_position position =
-        mlt_consumer_position(consumer) + 1;
+        mlt_consumer_position(consumer);
+
+    if (speed > 0.0) {
+        position += 1;
+    } else if (speed < 0.0) {
+        position -= 1;
+    }
 
     const mlt_position length =
         mlt_producer_get_length(producer);
@@ -1681,6 +2414,256 @@ int mlt_bridge_has_audio(void)
 /* ------------------------------------------------------------------------- */
 /* Media properties                                                          */
 /* ------------------------------------------------------------------------- */
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_stream_count(void)
+{
+    ensure_locks();
+
+    g_mutex_lock(&engine_mutex);
+    const int result = producer != NULL ? stream_count : 0;
+    g_mutex_unlock(&engine_mutex);
+
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_video_stream_index(void)
+{
+    ensure_locks();
+
+    g_mutex_lock(&engine_mutex);
+    const int result =
+        producer != NULL ? selected_video_stream_index : -1;
+    g_mutex_unlock(&engine_mutex);
+
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_audio_stream_index(void)
+{
+    ensure_locks();
+
+    g_mutex_lock(&engine_mutex);
+    const int result =
+        producer != NULL ? selected_audio_stream_index : -1;
+    g_mutex_unlock(&engine_mutex);
+
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+const char *mlt_bridge_video_codec_name(void)
+{
+    ensure_locks();
+
+    g_mutex_lock(&engine_mutex);
+    const char *result = producer != NULL ? video_codec_name : "";
+    g_mutex_unlock(&engine_mutex);
+
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+const char *mlt_bridge_video_codec_long_name(void)
+{
+    ensure_locks();
+
+    g_mutex_lock(&engine_mutex);
+    const char *result = producer != NULL ? video_codec_long_name : "";
+    g_mutex_unlock(&engine_mutex);
+
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+const char *mlt_bridge_audio_codec_name(void)
+{
+    ensure_locks();
+
+    g_mutex_lock(&engine_mutex);
+    const char *result = producer != NULL ? audio_codec_name : "";
+    g_mutex_unlock(&engine_mutex);
+
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+const char *mlt_bridge_audio_codec_long_name(void)
+{
+    ensure_locks();
+
+    g_mutex_lock(&engine_mutex);
+    const char *result = producer != NULL ? audio_codec_long_name : "";
+    g_mutex_unlock(&engine_mutex);
+
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+const char *mlt_bridge_stream_type(int index)
+{
+    ensure_locks();
+    g_mutex_lock(&engine_mutex);
+    const StreamInspection *info = stream_inspection_at_locked(index);
+    const char *result = info != NULL ? info->type : "";
+    g_mutex_unlock(&engine_mutex);
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+const char *mlt_bridge_stream_codec_name(int index)
+{
+    ensure_locks();
+    g_mutex_lock(&engine_mutex);
+    const StreamInspection *info = stream_inspection_at_locked(index);
+    const char *result = info != NULL ? info->codec_name : "";
+    g_mutex_unlock(&engine_mutex);
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+const char *mlt_bridge_stream_codec_long_name(int index)
+{
+    ensure_locks();
+    g_mutex_lock(&engine_mutex);
+    const StreamInspection *info = stream_inspection_at_locked(index);
+    const char *result = info != NULL ? info->codec_long_name : "";
+    g_mutex_unlock(&engine_mutex);
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+const char *mlt_bridge_stream_language(int index)
+{
+    ensure_locks();
+    g_mutex_lock(&engine_mutex);
+    const StreamInspection *info = stream_inspection_at_locked(index);
+    const char *result = info != NULL ? info->language : "";
+    g_mutex_unlock(&engine_mutex);
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_stream_channels(int index)
+{
+    ensure_locks();
+    g_mutex_lock(&engine_mutex);
+    const StreamInspection *info = stream_inspection_at_locked(index);
+    const int result = info != NULL ? info->channels : 0;
+    g_mutex_unlock(&engine_mutex);
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_stream_sample_rate(int index)
+{
+    ensure_locks();
+    g_mutex_lock(&engine_mutex);
+    const StreamInspection *info = stream_inspection_at_locked(index);
+    const int result = info != NULL ? info->sample_rate : 0;
+    g_mutex_unlock(&engine_mutex);
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_stream_width(int index)
+{
+    ensure_locks();
+    g_mutex_lock(&engine_mutex);
+    const StreamInspection *info = stream_inspection_at_locked(index);
+    const int result = info != NULL ? info->width : 0;
+    g_mutex_unlock(&engine_mutex);
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_stream_height(int index)
+{
+    ensure_locks();
+    g_mutex_lock(&engine_mutex);
+    const StreamInspection *info = stream_inspection_at_locked(index);
+    const int result = info != NULL ? info->height : 0;
+    g_mutex_unlock(&engine_mutex);
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+int64_t mlt_bridge_stream_bit_rate(int index)
+{
+    ensure_locks();
+    g_mutex_lock(&engine_mutex);
+    const StreamInspection *info = stream_inspection_at_locked(index);
+    const int64_t result = info != NULL ? info->bit_rate : 0;
+    g_mutex_unlock(&engine_mutex);
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+const char *mlt_bridge_video_pixel_format(void)
+{
+    ensure_locks();
+
+    g_mutex_lock(&engine_mutex);
+    const char *result = producer != NULL ? video_pixel_format : "";
+    g_mutex_unlock(&engine_mutex);
+
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_video_colorspace(void)
+{
+    ensure_locks();
+
+    g_mutex_lock(&engine_mutex);
+    const int result = producer != NULL ? video_colorspace : -1;
+    g_mutex_unlock(&engine_mutex);
+
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_video_color_trc(void)
+{
+    ensure_locks();
+
+    g_mutex_lock(&engine_mutex);
+    const int result = producer != NULL ? video_color_trc : -1;
+    g_mutex_unlock(&engine_mutex);
+
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+const char *mlt_bridge_video_color_range(void)
+{
+    ensure_locks();
+
+    g_mutex_lock(&engine_mutex);
+    const char *result = producer != NULL ? video_color_range : "";
+    g_mutex_unlock(&engine_mutex);
+
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+const char *mlt_bridge_source_timecode(void)
+{
+    ensure_locks();
+
+    g_mutex_lock(&engine_mutex);
+
+    const char *result =
+        producer != NULL
+            ? source_timecode
+            : "";
+
+    g_mutex_unlock(&engine_mutex);
+
+    return result;
+}
 
 MLT_BRIDGE_EXPORT
 int64_t mlt_bridge_duration_frames(void)
