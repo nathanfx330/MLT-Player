@@ -1,7 +1,7 @@
 // lib/main.dart
 
 import 'dart:async';
-import 'dart:ui' show FontFeature;
+import 'dart:ui' as ui show FontFeature, Size;
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
@@ -214,6 +214,7 @@ class _PlayerPageState extends State<PlayerPage>
       _pointerOverControls ||
       _scrubbing ||
       _infoOpen ||
+      _engine.exporting ||
       _engine.error != null;
 
   void _showOverlay() {
@@ -288,6 +289,44 @@ class _PlayerPageState extends State<PlayerPage>
     }
   }
 
+  Future<void> _exportActiveClip() async {
+    final media = _engine.media;
+    if (media == null || media.isStill || _engine.exporting) {
+      return;
+    }
+
+    _showOverlay();
+
+    final name = media.name;
+    final dot = name.lastIndexOf('.');
+    final stem = dot > 0 ? name.substring(0, dot) : name;
+    final suffix = _engine.hasSelection
+        ? 'selection'
+        : (_engine.isTrimmed ? 'trimmed' : 'export');
+
+    final location = await getSaveLocation(
+      confirmButtonText: 'Export',
+      suggestedName: '${stem}_$suffix.mp4',
+      acceptedTypeGroups: <XTypeGroup>[
+        XTypeGroup(
+          label: 'MP4 Video',
+          extensions: <String>['mp4'],
+        ),
+      ],
+    );
+
+    if (location == null) {
+      return;
+    }
+
+    var outputPath = location.path;
+    if (!outputPath.toLowerCase().endsWith('.mp4')) {
+      outputPath = '$outputPath.mp4';
+    }
+
+    _engine.startExport(outputPath);
+  }
+
   void _toggleInfo() {
     setState(() => _infoOpen = !_infoOpen);
     if (_infoOpen) {
@@ -323,8 +362,64 @@ class _PlayerPageState extends State<PlayerPage>
     }
 
     final key = event.logicalKey;
+    final controlPressed = HardwareKeyboard.instance.isControlPressed;
+    final shiftPressed = HardwareKeyboard.instance.isShiftPressed;
 
     _showOverlay();
+
+    if (event is KeyDownEvent &&
+        controlPressed &&
+        shiftPressed &&
+        key == LogicalKeyboardKey.keyZ) {
+      _engine.redo();
+      return KeyEventResult.handled;
+    }
+
+    if (event is KeyDownEvent &&
+        controlPressed &&
+        key == LogicalKeyboardKey.keyZ) {
+      _engine.undo();
+      return KeyEventResult.handled;
+    }
+
+    if (event is KeyDownEvent &&
+        controlPressed &&
+        key == LogicalKeyboardKey.keyE) {
+      if (_engine.exporting) {
+        _engine.cancelExport();
+      } else {
+        _exportActiveClip();
+      }
+      return KeyEventResult.handled;
+    }
+
+    if (event is KeyDownEvent &&
+        controlPressed &&
+        key == LogicalKeyboardKey.keyT) {
+      _engine.trimSelection();
+      return KeyEventResult.handled;
+    }
+
+    if (event is KeyDownEvent &&
+        controlPressed &&
+        key == LogicalKeyboardKey.keyO) {
+      _pickMedia();
+      return KeyEventResult.handled;
+    }
+
+    if (event is KeyDownEvent &&
+        controlPressed &&
+        key == LogicalKeyboardKey.keyI) {
+      _toggleInfo();
+      return KeyEventResult.handled;
+    }
+
+    if (event is KeyDownEvent &&
+        shiftPressed &&
+        key == LogicalKeyboardKey.space) {
+      _engine.playSelection();
+      return KeyEventResult.handled;
+    }
 
     if (key == LogicalKeyboardKey.space) {
       _engine.togglePlayback();
@@ -387,12 +482,12 @@ class _PlayerPageState extends State<PlayerPage>
     }
 
     if (key == LogicalKeyboardKey.keyI) {
-      _toggleInfo();
+      _engine.setInPoint();
       return KeyEventResult.handled;
     }
 
     if (key == LogicalKeyboardKey.keyO) {
-      _pickMedia();
+      _engine.setOutPoint();
       return KeyEventResult.handled;
     }
 
@@ -425,17 +520,43 @@ class _PlayerPageState extends State<PlayerPage>
     return '$mm:$ss';
   }
 
-  static int _frameForPosition(MediaInfo media, int milliseconds) {
-    if (media.frames <= 0 || media.fps <= 0) {
+  static int _frameForClipPosition(
+    MediaInfo media,
+    int milliseconds,
+    int frameCount,
+  ) {
+    if (frameCount <= 0 || media.fps <= 0) {
       return 0;
     }
 
     final frame = ((milliseconds / 1000.0) * media.fps).round();
-    return frame.clamp(0, media.frames - 1);
+    return frame.clamp(0, frameCount - 1);
+  }
+
+  double? _fractionForFrame(MediaInfo media, int? sourceFrame) {
+    final frameCount = _engine.clipFrameCount;
+    if (sourceFrame == null || frameCount <= 1) {
+      return null;
+    }
+
+    final clipFrame = _engine.clipFrameForSourceFrame(sourceFrame);
+    return clipFrame / (frameCount - 1);
+  }
+
+  static String _formatFrameDuration(MediaInfo media, int frames) {
+    if (frames <= 0 || media.fps <= 0) {
+      return '00:00:00:00';
+    }
+
+    // Duration is a frame count, while _formatClipTimecode() accepts a
+    // zero-based frame number. Passing the count directly gives the desired
+    // elapsed-frame display: 30 frames at nominal 30 fps = 00:00:01:00.
+    return _formatClipTimecode(media, frames);
   }
 
   String _formatTransportReadout(MediaInfo media, int milliseconds) {
-    final frame = _frameForPosition(media, milliseconds);
+    final frameCount = _engine.clipFrameCount;
+    final frame = _frameForClipPosition(media, milliseconds, frameCount);
     final speed = _engine.speed;
 
     final speedText = speed == 0.0
@@ -446,7 +567,7 @@ class _PlayerPageState extends State<PlayerPage>
       return 'TC ${_formatClipTimecode(media, frame)}  ·  $speedText';
     }
 
-    return 'Frame ${frame + 1} / ${media.frames}  ·  $speedText';
+    return 'Frame ${frame + 1} / $frameCount  ·  $speedText';
   }
 
   static String _formatClipTimecode(MediaInfo media, int frame) {
@@ -478,15 +599,14 @@ class _PlayerPageState extends State<PlayerPage>
 
   static String? _formatSourceTimecode(
     MediaInfo media,
-    int milliseconds,
+    int sourceFrame,
   ) {
     final source = media.sourceTimecode;
     if (source == null) {
       return null;
     }
 
-    final frame = _frameForPosition(media, milliseconds);
-    return source.atOffset(frame);
+    return source.atOffset(sourceFrame);
   }
 
   // -------------------------------------------------------------------------
@@ -668,6 +788,7 @@ class _PlayerPageState extends State<PlayerPage>
                   children: [
                     _buildInfoRoll(media),
                     if (_engine.error != null) _buildErrorRow(),
+                    if (_engine.hasExportStatus) _buildExportRow(),
                     if (!media.isStill) _buildScrubber(media),
                     _buildControlRow(media),
                   ],
@@ -729,8 +850,90 @@ class _PlayerPageState extends State<PlayerPage>
     );
   }
 
+  Widget _buildExportRow() {
+    final path = _engine.exportPath;
+    final name = path == null ? '' : _basename(path);
+
+    if (_engine.exporting) {
+      final percent = (_engine.exportProgress * 100).clamp(0.0, 100.0);
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: Row(
+          children: [
+            const Icon(Icons.movie_creation_outlined,
+                size: 16, color: Color(0xFFE8A33D)),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Exporting ${percent.toStringAsFixed(0)}%'
+                    '${name.isEmpty ? '' : '  ·  $name'}',
+                    style: const TextStyle(fontSize: 11, color: Colors.white70),
+                  ),
+                  const SizedBox(height: 4),
+                  LinearProgressIndicator(
+                    value: _engine.exportProgress.clamp(0.0, 1.0),
+                    minHeight: 2,
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            TextButton(
+              onPressed: _engine.cancelExport,
+              child: const Text('CANCEL'),
+            ),
+          ],
+        ),
+      );
+    }
+
+    final succeeded = _engine.exportSucceeded;
+    final error = _engine.exportError;
+    final color = succeeded
+        ? const Color(0xFF81C784)
+        : const Color(0xFFE57373);
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        children: [
+          Icon(
+            succeeded ? Icons.check_circle_outline : Icons.error_outline,
+            size: 16,
+            color: color,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              succeeded
+                  ? 'Export complete${name.isEmpty ? '' : '  ·  $name'}'
+                  : (error ?? 'Export failed.'),
+              style: TextStyle(fontSize: 11, color: color),
+            ),
+          ),
+          IconButton(
+            iconSize: 16,
+            visualDensity: VisualDensity.compact,
+            tooltip: 'Dismiss export status',
+            icon: const Icon(Icons.close),
+            onPressed: _engine.clearExportStatus,
+          ),
+        ],
+      ),
+    );
+  }
+
+  static String _basename(String path) {
+    final normalized = path.replaceAll('\\', '/');
+    final slash = normalized.lastIndexOf('/');
+    return slash == -1 ? normalized : normalized.substring(slash + 1);
+  }
+
   Widget _buildScrubber(MediaInfo media) {
-    final durationMs = media.durationMs;
+    final durationMs = _engine.durationMs;
     final maxValue = durationMs > 0 ? durationMs.toDouble() : 1.0;
     final value = (_scrubbing ? _scrubMs : _positionForDisplay().toDouble())
         .clamp(0.0, maxValue);
@@ -740,120 +943,210 @@ class _PlayerPageState extends State<PlayerPage>
     final displayPositionMs =
         _scrubbing ? _scrubMs.round() : _positionForDisplay();
 
-    return Row(
-      children: [
-        SizedBox(
-          width: showHours ? 190 : 172,
-          child: Builder(
-            builder: (context) {
-              final sourceTimecode =
-                  _formatSourceTimecode(media, displayPositionMs);
+    final inFrame = _engine.inFrame;
+    final outFrame = _engine.outFrame;
+    final inFraction = _fractionForFrame(media, inFrame);
+    final outFraction = _fractionForFrame(media, outFrame);
+    final selectionFrames = _engine.selectionFrameCount;
 
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    _formatClock(
-                      displayPositionMs,
-                      forceHours: showHours,
-                    ),
-                    style: const TextStyle(
-                      fontSize: 12,
-                      fontFeatures: [FontFeature.tabularFigures()],
-                    ),
-                  ),
-                  const SizedBox(height: 1),
-                  Tooltip(
-                    message: _showTransportTimecode
-                        ? 'Click to show frame number'
-                        : 'Click to show clip timecode',
-                    child: MouseRegion(
-                      cursor: SystemMouseCursors.click,
-                      child: GestureDetector(
-                        behavior: HitTestBehavior.opaque,
-                        onTap: () {
-                          setState(() {
-                            _showTransportTimecode =
-                                !_showTransportTimecode;
-                          });
-                          _showOverlay();
-                        },
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 2),
-                          child: Text(
-                            _formatTransportReadout(
-                              media,
-                              displayPositionMs,
-                            ),
-                            style: const TextStyle(
-                              fontSize: 10,
-                              color: Colors.white54,
-                              fontFeatures: [FontFeature.tabularFigures()],
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Row(
+          children: [
+            SizedBox(
+              width: showHours ? 190 : 172,
+              child: Builder(
+                builder: (context) {
+                  final sourceFrame =
+                      _engine.sourceFrameForClipPositionMs(displayPositionMs);
+                  final sourceTimecode =
+                      _formatSourceTimecode(media, sourceFrame);
+
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        _formatClock(
+                          displayPositionMs,
+                          forceHours: showHours,
+                        ),
+                        style: const TextStyle(
+                          fontSize: 12,
+                          fontFeatures: [ui.FontFeature.tabularFigures()],
+                        ),
+                      ),
+                      const SizedBox(height: 1),
+                      Tooltip(
+                        message: _showTransportTimecode
+                            ? 'Click to show frame number'
+                            : 'Click to show clip timecode',
+                        child: MouseRegion(
+                          cursor: SystemMouseCursors.click,
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTap: () {
+                              setState(() {
+                                _showTransportTimecode =
+                                    !_showTransportTimecode;
+                              });
+                              _showOverlay();
+                            },
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 2),
+                              child: Text(
+                                _formatTransportReadout(
+                                  media,
+                                  displayPositionMs,
+                                ),
+                                style: const TextStyle(
+                                  fontSize: 10,
+                                  color: Colors.white54,
+                                  fontFeatures: [ui.FontFeature.tabularFigures()],
+                                ),
+                              ),
                             ),
                           ),
                         ),
                       ),
+                      if (sourceTimecode != null) ...[
+                        const SizedBox(height: 1),
+                        Text(
+                          'SRC $sourceTimecode',
+                          style: const TextStyle(
+                            fontSize: 10,
+                            color: Colors.white70,
+                            fontFeatures: [ui.FontFeature.tabularFigures()],
+                          ),
+                        ),
+                      ],
+                    ],
+                  );
+                },
+              ),
+            ),
+            Expanded(
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  SliderTheme(
+                    data: SliderTheme.of(context).copyWith(
+                      trackHeight: 3,
+                      thumbShape:
+                          const RoundSliderThumbShape(enabledThumbRadius: 6),
+                      overlayShape:
+                          const RoundSliderOverlayShape(overlayRadius: 14),
+                      inactiveTrackColor: Colors.white24,
+                    ),
+                    child: Slider(
+                      min: 0,
+                      max: maxValue,
+                      value: value,
+                      onChangeStart: durationMs > 0
+                          ? (v) => setState(() {
+                                _scrubbing = true;
+                                _scrubMs = v;
+                              })
+                          : null,
+                      onChanged: durationMs > 0
+                          ? (v) => setState(() => _scrubMs = v)
+                          : null,
+                      onChangeEnd: durationMs > 0
+                          ? (v) {
+                              setState(() => _scrubbing = false);
+                              _engine.seekTo(v.round());
+                              _restartOverlayTimer();
+                            }
+                          : null,
                     ),
                   ),
-                  if (sourceTimecode != null) ...[
-                    const SizedBox(height: 1),
-                    Text(
-                      'SRC $sourceTimecode',
-                      style: const TextStyle(
-                        fontSize: 10,
-                        color: Colors.white70,
-                        fontFeatures: [FontFeature.tabularFigures()],
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: CustomPaint(
+                        painter: _SelectionTrackPainter(
+                          inFraction: inFraction,
+                          outFraction: outFraction,
+                        ),
                       ),
                     ),
-                  ],
+                  ),
                 ],
-              );
-            },
-          ),
-        ),
-        Expanded(
-          child: SliderTheme(
-            data: SliderTheme.of(context).copyWith(
-              trackHeight: 3,
-              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
-              overlayShape: const RoundSliderOverlayShape(overlayRadius: 14),
-              inactiveTrackColor: Colors.white24,
+              ),
             ),
-            child: Slider(
-              min: 0,
-              max: maxValue,
-              value: value,
-              onChangeStart: durationMs > 0
-                  ? (v) => setState(() {
-                        _scrubbing = true;
-                        _scrubMs = v;
-                      })
-                  : null,
-              onChanged:
-                  durationMs > 0 ? (v) => setState(() => _scrubMs = v) : null,
-              onChangeEnd: durationMs > 0
-                  ? (v) {
-                      setState(() => _scrubbing = false);
-                      _engine.seekTo(v.round());
-                      _restartOverlayTimer();
-                    }
-                  : null,
+            SizedBox(
+              width: showHours ? 66 : 48,
+              child: Text(
+                _formatClock(durationMs, forceHours: showHours),
+                textAlign: TextAlign.right,
+                style: const TextStyle(
+                  fontSize: 12,
+                  color: Colors.white70,
+                  fontFeatures: [ui.FontFeature.tabularFigures()],
+                ),
+              ),
+            ),
+          ],
+        ),
+        if (inFrame != null || outFrame != null || _engine.isTrimmed)
+          Padding(
+            padding: EdgeInsets.only(
+              top: 1,
+              left: showHours ? 190 : 172,
+              right: showHours ? 66 : 48,
+            ),
+            child: Wrap(
+              alignment: WrapAlignment.center,
+              spacing: 14,
+              runSpacing: 2,
+              children: [
+                if (inFrame != null)
+                  Text(
+                    'IN ${_formatClipTimecode(
+                      media,
+                      _engine.clipFrameForSourceFrame(inFrame),
+                    )}',
+                    style: const TextStyle(
+                      fontSize: 10,
+                      color: Colors.white70,
+                      fontFeatures: [ui.FontFeature.tabularFigures()],
+                    ),
+                  ),
+                if (outFrame != null)
+                  Text(
+                    'OUT ${_formatClipTimecode(
+                      media,
+                      _engine.clipFrameForSourceFrame(outFrame),
+                    )}',
+                    style: const TextStyle(
+                      fontSize: 10,
+                      color: Colors.white70,
+                      fontFeatures: [ui.FontFeature.tabularFigures()],
+                    ),
+                  ),
+                if (selectionFrames > 0)
+                  Text(
+                    'SEL ${_formatFrameDuration(media, selectionFrames)}'
+                    '  ·  $selectionFrames ${selectionFrames == 1 ? 'frame' : 'frames'}',
+                    style: const TextStyle(
+                      fontSize: 10,
+                      color: Color(0xFFE8A33D),
+                      fontFeatures: [ui.FontFeature.tabularFigures()],
+                    ),
+                  ),
+                if (_engine.isTrimmed)
+                  Text(
+                    'TRIMMED ${_formatFrameDuration(media, _engine.clipFrameCount)}'
+                    '  ·  ${_engine.clipFrameCount} ${_engine.clipFrameCount == 1 ? 'frame' : 'frames'}',
+                    style: const TextStyle(
+                      fontSize: 10,
+                      color: Color(0xFFE8A33D),
+                      fontFeatures: [ui.FontFeature.tabularFigures()],
+                    ),
+                  ),
+              ],
             ),
           ),
-        ),
-        SizedBox(
-          width: showHours ? 66 : 48,
-          child: Text(
-            _formatClock(durationMs, forceHours: showHours),
-            textAlign: TextAlign.right,
-            style: const TextStyle(
-              fontSize: 12,
-              color: Colors.white70,
-              fontFeatures: [FontFeature.tabularFigures()],
-            ),
-          ),
-        ),
       ],
     );
   }
@@ -874,6 +1167,39 @@ class _PlayerPageState extends State<PlayerPage>
             size: 30,
             onPressed: _engine.togglePlayback,
           ),
+          const SizedBox(width: 2),
+          _ModeButton(
+            label: 'PLAY SEL',
+            tooltip: _engine.hasSelection
+                ? 'Play In to Out (Shift+Space)'
+                : 'Set In and Out points to play a selection',
+            active: _engine.playingSelection,
+            onPressed: _engine.hasSelection ? _engine.playSelection : null,
+          ),
+          const SizedBox(width: 2),
+          _ModeButton(
+            label: 'TRIM SEL',
+            tooltip: _engine.canTrimSelection
+                ? 'Trim movie to In/Out (Ctrl+T)'
+                : 'Set a smaller In/Out selection to trim',
+            active: false,
+            onPressed:
+                _engine.canTrimSelection ? _engine.trimSelection : null,
+          ),
+          const SizedBox(width: 2),
+          _ModeButton(
+            label: _engine.exporting ? 'CANCEL' : 'EXPORT',
+            tooltip: _engine.exporting
+                ? 'Cancel export (Ctrl+E)'
+                : (_engine.hasSelection
+                    ? 'Export marked selection as MP4 (Ctrl+E)'
+                    : 'Export active clip as MP4 (Ctrl+E)'),
+            active: _engine.exporting,
+            onPressed: _engine.exporting
+                ? _engine.cancelExport
+                : _exportActiveClip,
+          ),
+          const SizedBox(width: 2),
           _OverlayButton(
             icon: Icons.fast_rewind,
             tooltip: 'Shuttle reverse (J)',
@@ -898,23 +1224,36 @@ class _PlayerPageState extends State<PlayerPage>
             label: 'LOOP',
             tooltip: _engine.repeatMode == PlaybackRepeatMode.loop
                 ? 'Loop playback is on'
-                : 'Loop playback at the media boundaries',
+                : 'Loop playback at the active clip boundaries',
             active: _engine.repeatMode == PlaybackRepeatMode.loop,
             onPressed: _engine.toggleLoop,
           ),
           const SizedBox(width: 4),
           if (media.hasAudio) _buildVolume(),
+          const SizedBox(width: 6),
+          _OverlayButton(
+            icon: Icons.undo,
+            tooltip: _engine.canUndo ? 'Undo (Ctrl+Z)' : 'Nothing to undo',
+            onPressed: _engine.canUndo ? _engine.undo : null,
+          ),
+          _OverlayButton(
+            icon: Icons.redo,
+            tooltip: _engine.canRedo
+                ? 'Redo (Ctrl+Shift+Z)'
+                : 'Nothing to redo',
+            onPressed: _engine.canRedo ? _engine.redo : null,
+          ),
         ],
         const Spacer(),
         _OverlayButton(
           icon: Icons.folder_open,
-          tooltip: 'Open media (O)',
+          tooltip: 'Open media (Ctrl+O)',
           onPressed: widget.initialized && !_engine.opening ? _pickMedia : null,
         ),
         _OverlayButton(
           icon: _infoOpen ? Icons.expand_more : Icons.info_outline,
           tooltip:
-              _infoOpen ? 'Hide file information (I)' : 'File information (I)',
+              _infoOpen ? 'Hide file information (Ctrl+I)' : 'File information (Ctrl+I)',
           onPressed: _toggleInfo,
         ),
         _OverlayButton(
@@ -969,6 +1308,80 @@ class _PlayerPageState extends State<PlayerPage>
         ),
       ],
     );
+  }
+}
+
+class _SelectionTrackPainter extends CustomPainter {
+  const _SelectionTrackPainter({
+    required this.inFraction,
+    required this.outFraction,
+  });
+
+  final double? inFraction;
+  final double? outFraction;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (size.width <= 28 || (inFraction == null && outFraction == null)) {
+      return;
+    }
+
+    // Flutter's slider track is inset by the 14 px overlay radius used by
+    // this scrubber. Matching that inset keeps frame markers aligned with
+    // the actual track endpoints rather than the widget's outer bounds.
+    const inset = 14.0;
+    final trackWidth = size.width - (inset * 2);
+    if (trackWidth <= 0) {
+      return;
+    }
+
+    final y = size.height / 2;
+
+    double xFor(double fraction) =>
+        inset + (fraction.clamp(0.0, 1.0) * trackWidth);
+
+    if (inFraction != null && outFraction != null) {
+      final start = xFor(inFraction!);
+      final end = xFor(outFraction!);
+      final selectionPaint = Paint()
+        ..color = const Color(0xB3FFFFFF)
+        ..strokeWidth = 5
+        ..strokeCap = StrokeCap.round;
+
+      canvas.drawLine(
+        Offset(start, y),
+        Offset(end, y),
+        selectionPaint,
+      );
+    }
+
+    final markerPaint = Paint()
+      ..color = const Color(0xFFE8A33D)
+      ..strokeWidth = 2
+      ..strokeCap = StrokeCap.round;
+
+    void drawMarker(double fraction) {
+      final x = xFor(fraction);
+      canvas.drawLine(
+        Offset(x, y - 8),
+        Offset(x, y + 8),
+        markerPaint,
+      );
+      canvas.drawCircle(Offset(x, y - 9), 2.5, markerPaint);
+    }
+
+    if (inFraction != null) {
+      drawMarker(inFraction!);
+    }
+    if (outFraction != null) {
+      drawMarker(outFraction!);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _SelectionTrackPainter oldDelegate) {
+    return oldDelegate.inFraction != inFraction ||
+        oldDelegate.outFraction != outFraction;
   }
 }
 
@@ -1033,7 +1446,7 @@ class _ModeButton extends StatelessWidget {
         style: TextButton.styleFrom(
           foregroundColor: active ? Colors.black : Colors.white70,
           backgroundColor: active ? const Color(0xFFE8A33D) : Colors.white10,
-          minimumSize: const Size(0, 30),
+          minimumSize: const ui.Size(0, 30),
           padding: const EdgeInsets.symmetric(horizontal: 9),
           visualDensity: VisualDensity.compact,
           shape: RoundedRectangleBorder(

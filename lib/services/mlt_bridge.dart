@@ -45,6 +45,19 @@ typedef _SetSpeedDart = int Function(double);
 typedef _SetIntNative = Int32 Function(Int32);
 typedef _SetIntDart = int Function(int);
 
+typedef _ExportStartNative = Int32 Function(
+  Pointer<Utf8>,
+  Pointer<Utf8>,
+  Int64,
+  Int64,
+);
+typedef _ExportStartDart = int Function(
+  Pointer<Utf8>,
+  Pointer<Utf8>,
+  int,
+  int,
+);
+
 /// Thin wrapper over libmlt_bridge.so.
 ///
 /// The library is resolved out of the running process rather than opened
@@ -149,6 +162,19 @@ class MltBridge {
         'mlt_bridge_video_color_range');
     _sourceTimecode = _library.lookupFunction<_StringNative, _StringDart>(
         'mlt_bridge_source_timecode');
+
+    _exportStart = _library.lookupFunction<_ExportStartNative, _ExportStartDart>(
+        'mlt_bridge_export_start');
+    _exportCancel = _library.lookupFunction<_VoidNative, _VoidDart>(
+        'mlt_bridge_export_cancel');
+    _exportIsRunning = _library.lookupFunction<_IntNative, _IntDart>(
+        'mlt_bridge_export_is_running');
+    _exportProgress = _library.lookupFunction<_DoubleNative, _DoubleDart>(
+        'mlt_bridge_export_progress');
+    _exportSucceeded = _library.lookupFunction<_IntNative, _IntDart>(
+        'mlt_bridge_export_succeeded');
+    _exportError = _library.lookupFunction<_StringNative, _StringDart>(
+        'mlt_bridge_export_error');
     _durationFrames = _library
         .lookupFunction<_Int64Native, _Int64Dart>('mlt_bridge_duration_frames');
     _durationMs = _library
@@ -205,6 +231,12 @@ class MltBridge {
   late final _IntDart _videoColorTrc;
   late final _StringDart _videoColorRange;
   late final _StringDart _sourceTimecode;
+  late final _ExportStartDart _exportStart;
+  late final _VoidDart _exportCancel;
+  late final _IntDart _exportIsRunning;
+  late final _DoubleDart _exportProgress;
+  late final _IntDart _exportSucceeded;
+  late final _StringDart _exportError;
   late final _Int64Dart _durationFrames;
   late final _Int64Dart _durationMs;
   late final _DoubleDart _fps;
@@ -231,6 +263,35 @@ class MltBridge {
   }
 
   void closeMedia() => _closeMedia();
+
+  bool startExport({
+    required String sourcePath,
+    required String outputPath,
+    required int inFrame,
+    required int outFrame,
+  }) {
+    final nativeSource = sourcePath.toNativeUtf8(allocator: malloc);
+    final nativeOutput = outputPath.toNativeUtf8(allocator: malloc);
+
+    try {
+      return _exportStart(
+            nativeSource,
+            nativeOutput,
+            inFrame,
+            outFrame,
+          ) !=
+          0;
+    } finally {
+      malloc.free(nativeSource);
+      malloc.free(nativeOutput);
+    }
+  }
+
+  void cancelExport() => _exportCancel();
+  bool get exportIsRunning => _exportIsRunning() != 0;
+  double get exportProgress => _exportProgress();
+  bool get exportSucceeded => _exportSucceeded() != 0;
+  String get exportError => _exportError().toDartString();
 
   bool play() => _play() != 0;
   bool pause() => _pause() != 0;

@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 /*
  * Deinterlacer used for interlaced sources.
@@ -98,6 +99,29 @@ static gint target_width = 0;
 static gint target_height = 0;
 
 /* ------------------------------------------------------------------------- */
+/* Export state                                                              */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Export owns a completely separate producer/profile/consumer graph from
+ * preview playback. Only these small status fields cross thread boundaries.
+ */
+static GMutex export_mutex;
+static GThread *export_thread = NULL;
+static int export_running = 0;
+static int export_success = 0;
+static int export_cancel_requested = 0;
+static double export_progress = 0.0;
+static char export_error[512] = "";
+
+typedef struct _ExportJob {
+    char *source_path;
+    char *output_path;
+    int64_t in_frame;
+    int64_t out_frame;
+} ExportJob;
+
+/* ------------------------------------------------------------------------- */
 /* Video frame state                                                         */
 /* ------------------------------------------------------------------------- */
 
@@ -178,6 +202,7 @@ static void ensure_locks(void)
         g_mutex_init(&engine_mutex);
         g_mutex_init(&frame_mutex);
         g_mutex_init(&texture_mutex);
+        g_mutex_init(&export_mutex);
 
         g_once_init_leave(&locks_initialized, 1);
     }
@@ -1387,6 +1412,408 @@ static void refresh_locked(void)
     );
 }
 
+
+/* ------------------------------------------------------------------------- */
+/* Background export                                                        */
+/* ------------------------------------------------------------------------- */
+
+static void export_set_error_locked(const char *message)
+{
+    if (message == NULL) {
+        export_error[0] = '\0';
+        return;
+    }
+
+    snprintf(
+        export_error,
+        sizeof(export_error),
+        "%s",
+        message
+    );
+}
+
+static int export_cancel_was_requested(void)
+{
+    ensure_locks();
+
+    g_mutex_lock(&export_mutex);
+    const int requested = export_cancel_requested;
+    g_mutex_unlock(&export_mutex);
+
+    return requested;
+}
+
+static void export_publish_progress(double value)
+{
+    if (value < 0.0) {
+        value = 0.0;
+    } else if (value > 1.0) {
+        value = 1.0;
+    }
+
+    ensure_locks();
+
+    g_mutex_lock(&export_mutex);
+    export_progress = value;
+    g_mutex_unlock(&export_mutex);
+}
+
+static int output_file_has_data(const char *path)
+{
+    struct stat info;
+
+    return path != NULL &&
+        stat(path, &info) == 0 &&
+        info.st_size > 0;
+}
+
+static void export_job_free(ExportJob *job)
+{
+    if (job == NULL) {
+        return;
+    }
+
+    g_free(job->source_path);
+    g_free(job->output_path);
+    g_free(job);
+}
+
+static gpointer export_worker(gpointer data)
+{
+    ExportJob *job = (ExportJob *)data;
+
+    mlt_profile export_profile = NULL;
+    mlt_producer probe_producer = NULL;
+    mlt_producer export_producer = NULL;
+    mlt_consumer export_consumer = NULL;
+
+    int succeeded = 0;
+    int cancelled = 0;
+    char failure[512] = "";
+
+    export_profile = mlt_profile_init(NULL);
+
+    if (export_profile == NULL) {
+        snprintf(
+            failure,
+            sizeof(failure),
+            "%s",
+            "Could not create an MLT export profile."
+        );
+        goto cleanup;
+    }
+
+    /*
+     * Match the export graph to the source just like the preview open path:
+     * probe once, derive the profile, then reopen against that profile.
+     */
+    probe_producer =
+        mlt_factory_producer(
+            export_profile,
+            NULL,
+            job->source_path
+        );
+
+    if (probe_producer == NULL) {
+        snprintf(
+            failure,
+            sizeof(failure),
+            "%s",
+            "MLT could not open the source for export."
+        );
+        goto cleanup;
+    }
+
+    mlt_producer_probe(probe_producer);
+    mlt_profile_from_producer(export_profile, probe_producer);
+    mlt_producer_close(probe_producer);
+    probe_producer = NULL;
+
+    export_producer =
+        mlt_factory_producer(
+            export_profile,
+            NULL,
+            job->source_path
+        );
+
+    if (export_producer == NULL) {
+        snprintf(
+            failure,
+            sizeof(failure),
+            "%s",
+            "MLT could not reopen the source for export."
+        );
+        goto cleanup;
+    }
+
+    mlt_producer_probe(export_producer);
+
+    const int64_t source_length =
+        (int64_t)mlt_producer_get_length(export_producer);
+
+    int64_t in_frame = job->in_frame;
+    int64_t out_frame = job->out_frame;
+
+    if (in_frame < 0) {
+        in_frame = 0;
+    }
+
+    if (out_frame >= source_length) {
+        out_frame = source_length - 1;
+    }
+
+    if (source_length <= 0 ||
+        out_frame < in_frame) {
+        snprintf(
+            failure,
+            sizeof(failure),
+            "%s",
+            "The requested export range is invalid."
+        );
+        goto cleanup;
+    }
+
+    if (mlt_producer_set_in_and_out(
+            export_producer,
+            (mlt_position)in_frame,
+            (mlt_position)out_frame) != 0) {
+        snprintf(
+            failure,
+            sizeof(failure),
+            "%s",
+            "MLT could not set the export In/Out range."
+        );
+        goto cleanup;
+    }
+
+    /*
+     * Producer position is relative to its In point after set_in_and_out(),
+     * so position zero is exactly the first requested export frame.
+     */
+    if (mlt_producer_seek(export_producer, 0) != 0 ||
+        mlt_producer_set_speed(export_producer, 1.0) != 0) {
+        snprintf(
+            failure,
+            sizeof(failure),
+            "%s",
+            "MLT could not initialize the export transport."
+        );
+        goto cleanup;
+    }
+
+    export_consumer =
+        mlt_factory_consumer(
+            export_profile,
+            "avformat",
+            job->output_path
+        );
+
+    if (export_consumer == NULL) {
+        snprintf(
+            failure,
+            sizeof(failure),
+            "%s",
+            "MLT avformat export consumer is unavailable."
+        );
+        goto cleanup;
+    }
+
+    mlt_properties properties =
+        MLT_CONSUMER_PROPERTIES(export_consumer);
+
+    /*
+     * POC 9 starts with one dependable delivery preset. The UI can expose
+     * codec/container profiles after the independent render path is proven.
+     */
+    mlt_properties_set(properties, "f", "mp4");
+    mlt_properties_set(properties, "vcodec", "libx264");
+    mlt_properties_set(properties, "acodec", "aac");
+    mlt_properties_set(properties, "pix_fmt", "yuv420p");
+    mlt_properties_set(properties, "preset", "medium");
+    mlt_properties_set_int(properties, "crf", 18);
+    mlt_properties_set(properties, "movflags", "+faststart");
+
+    /* Export never drops frames. */
+    mlt_properties_set_int(properties, "real_time", -1);
+    mlt_properties_set_int(properties, "terminate_on_pause", 1);
+
+    if (mlt_consumer_connect(
+            export_consumer,
+            MLT_PRODUCER_SERVICE(export_producer)) != 0) {
+        snprintf(
+            failure,
+            sizeof(failure),
+            "%s",
+            "MLT could not connect the export consumer."
+        );
+        goto cleanup;
+    }
+
+    /*
+     * The save dialog handles overwrite confirmation. Remove the destination
+     * immediately before encoding so avformat always receives a fresh target.
+     */
+    remove(job->output_path);
+
+    if (mlt_consumer_start(export_consumer) != 0) {
+        snprintf(
+            failure,
+            sizeof(failure),
+            "%s",
+            "MLT could not start the export encoder."
+        );
+        goto cleanup;
+    }
+
+    const int64_t total_frames =
+        out_frame - in_frame + 1;
+
+    while (!mlt_consumer_is_stopped(export_consumer)) {
+        if (export_cancel_was_requested()) {
+            cancelled = 1;
+            mlt_consumer_stop(export_consumer);
+            break;
+        }
+
+        const int64_t position =
+            (int64_t)mlt_producer_position(export_producer);
+
+        const double progress =
+            total_frames > 0
+                ? ((double)(position + 1) / (double)total_frames)
+                : 0.0;
+
+        export_publish_progress(progress);
+
+        g_usleep(50000);
+    }
+
+    /*
+     * Even if the consumer stopped itself at EOF, stop() joins its worker
+     * threads and flushes the muxer trailer.
+     */
+    mlt_consumer_stop(export_consumer);
+
+    if (export_cancel_was_requested()) {
+        cancelled = 1;
+    }
+
+    if (!cancelled) {
+        const int64_t final_position =
+            (int64_t)mlt_producer_position(export_producer);
+
+        if (final_position >= total_frames - 1 &&
+            output_file_has_data(job->output_path)) {
+            succeeded = 1;
+            export_publish_progress(1.0);
+        } else {
+            snprintf(
+                failure,
+                sizeof(failure),
+                "%s",
+                "MLT export stopped before the requested range completed."
+            );
+        }
+    }
+
+cleanup:
+    if (export_consumer != NULL) {
+        if (!mlt_consumer_is_stopped(export_consumer)) {
+            mlt_consumer_stop(export_consumer);
+        }
+        mlt_consumer_close(export_consumer);
+        export_consumer = NULL;
+    }
+
+    if (probe_producer != NULL) {
+        mlt_producer_close(probe_producer);
+        probe_producer = NULL;
+    }
+
+    if (export_producer != NULL) {
+        mlt_producer_close(export_producer);
+        export_producer = NULL;
+    }
+
+    if (export_profile != NULL) {
+        mlt_profile_close(export_profile);
+        export_profile = NULL;
+    }
+
+    if (!succeeded) {
+        remove(job->output_path);
+    }
+
+    ensure_locks();
+
+    g_mutex_lock(&export_mutex);
+
+    export_running = 0;
+    export_success = succeeded;
+
+    if (cancelled) {
+        export_set_error_locked("Export cancelled.");
+    } else if (succeeded) {
+        export_set_error_locked(NULL);
+    } else if (failure[0] != '\0') {
+        export_set_error_locked(failure);
+    } else {
+        export_set_error_locked("Export failed.");
+    }
+
+    g_mutex_unlock(&export_mutex);
+
+    export_job_free(job);
+
+    return NULL;
+}
+
+/*
+ * Join a completed export worker so its GThread handle never leaks. This is
+ * intentionally never called while export_mutex is held.
+ */
+static void join_finished_export_thread(void)
+{
+    ensure_locks();
+
+    GThread *thread = NULL;
+
+    g_mutex_lock(&export_mutex);
+
+    if (!export_running &&
+        export_thread != NULL) {
+        thread = export_thread;
+        export_thread = NULL;
+    }
+
+    g_mutex_unlock(&export_mutex);
+
+    if (thread != NULL) {
+        g_thread_join(thread);
+    }
+}
+
+static void cancel_export_and_join(void)
+{
+    ensure_locks();
+
+    GThread *thread = NULL;
+
+    g_mutex_lock(&export_mutex);
+
+    if (export_thread != NULL) {
+        export_cancel_requested = 1;
+        thread = export_thread;
+        export_thread = NULL;
+    }
+
+    g_mutex_unlock(&export_mutex);
+
+    if (thread != NULL) {
+        g_thread_join(thread);
+    }
+}
+
 /* ------------------------------------------------------------------------- */
 /* Lifecycle                                                                 */
 /* ------------------------------------------------------------------------- */
@@ -1455,6 +1882,12 @@ void mlt_bridge_shutdown(void)
 {
     ensure_locks();
 
+    /*
+     * The export worker uses the process-wide MLT factory. It must be fully
+     * joined before playback tears that factory down.
+     */
+    cancel_export_and_join();
+
     g_mutex_lock(&engine_mutex);
 
     close_producer_locked();
@@ -1474,6 +1907,173 @@ void mlt_bridge_shutdown(void)
     g_mutex_unlock(&engine_mutex);
 
     release_slots();
+}
+
+
+/* ------------------------------------------------------------------------- */
+/* Export                                                                    */
+/* ------------------------------------------------------------------------- */
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_export_start(
+    const char *source_path,
+    const char *output_path,
+    int64_t in_frame,
+    int64_t out_frame)
+{
+    ensure_locks();
+
+    if (source_path == NULL ||
+        source_path[0] == '\0' ||
+        output_path == NULL ||
+        output_path[0] == '\0' ||
+        out_frame < in_frame) {
+        g_mutex_lock(&export_mutex);
+        export_set_error_locked("Invalid export request.");
+        g_mutex_unlock(&export_mutex);
+
+        return 0;
+    }
+
+    g_mutex_lock(&engine_mutex);
+    const int initialized = repository != NULL;
+    g_mutex_unlock(&engine_mutex);
+
+    if (!initialized) {
+        g_mutex_lock(&export_mutex);
+        export_set_error_locked("MLT is not initialized.");
+        g_mutex_unlock(&export_mutex);
+
+        return 0;
+    }
+
+    join_finished_export_thread();
+
+    g_mutex_lock(&export_mutex);
+
+    if (export_running ||
+        export_thread != NULL) {
+        export_set_error_locked("An export is already running.");
+        g_mutex_unlock(&export_mutex);
+
+        return 0;
+    }
+
+    ExportJob *job =
+        g_new0(ExportJob, 1);
+
+    if (job == NULL) {
+        export_set_error_locked("Could not allocate the export job.");
+        g_mutex_unlock(&export_mutex);
+
+        return 0;
+    }
+
+    job->source_path = g_strdup(source_path);
+    job->output_path = g_strdup(output_path);
+    job->in_frame = in_frame;
+    job->out_frame = out_frame;
+
+    if (job->source_path == NULL ||
+        job->output_path == NULL) {
+        export_job_free(job);
+        export_set_error_locked("Could not copy the export paths.");
+        g_mutex_unlock(&export_mutex);
+
+        return 0;
+    }
+
+    export_running = 1;
+    export_success = 0;
+    export_cancel_requested = 0;
+    export_progress = 0.0;
+    export_set_error_locked(NULL);
+
+    export_thread =
+        g_thread_new(
+            "mlt-player-export",
+            export_worker,
+            job
+        );
+
+    if (export_thread == NULL) {
+        export_running = 0;
+        export_job_free(job);
+        export_set_error_locked("Could not start the export worker.");
+        g_mutex_unlock(&export_mutex);
+
+        return 0;
+    }
+
+    g_mutex_unlock(&export_mutex);
+
+    return 1;
+}
+
+MLT_BRIDGE_EXPORT
+void mlt_bridge_export_cancel(void)
+{
+    ensure_locks();
+
+    g_mutex_lock(&export_mutex);
+
+    if (export_running) {
+        export_cancel_requested = 1;
+    }
+
+    g_mutex_unlock(&export_mutex);
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_export_is_running(void)
+{
+    ensure_locks();
+
+    g_mutex_lock(&export_mutex);
+    const int result = export_running;
+    g_mutex_unlock(&export_mutex);
+
+    if (!result) {
+        join_finished_export_thread();
+    }
+
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+double mlt_bridge_export_progress(void)
+{
+    ensure_locks();
+
+    g_mutex_lock(&export_mutex);
+    const double result = export_progress;
+    g_mutex_unlock(&export_mutex);
+
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_export_succeeded(void)
+{
+    ensure_locks();
+
+    g_mutex_lock(&export_mutex);
+    const int result = !export_running && export_success;
+    g_mutex_unlock(&export_mutex);
+
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+const char *mlt_bridge_export_error(void)
+{
+    ensure_locks();
+
+    g_mutex_lock(&export_mutex);
+    const char *result = export_error;
+    g_mutex_unlock(&export_mutex);
+
+    return result;
 }
 
 /* ------------------------------------------------------------------------- */

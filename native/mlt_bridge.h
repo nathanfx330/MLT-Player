@@ -49,6 +49,37 @@ MLT_BRIDGE_EXPORT int64_t
 mlt_bridge_texture_id(void);
 
 /* ------------------------------------------------------------------------- */
+/* Export                                                                    */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Start a background MP4 export using a separate MLT graph. In/out are
+ * absolute source frame numbers and are inclusive.
+ */
+MLT_BRIDGE_EXPORT int
+mlt_bridge_export_start(
+    const char *source_path,
+    const char *output_path,
+    int64_t in_frame,
+    int64_t out_frame
+);
+
+MLT_BRIDGE_EXPORT void
+mlt_bridge_export_cancel(void);
+
+MLT_BRIDGE_EXPORT int
+mlt_bridge_export_is_running(void);
+
+MLT_BRIDGE_EXPORT double
+mlt_bridge_export_progress(void);
+
+MLT_BRIDGE_EXPORT int
+mlt_bridge_export_succeeded(void);
+
+MLT_BRIDGE_EXPORT const char *
+mlt_bridge_export_error(void);
+
+/* ------------------------------------------------------------------------- */
 /* Media                                                                     */
 /* ------------------------------------------------------------------------- */
 
