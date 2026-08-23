@@ -1529,38 +1529,6 @@ static int output_file_has_data(const char *path)
         info.st_size > 0;
 }
 
-static char *export_sequence_frame_path(
-    const char *directory,
-    int64_t sequence_number)
-{
-    if (directory == NULL ||
-        directory[0] == '\0' ||
-        sequence_number <= 0) {
-        return NULL;
-    }
-
-    char *filename =
-        g_strdup_printf(
-            "frame_%06lld.png",
-            (long long)sequence_number
-        );
-
-    if (filename == NULL) {
-        return NULL;
-    }
-
-    char *path =
-        g_build_filename(
-            directory,
-            filename,
-            NULL
-        );
-
-    g_free(filename);
-
-    return path;
-}
-
 /*
  * image2 treats percent signs in its target as filename-pattern syntax.
  * Escape any literal percent signs in the chosen directory before appending
@@ -1603,7 +1571,7 @@ static char *export_sequence_consumer_target(
     return target;
 }
 
-static int export_sequence_filename_is_owned(
+static int64_t export_sequence_frame_number(
     const char *name)
 {
     static const char prefix[] = "frame_";
@@ -1612,7 +1580,7 @@ static int export_sequence_filename_is_owned(
     if (name == NULL ||
         !g_str_has_prefix(name, prefix) ||
         !g_str_has_suffix(name, suffix)) {
-        return 0;
+        return -1;
     }
 
     const size_t name_length = strlen(name);
@@ -1620,28 +1588,70 @@ static int export_sequence_filename_is_owned(
     const size_t suffix_length = strlen(suffix);
 
     if (name_length <= prefix_length + suffix_length) {
-        return 0;
+        return -1;
     }
 
     const size_t digits_length =
         name_length - prefix_length - suffix_length;
 
     if (digits_length < 6) {
-        return 0;
+        return -1;
     }
+
+    int64_t value = 0;
 
     for (size_t index = 0;
          index < digits_length;
          index++) {
-        const char value =
+        const char digit =
             name[prefix_length + index];
 
-        if (value < '0' || value > '9') {
-            return 0;
+        if (digit < '0' || digit > '9') {
+            return -1;
         }
+
+        const int next_digit = digit - '0';
+
+        if (value > (G_MAXINT64 - next_digit) / 10) {
+            return -1;
+        }
+
+        value = (value * 10) + next_digit;
     }
 
-    return 1;
+    return value > 0 ? value : -1;
+}
+
+static int export_sequence_filename_is_owned(
+    const char *name)
+{
+    return export_sequence_frame_number(name) > 0;
+}
+
+static int export_directory_is_empty(
+    const char *directory)
+{
+    if (directory == NULL ||
+        directory[0] == '\0') {
+        return 0;
+    }
+
+    GDir *dir =
+        g_dir_open(directory, 0, NULL);
+
+    if (dir == NULL) {
+        return 0;
+    }
+
+    const char *name =
+        g_dir_read_name(dir);
+
+    const int is_empty =
+        name == NULL;
+
+    g_dir_close(dir);
+
+    return is_empty;
 }
 
 /*
@@ -1749,6 +1759,20 @@ static int export_prepare_destination(
                 failure,
                 failure_size,
                 "The image-sequence destination directory is unavailable."
+            );
+            return 0;
+        }
+
+        /*
+         * Native code enforces the same ownership contract as the Dart UI:
+         * a sequence export only starts in a fresh, empty directory. This
+         * makes cancellation cleanup safe even for callers outside Flutter.
+         */
+        if (!export_directory_is_empty(job->output_path)) {
+            export_set_failure(
+                failure,
+                failure_size,
+                "The image-sequence destination directory must be empty."
             );
             return 0;
         }
@@ -1998,20 +2022,122 @@ static int export_prepare_consumer_profile(
     return 1;
 }
 
+static int export_source_has_audio(
+    mlt_producer source_producer)
+{
+    if (source_producer == NULL) {
+        return 0;
+    }
+
+    mlt_properties properties =
+        MLT_PRODUCER_PROPERTIES(source_producer);
+
+    if (properties == NULL) {
+        return 0;
+    }
+
+    const char *audio_index_value =
+        mlt_properties_get(
+            properties,
+            "audio_index"
+        );
+
+    if (audio_index_value != NULL) {
+        return mlt_properties_get_int(
+            properties,
+            "audio_index"
+        ) >= 0;
+    }
+
+    /*
+     * Some producer types do not publish audio_index. If stream metadata is
+     * available, scan it before falling back to the historic "audio may be
+     * present" behavior.
+     */
+    if (mlt_properties_get(
+            properties,
+            "meta.media.nb_streams") != NULL) {
+        const int stream_total =
+            mlt_properties_get_int(
+                properties,
+                "meta.media.nb_streams"
+            );
+
+        for (int index = 0;
+             index < stream_total;
+             index++) {
+            char key[128];
+
+            snprintf(
+                key,
+                sizeof(key),
+                "meta.media.%d.stream.type",
+                index
+            );
+
+            const char *type =
+                mlt_properties_get(
+                    properties,
+                    key
+                );
+
+            if (type != NULL &&
+                strcmp(type, "audio") == 0) {
+                return 1;
+            }
+        }
+
+        return 0;
+    }
+
+    return 1;
+}
+
 static void export_configure_mp4_consumer(
-    mlt_properties properties)
+    mlt_properties properties,
+    mlt_producer source_producer)
 {
     /*
-     * POC 9 starts with one dependable delivery preset. The UI can expose
-     * codec/container profiles after the independent render path is proven.
+     * Fixed POC 9 delivery preset. Match the progressive/deinterlaced image
+     * policy used by the viewer and PNG exports, and do not manufacture an
+     * AAC stream when the source has no audio.
      */
     mlt_properties_set(properties, "f", "mp4");
     mlt_properties_set(properties, "vcodec", "libx264");
-    mlt_properties_set(properties, "acodec", "aac");
     mlt_properties_set(properties, "pix_fmt", "yuv420p");
     mlt_properties_set(properties, "preset", "medium");
     mlt_properties_set_int(properties, "crf", 18);
     mlt_properties_set(properties, "movflags", "+faststart");
+
+    mlt_properties_set(
+        properties,
+        "deinterlacer",
+        MLT_BRIDGE_DEINTERLACER
+    );
+    mlt_properties_set_int(
+        properties,
+        "top_field_first",
+        -1
+    );
+    mlt_properties_set_int(
+        properties,
+        "progressive",
+        1
+    );
+
+    if (export_source_has_audio(source_producer)) {
+        mlt_properties_set(
+            properties,
+            "acodec",
+            "aac"
+        );
+    } else {
+        mlt_properties_set_int(
+            properties,
+            "an",
+            1
+        );
+    }
 }
 
 static void export_configure_wav_audio_consumer(
@@ -2019,13 +2145,14 @@ static void export_configure_wav_audio_consumer(
     mlt_producer source_producer)
 {
     /*
-     * POC 9.4 starts audio-only export with one transparent, dependable
-     * preset: uncompressed 16-bit PCM in a WAV container. Disable video
-     * explicitly so a video-bearing source produces audio only.
+     * POC 9.4 uses one dependable professional interchange preset:
+     * uncompressed 24-bit PCM in a WAV container. MLT renders 32-bit integer
+     * samples internally because it has no 24-bit render-buffer format;
+     * FFmpeg's pcm_s24le encoder writes the final 24-bit samples.
      */
     mlt_properties_set(properties, "f", "wav");
-    mlt_properties_set(properties, "acodec", "pcm_s16le");
-    mlt_properties_set(properties, "mlt_audio_format", "s16");
+    mlt_properties_set(properties, "acodec", "pcm_s24le");
+    mlt_properties_set(properties, "mlt_audio_format", "s32le");
     mlt_properties_set_int(properties, "vn", 1);
 
     /*
@@ -2119,7 +2246,7 @@ static void export_configure_png_common(
     mlt_properties_set(properties, "mlt_image_format", "rgba");
 
     /* Match the progressive frame the viewer presents. */
-    mlt_properties_set(properties, "rescale", "bilinear");
+    mlt_properties_set(properties, "rescale", "lanczos");
     mlt_properties_set(properties, "deinterlacer", MLT_BRIDGE_DEINTERLACER);
     mlt_properties_set_int(properties, "top_field_first", -1);
     mlt_properties_set_int(properties, "progressive", 1);
@@ -2158,7 +2285,10 @@ static int export_configure_consumer(
 {
     switch (kind) {
         case EXPORT_KIND_MP4:
-            export_configure_mp4_consumer(properties);
+            export_configure_mp4_consumer(
+                properties,
+                source_producer
+            );
             break;
 
         case EXPORT_KIND_PNG_FRAME:
@@ -2192,6 +2322,75 @@ static int export_configure_consumer(
     return 1;
 }
 
+static int export_sequence_outputs_complete(
+    const char *directory,
+    int64_t expected_frames)
+{
+    if (directory == NULL ||
+        directory[0] == '\0' ||
+        expected_frames <= 0) {
+        return 0;
+    }
+
+    GDir *dir =
+        g_dir_open(directory, 0, NULL);
+
+    if (dir == NULL) {
+        return 0;
+    }
+
+    int64_t owned_count = 0;
+    int64_t minimum_frame = G_MAXINT64;
+    int64_t maximum_frame = 0;
+    int all_have_data = 1;
+
+    const char *name = NULL;
+
+    while ((name = g_dir_read_name(dir)) != NULL) {
+        const int64_t frame_number =
+            export_sequence_frame_number(name);
+
+        if (frame_number <= 0) {
+            continue;
+        }
+
+        owned_count += 1;
+
+        if (frame_number < minimum_frame) {
+            minimum_frame = frame_number;
+        }
+
+        if (frame_number > maximum_frame) {
+            maximum_frame = frame_number;
+        }
+
+        char *path =
+            g_build_filename(
+                directory,
+                name,
+                NULL
+            );
+
+        if (path == NULL ||
+            !output_file_has_data(path)) {
+            all_have_data = 0;
+        }
+
+        g_free(path);
+    }
+
+    g_dir_close(dir);
+
+    /*
+     * Filenames are unique directory entries. If N owned files exist and
+     * their minimum and maximum indices are 1 and N, there can be no gap.
+     */
+    return all_have_data &&
+           owned_count == expected_frames &&
+           minimum_frame == 1 &&
+           maximum_frame == expected_frames;
+}
+
 static int export_output_completed(
     const ExportJob *job,
     mlt_producer source_producer,
@@ -2221,29 +2420,10 @@ static int export_output_completed(
             const int64_t final_position =
                 (int64_t)mlt_producer_position(source_producer);
 
-            char *first_path =
-                export_sequence_frame_path(
+            if (final_position >= total_frames - 1 &&
+                export_sequence_outputs_complete(
                     job->output_path,
-                    1
-                );
-
-            char *last_path =
-                export_sequence_frame_path(
-                    job->output_path,
-                    total_frames
-                );
-
-            const int completed =
-                first_path != NULL &&
-                last_path != NULL &&
-                final_position >= total_frames - 1 &&
-                output_file_has_data(first_path) &&
-                output_file_has_data(last_path);
-
-            g_free(first_path);
-            g_free(last_path);
-
-            if (completed) {
+                    total_frames)) {
                 return 1;
             }
 
@@ -2301,6 +2481,7 @@ static gpointer export_worker(gpointer data)
 
     int succeeded = 0;
     int cancelled = 0;
+    int destination_prepared = 0;
     char failure[512] = "";
 
     if (!export_prepare_source_graph(
@@ -2390,6 +2571,8 @@ static gpointer export_worker(gpointer data)
         goto cleanup;
     }
 
+    destination_prepared = 1;
+
     if (mlt_consumer_start(export_consumer) != 0) {
         export_set_failure(
             failure,
@@ -2470,7 +2653,8 @@ cleanup:
     g_free(owned_consumer_target);
     owned_consumer_target = NULL;
 
-    if (!succeeded) {
+    if (!succeeded &&
+        destination_prepared) {
         export_remove_partial_output(job);
     }
 

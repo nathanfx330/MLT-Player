@@ -1,59 +1,24 @@
 # MLT Player
 
-[![CI](https://github.com/nathanfx330/MLT-Player/actions/workflows/ci.yml/badge.svg)](https://github.com/nathanfx330/MLT-Player/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 A desktop media player built with **Flutter** and **MLT (Media Lovin' Toolkit)**.
 
 Flutter owns the application. MLT owns the media. The two meet through a small
-C bridge, and video arrives in the interface as an OpenGL texture rather than
-in a window of its own.
+C bridge, and video reaches Flutter as an OpenGL texture rather than in a
+second native playback window.
 
-The target is specific: **recover the practical role of QuickTime 7 Pro**.
+The target is deliberately narrow: **recover the practical role of QuickTime
+7 Pro**.
 
-Not an NLE. Not a batch transcoder. A tool for opening a file, looking closely,
-making one surgical change, saving or exporting it, and closing it.
-
----
-
-## Why QuickTime 7 Pro
-
-QuickTime 7 Pro was not an editor. That is the point.
-
-It opened quickly, showed you the file, and let you do one precise thing to
-it: set an In and an Out, trim, step a frame at a time, inspect the streams,
-play a selection, paste another clip as a parallel track, offset it, inspect
-alpha, export an image sequence, or save a reference movie.
-
-Then it closed.
-
-No bins. No project conform. No primary editing timeline. No render queue as
-the center of the application.
-
-For post-production work, it lived beside the real editor.
-
-That shape of tool largely disappeared. VLC plays but does not edit. FFmpeg
-transforms but does not let you work visually. Shotcut, Kdenlive and Resolve
-are project-based editors, which is a different job.
-
-The gap is:
-
-**open, look closely, do one thing, save, close.**
-
-MLT is a good engine for that job. Its producers, playlists, tractors,
-filters, transitions and consumers already contain most of the underlying
-operations. The work here is not to expose all of MLT. It is to expose the
-small subset that belongs in this kind of tool and deliberately refuse the
-rest.
+Not an NLE. Not a batch transcoder. Open a file, inspect it closely, make one
+surgical change, save or export it, and close it.
 
 ---
 
 ## Current status
 
-The player, precise transport, inspection, non-destructive selection/trim and
-the first background export path are all working.
-
-Built against **MLT 7.22.0**.
+Built against **MLT 7.22.0** on Linux.
 
 | Area | State |
 | --- | --- |
@@ -69,26 +34,49 @@ Built against **MLT 7.22.0**.
 | Generated clip timecode | Done |
 | Embedded source timecode when present | Done |
 | Stream / codec inspection | Done |
-| Data size and average data rate | Done |
-| Pixel format / colorspace / transfer / range | Done |
-| Full container stream list | Done |
 | In / Out selection | Done |
-| Play Selection | Done |
-| Loop Selection | Done |
+| Play Selection / Loop Selection | Done |
 | Undo / Redo | Done |
 | Non-destructive Trim Selection | Done |
 | Background MP4 export | Done |
-| Selection / active-clip export | Done |
-| Export progress and cancel | Done |
-| Image-sequence / still / audio export options | Next |
+| Current-frame PNG export | Done |
+| PNG image-sequence export | Done |
+| WAV audio-only export | Done |
+| Grouped Export control | Done |
+| Export preset / codec selection | Next |
+| Explicit output frame-rate control | Next |
 | Multi-track / Add to Movie | Planned |
 | MLT XML interchange | Planned |
 
+The POC 9 export family is now proven end-to-end. The current hardening pass
+standardizes output policy, strengthens sequence cleanup/validation, and adds
+deterministic test media before more export options are introduced.
+
 ---
 
-## What works now
+## What MLT Player is for
 
-### Precise transport
+QuickTime 7 Pro was useful because it was not trying to be an editor.
+
+It could open quickly, show the file, let you set In and Out, trim, step a
+frame at a time, inspect streams, export a still or image sequence, extract
+or export audio, and write a new movie without requiring a project workflow.
+
+MLT Player follows that shape:
+
+**open → inspect → do one precise operation → export/save → close**
+
+Deliberate non-goals:
+
+- no bins
+- no giant project workflow
+- no primary editing timeline
+- no batch-transcoder-centered interface
+- no feature merely because MLT exposes it
+
+---
+
+## Precise transport
 
 Transport is frame-aware rather than only time-aware.
 
@@ -98,20 +86,19 @@ Transport is frame-aware rather than only time-aware.
 - `J` cycles reverse through `-1×`, `-2×`, `-4×`, `-8×`.
 - Changing direction begins at `1×` in the new direction.
 - Loop preserves the current shuttle magnitude.
-- Play All Frames switches MLT between real-time frame-dropping playback and
-  asynchronous no-drop playback.
-- The transport readout can show either frame number or generated clip-relative
-  timecode.
-- Source timecode is shown separately when the source actually contains it.
+- Play All Frames switches MLT to no-drop playback.
+- Generated clip timecode starts at `00:00:00:00`.
+- Embedded source timecode remains source-relative through trims.
 
-Reverse playback is supported, but codec structure still matters. Long-GOP
-H.264/H.265 media is inherently much more expensive to decode backward than
-ProRes, DNxHR, MJPEG or image sequences.
+Reverse playback depends on codec structure. Long-GOP H.264/H.265 is much
+more expensive to decode backward than intra-frame media such as ProRes,
+DNxHR, MJPEG, or image sequences.
 
-### Inspection
+---
 
-The Inspector reports the media MLT actually opened rather than guessing from
-the filename.
+## Inspection
+
+The Inspector reports metadata from the media MLT actually opened.
 
 Current readouts include:
 
@@ -121,509 +108,389 @@ Current readouts include:
 - duration
 - frame count
 - file size
-- average data rate
-- selected video stream
-- selected audio stream
+- average whole-file data rate
+- selected video and audio stream indices
 - codec short and long names
 - pixel format
 - colorspace
 - transfer characteristic
 - color range
 - source timecode when present
-- full stream list
+- complete stream list
 - stream language
 - stream bitrate
 - video dimensions
-- audio channel count and sample rate
+- audio channel count
+- audio sample rate
 
-The Inspector is scrollable and intentionally read-only.
+Color primaries are intentionally not shown yet because the current MLT 7.22
+metadata path used here does not expose an independent source-primaries value
+that this implementation trusts.
 
-### Selection and trim
+---
+
+## Selection and trim
 
 Selection is frame-based.
 
 - `I` sets the In frame.
 - `O` sets the Out frame.
-- The marked range is shown directly on the scrubber.
+- The marked range is shown on the scrubber.
 - Selection duration and inclusive frame count are displayed.
 - Play Selection plays only the marked range.
-- With Loop enabled, Play Selection loops In → Out → In.
+- Loop + Play Selection loops In → Out → In.
 - Trim Selection turns the marked range into the active clip.
-- Trim is non-destructive: the source file and source producer remain intact.
-- The trimmed clip gets its own clip-relative frame count and timecode starting
-  at frame 1 / `00:00:00:00`.
-- Embedded source timecode continues to refer to the original source position.
+- Trim is non-destructive.
 - Trims can be nested.
+- Clip-relative frames restart at frame 1 after a trim.
+- Generated clip timecode restarts at `00:00:00:00`.
+- Embedded source timecode remains tied to the original source position.
 
 Undo and Redo are application-owned edit history:
 
 - `Ctrl+Z` — Undo
 - `Ctrl+Shift+Z` — Redo
 
-In/Out marker changes and trims both participate in the same history stack.
+---
 
-### Export
-
-POC 9 now has a working first export path.
+## Export
 
 Export runs on a **separate MLT producer/profile/consumer graph** in a native
-background thread. It does not commandeer the live playback producer,
-`sdl2_audio` consumer or Flutter texture.
+background thread. It does not take over the live playback producer,
+`sdl2_audio` consumer, or Flutter texture.
 
-Current export behavior:
+All range exports follow the same rule:
 
-- `Ctrl+E` or **EXPORT**
-- exports the marked In/Out selection when one exists
-- otherwise exports the current active trimmed clip
-- progress is reported in the interface
-- export can be cancelled
-- failed or cancelled renders remove the partial file
-- playback remains independent while export is running
+1. marked In/Out selection, if present
+2. otherwise the current trimmed clip
+3. otherwise the whole active clip
 
-The first proven preset is intentionally fixed:
+The grouped Export control keeps range-export types together:
 
 ```text
-Container: MP4
-Video:     H.264 / libx264
-Audio:     AAC
-Pixel fmt: yuv420p
-Quality:   CRF 18
-MLT:       real_time = -1
+Export
+ ├── Export Video
+ ├── Export Image Sequence
+ └── Export Audio (WAV)
 ```
 
-The next export work is to make output type a user choice: movie presets,
-image sequence, still frame and audio-only.
+Current-frame PNG remains a separate snapshot operation.
+
+### Keyboard shortcuts
+
+- `Ctrl+E` — run the currently selected Export mode
+- `Ctrl+Alt+E` — one-shot PNG image-sequence export
+- `Ctrl+Shift+E` — export the current frame as PNG
+
+`Ctrl+Alt+E` is a pure action: it does not change the persistent split-button
+Export mode.
+
+### MP4 preset
+
+The fixed movie preset is currently:
+
+```text
+Container:   MP4
+Video:       H.264 / libx264
+Audio:       AAC when source audio exists
+Pixel fmt:   yuv420p
+Quality:     CRF 18
+Preset:      medium
+Fast start:  yes
+Frames:      progressive output
+MLT:         real_time = -1
+```
+
+Interlaced sources are rendered through the same deinterlacing policy used by
+the viewer and PNG exports. Video-only sources do not receive a manufactured
+silent AAC stream.
+
+### Current-frame PNG
+
+Current-frame capture snapshots the visible source frame before pausing, then
+parks transport on that exact frame before opening the save dialog.
+
+PNG exports are generated from the source graph rather than copied from the
+Flutter texture.
+
+For anamorphic sources, PNG output is written at **display dimensions with
+square pixels**. For example, a 1440×1080 source with 16:9 display aspect is
+written as approximately 1920×1080 rather than as a squeezed 1440×1080 PNG.
+
+Offline PNG scaling uses Lanczos interpolation.
+
+RGBA is currently preserved for PNG output so real source alpha is not lost.
+Alpha interpretation will be handled explicitly as part of the track/
+compositing work rather than guessed from codec-name strings.
+
+### PNG image sequence
+
+Image-sequence export writes to a fresh dedicated directory:
+
+```text
+movie_frames/
+  frame_000001.png
+  frame_000002.png
+  frame_000003.png
+  ...
+```
+
+The native bridge refuses to start a sequence export unless the supplied
+destination directory exists and is empty. That makes cancellation cleanup a
+native invariant rather than a Dart-only convention.
+
+Completion validation checks the final producer position and scans the output
+directory to verify:
+
+- the expected number of owned PNG files exists
+- numbering begins at 1
+- numbering ends at the expected final frame
+- every owned PNG is non-empty
+
+Because directory entries are unique, matching count + minimum + maximum
+proves there is no gap in the sequence.
+
+Cancelled or failed sequence exports remove only filenames owned by the
+export and remove the directory only if it becomes empty.
+
+### WAV audio export
+
+The fixed audio-only interchange preset is:
+
+```text
+Container:  WAV
+Codec:      PCM signed 24-bit little-endian
+Video:      disabled
+Rate:       preserve selected source rate when available
+Channels:   preserve selected source channel count when available
+```
+
+MLT renders audio as signed 32-bit integer internally for this path and FFmpeg
+writes the final `pcm_s24le` samples. MLT does not have a 24-bit internal
+render-buffer format.
 
 ---
 
-## QuickTime 7 Pro feature map
+## Deterministic export fixtures
 
-### Playback and transport
+`tools/generate_export_fixtures.sh` creates a small local regression set using
+FFmpeg:
 
-| QuickTime 7 Pro | MLT / application mechanism | Status |
-| --- | --- | --- |
-| Play, pause, scrub | producer speed + seek | Done |
-| Full screen / Present Movie | GTK host channel | Done |
-| Loop | boundary restart | Done |
-| Play selection only | frame selection + bounded transport | Done |
-| Play All Frames | consumer `real_time = -1` | Done |
-| Frame forward / frame back | frame-derived seek | Done |
-| Variable speed / shuttle | `mlt_producer_set_speed` | Done |
-| Reverse playback | negative producer speed | Done |
-| Source timecode | avformat metadata through MLT | Done |
-| Half / actual / double size | Flutter layout | Mapped |
-| Pitch-corrected speed | `timewarp` producer | Mapped |
-| Audio balance / bass / treble | `panner`, `volume`, filters | Mapped |
-| Video image controls | MLT image filters | Mapped |
+```text
+progressive_av.mp4
+interlaced_av.mkv
+video_only.mp4
+anamorphic_1440x1080_16x9.mp4
+pcm24.wav
+```
 
-### Inspection
+Run:
 
-| QuickTime 7 Pro | MLT / application mechanism | Status |
-| --- | --- | --- |
-| Movie Inspector | producer `meta.media.*` | Done |
-| Frame rate / duration / frame count | producer properties | Done |
-| Display aspect / anamorphic flag | profile + media metadata | Done |
-| Data size | filesystem size | Done |
-| Average data rate | file bits / duration | Done |
-| Codec per stream | `meta.media.N.codec.*` | Done |
-| Source timecode | stream/container metadata | Done |
-| Full stream list | `meta.media.N.*` | Done |
-| Pixel format | `.codec.pix_fmt` | Done |
-| Colorspace | `.codec.colorspace` | Done |
-| Transfer characteristic | `.codec.color_trc` | Done |
-| Color range | `meta.media.color_range` | Done |
+```bash
+bash tools/generate_export_fixtures.sh
+```
 
-Color primaries are intentionally not presented yet because the current MLT
-7.22 metadata path used by the Inspector does not expose an independent,
-reliable source-primaries value through this implementation.
+or choose a destination directory:
 
-### Selection and editing
+```bash
+bash tools/generate_export_fixtures.sh /tmp/mlt-player-fixtures
+```
 
-| QuickTime 7 Pro | Mechanism | Status |
-| --- | --- | --- |
-| In / Out points | frame-based application selection | Done |
-| Play selection | bounded transport | Done |
-| Trim to selection | active non-destructive clip bounds | Done |
-| Undo / Redo | application edit-state history | Done |
-| Cut / copy / delete | MLT playlist operations | Mapped |
-| Paste at playhead | `mlt_playlist_insert_at` | Mapped |
-| Add to end | playlist append | Mapped |
+The script prints an `ffprobe` summary after generation.
 
-### Tracks and layers
+Useful POC 9 hardening checks:
 
-| QuickTime 7 Pro | Mechanism in MLT | Status |
-| --- | --- | --- |
-| Add to Movie | tractor + multitrack | Planned |
-| Enable / disable track | track `hide` | Mapped |
-| Layer ordering | track order | Mapped |
-| Track offset | leading playlist blank | Mapped |
-| Position / scale / rotate / flip | affine / blend transition | Mapped |
-| Graphics modes / blending | composite / qtblend / luma / matte / mix | Mapped |
-| Track mask | mask filters | Mapped |
-| Straight / premultiplied alpha interpretation | bridge / compositing work required | Open |
-| Extract tracks | new tractor from selected tracks | Mapped |
-| Per-track volume / balance | `volume` / `panner` | Mapped |
+```bash
+# Video-only MP4 export should contain no audio stream.
+ffprobe -v error -select_streams a \
+  -show_entries stream=index,codec_name \
+  -of default=noprint_wrappers=1 exported_video_only.mp4
 
-### Export
+# Interlaced input should produce progressive MP4 output.
+ffprobe -v error -select_streams v:0 \
+  -show_entries stream=field_order \
+  -of default=noprint_wrappers=1 exported_interlaced.mp4
 
-| QuickTime 7 Pro | Mechanism | Status |
-| --- | --- | --- |
-| Export movie | separate `avformat` consumer | Done |
-| H.264 / AAC MP4 | `libx264` + AAC | Done |
-| Export selection | independent export producer bounded to selection | Done |
-| Export trimmed clip | active clip bounds | Done |
-| Progress | native export position polling | Done |
-| Cancel | native worker cancellation | Done |
-| Export current frame | single-frame consumer | Next |
-| Image sequence | `avformat` filename sequence | Next |
-| Audio only | video-disabled consumer | Next |
-| ProRes / DNxHR / other codecs | local FFmpeg capability | Planned |
-| Frame-rate conform | independent export profile | Mapped |
+# Anamorphic current-frame PNG should be display-sized (expected 1920x1080
+# for the included 1440x1080 / SAR 4:3 fixture).
+ffprobe -v error -select_streams v:0 \
+  -show_entries stream=width,height \
+  -of default=noprint_wrappers=1 exported_frame.png
 
-### Interchange
+# WAV export should be 24-bit PCM.
+ffprobe -v error -select_streams a:0 \
+  -show_entries stream=codec_name,sample_fmt,bits_per_raw_sample,sample_rate,channels \
+  -of default=noprint_wrappers=1 exported_audio.wav
+```
 
-| QuickTime 7 Pro | Mechanism | Status |
-| --- | --- | --- |
-| Reference movie | MLT XML | Planned |
-| Save self-contained | export consumer | In progress |
-| Open image sequence at chosen FPS | image-sequence producer + chosen profile | Planned |
-| Hold each image for N frames | producer `ttl` | Mapped |
-| Open URL | `avformat` producer | Mapped |
-| Chapter / text tracks | Not investigated | Open |
+Also verify manually that `Ctrl+Alt+E` performs a sequence export without
+changing the selected mode shown on the grouped Export control.
 
 ---
 
-## Roadmap by proofs
+## Architecture
 
-Development is organized as narrow proofs. A capability is not marked done
-until it has actually been run.
+```text
+Flutter UI
+    │
+    ├── PlayerEngine
+    │      ├── transport
+    │      ├── selection / trim / history
+    │      └── export state
+    │
+    ├── Dart FFI ───────────────► process-linked libmlt_bridge.so
+    │                                  │
+    └── MethodChannel ─► GTK runner    │
+                                       ▼
+                                      MLT
+                                       │
+                ┌──────────────────────┴──────────────────────┐
+                │                                             │
+          playback graph                                export graph
+                │                                             │
+       render threads + RGBA                    independent producer/profile
+                │                                + avformat consumer
+       triple frame buffer                              │
+                │                                       ├── MP4
+       OpenGL external texture                          ├── PNG
+                │                                       └── WAV
+              Flutter
+```
 
-### POC 0–5: Playback foundation — complete
+Important current architecture rules:
 
-The application shell, MLT lifecycle, media open, audio, external texture,
-threading model, viewport, seek, fullscreen, drag/drop and core playback path.
+- Dart resolves the bridge with `DynamicLibrary.process()`.
+- The GTK runner links the same bridge into the application process.
+- Playback bridge state is currently process-global.
+- One playback engine per process is intentional through POC 9.
+- Export owns an entirely separate MLT graph.
+- The MLT frame callback never takes the main engine mutex.
+- Video frame transfer uses three buffers so producer and Flutter raster
+  threads can own buffers independently.
+- Scaling, deinterlacing, and image conversion happen on MLT render threads.
 
-### POC 6: Precise transport — complete
+---
 
-*Can the player behave like an inspection instrument rather than a generic
-media player?*
+## Roadmap
 
-Proven:
+### POC 0–5 — playback foundation — complete
+
+- Flutter Linux shell
+- MLT lifecycle
+- media open/reopen
+- external OpenGL texture
+- audio
+- seek/scrub
+- fullscreen
+- drag/drop
+- still images
+- audio-only playback
+- anamorphic display handling
+- smoke testing
+
+### POC 6 — precise transport — complete
 
 - exact frame stepping
-- live frame readout
 - J/K/L shuttle
-- reverse
+- reverse playback
 - Loop
 - Play All Frames
-- source timecode
-- generated clip-relative timecode
+- generated timecode
+- embedded source timecode
 
-Whole-file ping-pong was tested and deliberately removed. It was not useful
-enough to justify the long-GOP reverse behavior it exposed.
+### POC 7 — inspection — complete
 
-### POC 7: Inspection parity — complete
-
-*Can it tell you what the old Movie Inspector told you?*
-
-Proven:
-
-- codec metadata
-- selected stream indices
-- full stream list
-- data size
-- average data rate
+- codecs and streams
+- frame geometry
+- rate / duration / frame count
+- data size / average data rate
 - pixel format
 - colorspace
 - transfer characteristic
 - color range
 - source timecode
 
-### POC 8: Selection and trim — complete
+### POC 8 — selection and trim — complete
 
-*Can it hold and edit a selection without touching the source file?*
-
-Proven:
-
-- In / Out points
-- visual selection range
-- duration / frame-count readout
+- In / Out
 - Play Selection
 - Loop Selection
 - Undo / Redo
-- non-destructive Trim Selection
+- non-destructive trim
 - nested trims
-- clip-relative transport after trim
-- source timecode preserved across trim
+- trim-aware transport
 
-### POC 9: Export — in progress
+### POC 9 — export — feature set complete, hardening in progress
 
-*Can it write the current clip back out without blocking or stealing the
-viewer?*
+Proven:
 
-Proven first slice:
-
-- independent export producer/profile/consumer
-- native background render thread
-- H.264/AAC MP4
-- export selection
-- export active trimmed clip
+- independent background export graph
+- MP4 export
+- current-frame PNG
+- PNG image sequence
+- WAV audio-only export
+- range export from selection / trim / whole clip
 - progress
 - cancel
 - partial-output cleanup
-- playback remains independent
+- grouped Export UI
 
-Next:
+Hardening now covers:
 
-- export presets / codec selection
-- image sequences
-- current-frame stills
-- audio-only export
+- progressive/deinterlaced MP4 policy
+- no manufactured audio track for video-only MP4
+- Lanczos PNG resampling
+- 24-bit PCM WAV output
+- one-shot image-sequence shortcut semantics
+- native empty-directory sequence ownership
+- complete sequence validation
+- deterministic fixture generation
+
+Next export slices:
+
+- output preset / codec selection
 - explicit output frame-rate control
 
-### POC 10: Tracks
+### Pre-POC 10 bridge hardening
 
-*Can two pieces of media exist in parallel and be positioned against each
-other?*
+Before track work:
+
+- replace borrowed returned strings with safe ownership/copy-out APIs
+- add native frame seek / frame position API
+- handle GL texture destruction only when it can be done with the correct GL
+  context
+
+### POC 10 — tracks
 
 Planned:
 
-- opaque-handle bridge refactor first
+- opaque engine handles
 - tractor / multitrack
 - second track
-- time offset
+- time offsets
 - layer order
 - blend mode
 - opacity
-- alpha interpretation
+- Add to Movie
+- explicit alpha interpretation
 
-The opaque-handle bridge is a precondition. The current bridge intentionally
-keeps one playback engine in process-global state.
+MLT RGBA is straight alpha while Flutter expects premultiplied compositing.
+That needs to be solved deliberately before track compositing is considered
+complete.
 
-### POC 11: Interchange
-
-*Can a session leave and come back?*
+### POC 11 — interchange
 
 Planned:
 
 - save MLT XML
 - open MLT XML
-- image sequences at a chosen frame rate
+- open image sequences at a chosen frame rate
 
 ---
 
-## Known technical questions
+## Linux development
 
-**Alpha is straight, Flutter wants premultiplied.**
-
-MLT's `mlt_image_rgba` carries straight, non-premultiplied alpha. Flutter's
-external-texture path expects premultiplied compositing. Opaque media hides
-the difference, so it must be solved before track compositing becomes a real
-feature.
-
-QuickTime 7 Pro exposed alpha interpretation explicitly. MLT Player should do
-the same rather than silently guessing.
-
-**Reverse playback depends on codec structure.**
-
-MLT accepts negative producer speed, but reverse decoding through avformat is
-bounded by keyframe spacing. Long-GOP H.264/H.265 can be slow. Intra-frame
-media behaves much better.
-
-**Export codec availability belongs to the local FFmpeg build.**
-
-The first export preset is proven, but future ProRes, DNxHR and other choices
-must be discovered from what the installed FFmpeg/MLT stack actually supports
-rather than presented as a fixed fantasy list.
-
-**One playback engine per process.**
-
-The bridge still owns playback state at file scope. That is simple and correct
-for the current single-player application. It is not sufficient for POC 10,
-where multiple producers/tracks need independent ownership. The bridge must
-move to opaque handles before tracks.
-
----
-
-## Non-goals
-
-The value of this project depends as much on what it refuses as on what it
-adds.
-
-- **Not a non-linear editor.** No bins, no primary editing timeline, no
-  project-conform workflow.
-- **Not a batch transcoder.** Export is for the file in front of you.
-- **Not a grading application.** Inspection and simple viewing controls are
-  not color management.
-- **No plugin API.**
-- **No new session format.** MLT XML will be the interchange/session format.
-- **No feature merely because MLT exposes it.** The UI stays small.
-
----
-
-## Architecture
-
-### Playback path
-
-```text
-Flutter UI
-    │
-    ├── PlayerEngine
-    │      ├── transport / selection / trim / history
-    │      └── export state
-    │
-    ├── Dart FFI ───────────────► libmlt_bridge.so
-    │                                  │
-    └── MethodChannel ─► GTK runner    │
-                         │              ▼
-                         │             MLT
-                         │              │
-                         │              ├── playback producer
-                         │              │
-                         │              ├── render threads
-                         │              │      └── scaled/deinterlaced RGBA
-                         │              │
-                         │              └── sdl2_audio consumer
-                         │                     │
-                         │                     ├── audio ─► speakers
-                         │                     │
-                         │                     └── consumer-frame-show
-                         │                              │
-                         │                              ▼
-                         │                        cached RGBA
-                         │                              │
-                         │                        triple buffer
-                         │                              │
-                         └── texture registration ◄────┘
-                                        │
-                                        ▼
-                                  OpenGL texture
-                                        │
-                                        ▼
-                               Flutter Texture widget
-```
-
-The frame callback is intentionally cheap. Rendering, scaling, deinterlacing
-and RGBA conversion happen ahead on MLT's render threads. The callback mostly
-claims the already-rendered frame, copies it into the bridge-owned buffer
-rotation, and notifies Flutter that a texture frame is available.
-
-The MLT callback never takes the main engine mutex. Transport calls and engine
-mutation are serialized separately, preventing the callback/transport lock
-inversion that would otherwise make deadlocks easy.
-
-Video uses three rotating buffers so MLT's copy and Flutter's OpenGL upload do
-not have to block one another.
-
-### Export path
-
-```text
-Current source path
-       │
-       ▼
-background export worker
-       │
-       ├── independent MLT profile
-       ├── independent producer
-       └── independent avformat consumer
-                 │
-                 ├── H.264 / AAC encode
-                 ├── progress
-                 └── cancel / cleanup
-```
-
-Export does not reuse the live playback producer or audio consumer. Playback
-can remain active while the export graph renders.
-
----
-
-## Project structure
-
-```text
-mlt_player/
-├── lib/
-│   ├── main.dart
-│   ├── models/
-│   │   └── media_info.dart
-│   ├── services/
-│   │   ├── host_channel.dart
-│   │   ├── mlt_bridge.dart
-│   │   └── player_engine.dart
-│   └── ui/
-│       └── widgets/
-│           └── media_inspector.dart
-│
-├── native/
-│   ├── mlt_bridge.c
-│   ├── mlt_bridge.h
-│   └── mlt_smoke.c
-│
-├── linux/
-│   ├── CMakeLists.txt
-│   └── runner/
-│       └── my_application.cc
-│
-├── tools/
-│   └── smoke.sh
-│
-├── .github/workflows/ci.yml
-├── pubspec.yaml
-├── analysis_options.yaml
-├── CHANGES.md
-├── LICENSE
-└── README.md
-```
-
-`DynamicLibrary.process()` in `mlt_bridge.dart` is intentional. The GTK runner
-already links the native bridge, and Dart must resolve that same loaded image
-so both sides share one process-global engine state. Opening another copy by
-path risks producing two independent bridge states.
-
----
-
-## Requirements
-
-Linux with Flutter desktop support enabled.
-
-```bash
-sudo apt install \
-  melt \
-  libmlt-dev \
-  libmlt-data \
-  libmlt++-dev \
-  libepoxy-dev \
-  libgtk-3-dev \
-  pkg-config \
-  build-essential
-```
-
-`libmlt-data` is required. MLT's loader producer reads its service dictionary
-from the data directory.
-
-Check MLT:
-
-```bash
-pkg-config --modversion mlt-framework-7
-```
-
-Check Flutter:
-
-```bash
-flutter doctor
-```
-
----
-
-## Building
-
-```bash
-git clone https://github.com/nathanfx330/MLT-Player.git
-cd MLT-Player
-flutter pub get
-flutter run -d linux
-```
-
-Changes to C, CMake or the Linux runner may require a clean rebuild:
+Typical native-change rebuild:
 
 ```bash
 flutter clean
@@ -631,82 +498,54 @@ flutter pub get
 flutter run -d linux
 ```
 
-Dart-only changes normally do not.
-
----
-
-## Headless smoke test
-
-`native/mlt_smoke.c` drives the bridge without Flutter and without a window.
-It exists to separate MLT/bridge failures from Flutter integration failures.
+Dart-only changes normally need only:
 
 ```bash
-tools/smoke.sh
-tools/smoke.sh /path/to/clip.mp4
+flutter test
+flutter run -d linux
 ```
+
+Common Ubuntu development dependencies include:
+
+```text
+melt
+libmlt-dev
+libmlt-data
+libmlt++-dev
+libepoxy-dev
+libgtk-3-dev
+pkg-config
+build-essential
+```
+
+`libmlt-data` matters because MLT service dictionaries are loaded at runtime.
 
 ---
 
-## Player controls
+## Known technical questions
 
-| Key | Action |
-| --- | --- |
-| Space | Play / pause |
-| K | Pause |
-| Left / Right | Previous / next frame |
-| J | Reverse shuttle: -1× → -2× → -4× → -8× |
-| L | Forward shuttle: 1× → 2× → 4× → 8× |
-| Up / Down | Volume |
-| Home / End | Start / end of active clip |
-| M | Mute |
-| F / double click | Fullscreen |
-| Escape | Leave fullscreen |
-| I | Set In |
-| O | Set Out |
-| Shift+Space | Play Selection |
-| Ctrl+T | Trim Selection |
-| Ctrl+Z | Undo |
-| Ctrl+Shift+Z | Redo |
-| Ctrl+I | Inspector |
-| Ctrl+O | Open media |
-| Ctrl+E | Export / cancel active export |
+### Borrowed C string lifetimes
 
-Loop and Play All Frames are also available directly in the transport UI.
+Several current bridge getters return pointers into shared bridge-owned storage
+after releasing their mutex. Dart consumes them immediately, but the API
+contract should be made explicit and safe before opaque handles and multiple
+engine instances are introduced.
 
-Controls float over the video and hide during uninterrupted viewing. They stay
-visible when hiding would be wrong: paused, no media, pointer over controls,
-scrubbing, Inspector open, or an error state.
+### OpenGL texture destruction
+
+The external GL texture currently lives for essentially the process lifetime.
+Cleanup should eventually call `glDeleteTextures`, but only from a path where
+the correct GL context is known to be current.
+
+### Alpha
+
+PNG exports currently preserve RGBA to avoid destroying real alpha. Reliable
+source-alpha detection and straight/premultiplied interpretation are deferred
+to the track/compositing milestone, where the distinction becomes part of the
+actual editing model.
 
 ---
 
 ## License
 
 MIT. See [LICENSE](LICENSE).
-
-This repository's source is MIT. The libraries it builds against retain their
-own licenses. MLT's framework is LGPL-2.1, and individual MLT modules can have
-different licensing requirements. Anyone distributing a binary should inspect
-the modules actually linked or loaded.
-
----
-
-## Development philosophy
-
-Each capability answers one narrow technical question before anything larger
-is built on top of it.
-
-A feature is not marked done because an API appears to support it. It is marked
-done when the implementation has been built and run.
-
-That rule has shaped the project so far:
-
-- transport was proven before selection
-- selection was proven before trim
-- Undo/Redo existed before trim depended on it
-- export began with one fixed, working preset before adding a preset system
-- multi-track work waits until the bridge ownership model can support it
-
-The goal is not to turn MLT into a giant Flutter surface.
-
-The goal is to rebuild the small, fast, precise tool that used to live beside
-the editor.

@@ -645,7 +645,6 @@ class _PlayerPageState extends State<PlayerPage>
         altPressed &&
         key == LogicalKeyboardKey.keyE) {
       if (!_engine.exporting) {
-        _selectExportMode(_ExportMode.imageSequence);
         _exportImageSequence();
       }
       return KeyEventResult.handled;
