@@ -2569,6 +2569,144 @@ static int secondary_base_size_for_source(
     return 1;
 }
 
+typedef enum _SecondaryPlacementResult {
+    SECONDARY_PLACEMENT_OK = 0,
+    SECONDARY_PLACEMENT_INVALID_ARGUMENT = 1,
+    SECONDARY_PLACEMENT_NO_DURATION = 2,
+    SECONDARY_PLACEMENT_NO_ROOM = 3,
+    SECONDARY_PLACEMENT_SOURCE_INIT_FAILED = 4,
+    SECONDARY_PLACEMENT_PLAYLIST_CREATE_FAILED = 5,
+    SECONDARY_PLACEMENT_LEAD_IN_FAILED = 6,
+    SECONDARY_PLACEMENT_APPEND_FAILED = 7
+} SecondaryPlacementResult;
+
+/*
+ * Build Layer 2's timeline in exactly one place.
+ *
+ * Preview and export own separate MLT producers/playlists, but the rules for
+ * when Layer 2 starts, how long it runs, and how stills are held must be
+ * identical. Keeping those rules here prevents a future trim/timing change
+ * from silently making the exported movie disagree with the viewer.
+ *
+ * The caller keeps ownership of source. On success playlist_out receives a
+ * newly created playlist owned by the caller. On failure this helper closes
+ * any playlist it created and leaves playlist_out NULL.
+ */
+static SecondaryPlacementResult build_secondary_playlist(
+    mlt_profile target_profile,
+    mlt_producer source,
+    mlt_position start_frame,
+    mlt_position base_length,
+    int source_is_still,
+    mlt_playlist *playlist_out,
+    mlt_position *normalized_start_out)
+{
+    if (playlist_out == NULL) {
+        return SECONDARY_PLACEMENT_INVALID_ARGUMENT;
+    }
+
+    *playlist_out = NULL;
+
+    if (normalized_start_out != NULL) {
+        *normalized_start_out = 0;
+    }
+
+    if (target_profile == NULL ||
+        source == NULL ||
+        base_length <= 0) {
+        return SECONDARY_PLACEMENT_INVALID_ARGUMENT;
+    }
+
+    mlt_position normalized_start = start_frame;
+
+    if (normalized_start < 0) {
+        normalized_start = 0;
+    }
+    if (normalized_start >= base_length) {
+        normalized_start = base_length - 1;
+    }
+
+    const mlt_position available_length =
+        base_length - normalized_start;
+
+    const mlt_position source_length =
+        source_is_still
+            ? 0
+            : mlt_producer_get_length(source);
+
+    if (!source_is_still &&
+        source_length <= 0) {
+        return SECONDARY_PLACEMENT_NO_DURATION;
+    }
+
+    const mlt_position playtime =
+        source_is_still
+            ? available_length
+            : (source_length < available_length
+                   ? source_length
+                   : available_length);
+
+    if (playtime <= 0) {
+        return SECONDARY_PLACEMENT_NO_ROOM;
+    }
+
+    const mlt_position source_out =
+        playtime - 1;
+
+    if (source_is_still) {
+        /*
+         * Still producers have a synthetic default length. Make the still
+         * explicitly last for every remaining base-movie frame.
+         */
+        mlt_properties_set_position(
+            MLT_PRODUCER_PROPERTIES(source),
+            "length",
+            playtime
+        );
+    }
+
+    if (mlt_producer_set_in_and_out(
+            source,
+            0,
+            source_out) != 0 ||
+        mlt_producer_seek(source, 0) != 0 ||
+        mlt_producer_set_speed(source, 0.0) != 0) {
+        return SECONDARY_PLACEMENT_SOURCE_INIT_FAILED;
+    }
+
+    mlt_playlist playlist =
+        mlt_playlist_new(target_profile);
+
+    if (playlist == NULL) {
+        return SECONDARY_PLACEMENT_PLAYLIST_CREATE_FAILED;
+    }
+
+    if (normalized_start > 0 &&
+        mlt_playlist_blank(
+            playlist,
+            normalized_start - 1) != 0) {
+        mlt_playlist_close(playlist);
+        return SECONDARY_PLACEMENT_LEAD_IN_FAILED;
+    }
+
+    if (mlt_playlist_append_io(
+            playlist,
+            source,
+            0,
+            source_out) != 0) {
+        mlt_playlist_close(playlist);
+        return SECONDARY_PLACEMENT_APPEND_FAILED;
+    }
+
+    *playlist_out = playlist;
+
+    if (normalized_start_out != NULL) {
+        *normalized_start_out = normalized_start;
+    }
+
+    return SECONDARY_PLACEMENT_OK;
+}
+
 /*
  * Encode the composite rectangle in exactly one place. Preview mutations and
  * offline export both call this helper, so adding a future transform cannot
@@ -2847,96 +2985,62 @@ static int export_prepare_source_graph(
 
     mlt_producer_probe(graph->export_secondary);
 
-    mlt_position secondary_start =
-        (mlt_position)job->export_secondary_start_frame;
-
-    if (secondary_start < 0) {
-        secondary_start = 0;
-    }
-    if (secondary_start >= source_length) {
-        secondary_start = source_length - 1;
-    }
-
-    const mlt_position available_length =
-        (mlt_position)source_length - secondary_start;
-    const mlt_position secondary_length =
-        job->export_secondary_is_still
-            ? 0
-            : mlt_producer_get_length(graph->export_secondary);
-    const mlt_position secondary_playtime =
-        job->export_secondary_is_still
-            ? available_length
-            : (secondary_length < available_length
-                   ? secondary_length
-                   : available_length);
-
-    if (secondary_playtime <= 0) {
-        export_set_failure(
-            failure,
-            failure_size,
-            "Layer 2 has no frames inside the base movie."
-        );
-        goto fail;
-    }
-
-    const mlt_position secondary_out =
-        secondary_playtime - 1;
-
-    if (job->export_secondary_is_still) {
-        mlt_properties_set_position(
-            MLT_PRODUCER_PROPERTIES(graph->export_secondary),
-            "length",
-            secondary_playtime
-        );
-    }
-
-    if (mlt_producer_set_in_and_out(
+    const SecondaryPlacementResult placement_result =
+        build_secondary_playlist(
+            graph->export_profile,
             graph->export_secondary,
-            0,
-            secondary_out) != 0 ||
-        mlt_producer_seek(graph->export_secondary, 0) != 0 ||
-        mlt_producer_set_speed(graph->export_secondary, 0.0) != 0) {
-        export_set_failure(
-            failure,
-            failure_size,
-            "MLT could not initialize Layer 2 for export."
+            (mlt_position)job->export_secondary_start_frame,
+            (mlt_position)source_length,
+            job->export_secondary_is_still,
+            &graph->export_secondary_playlist,
+            NULL
         );
-        goto fail;
-    }
 
-    graph->export_secondary_playlist =
-        mlt_playlist_new(graph->export_profile);
+    if (placement_result != SECONDARY_PLACEMENT_OK) {
+        const char *placement_error =
+            "Could not configure Layer 2 placement for export.";
 
-    if (graph->export_secondary_playlist == NULL) {
+        switch (placement_result) {
+            case SECONDARY_PLACEMENT_NO_DURATION:
+                placement_error =
+                    "Layer 2 reports no usable duration for export.";
+                break;
+
+            case SECONDARY_PLACEMENT_NO_ROOM:
+                placement_error =
+                    "Layer 2 has no frames inside the base movie.";
+                break;
+
+            case SECONDARY_PLACEMENT_SOURCE_INIT_FAILED:
+                placement_error =
+                    "MLT could not initialize Layer 2 for export.";
+                break;
+
+            case SECONDARY_PLACEMENT_PLAYLIST_CREATE_FAILED:
+                placement_error =
+                    "Could not create the Layer 2 export playlist.";
+                break;
+
+            case SECONDARY_PLACEMENT_LEAD_IN_FAILED:
+                placement_error =
+                    "Could not create the Layer 2 export lead-in.";
+                break;
+
+            case SECONDARY_PLACEMENT_APPEND_FAILED:
+                placement_error =
+                    "Could not place Layer 2 in the export composition.";
+                break;
+
+            case SECONDARY_PLACEMENT_INVALID_ARGUMENT:
+            case SECONDARY_PLACEMENT_OK:
+            default:
+                break;
+        }
+
         export_set_failure(
             failure,
             failure_size,
-            "Could not create the Layer 2 export playlist."
-        );
-        goto fail;
-    }
-
-    if (secondary_start > 0 &&
-        mlt_playlist_blank(
-            graph->export_secondary_playlist,
-            secondary_start - 1) != 0) {
-        export_set_failure(
-            failure,
-            failure_size,
-            "Could not create the Layer 2 export lead-in."
-        );
-        goto fail;
-    }
-
-    if (mlt_playlist_append_io(
-            graph->export_secondary_playlist,
-            graph->export_secondary,
-            0,
-            secondary_out) != 0) {
-        export_set_failure(
-            failure,
-            failure_size,
-            "Could not place Layer 2 in the export composition."
+            placement_error
         );
         goto fail;
     }
@@ -5759,90 +5863,72 @@ int mlt_bridge_add_track(
     pending_y =
         ((double)profile->height - pending_base_height) / 2.0;
 
-    const mlt_position secondary_length =
-        secondary_still
-            ? 0
-            : mlt_producer_get_length(
-                  pending_secondary
-              );
-
-    if (!secondary_still &&
-        secondary_length <= 0) {
-        snprintf(
-            failure,
-            sizeof(failure),
-            "%s",
-            "The added video layer reports no usable duration."
-        );
-        goto add_track_cleanup;
-    }
-
     /*
-     * POC 10.3 uses the viewer playhead as the placement point. Track 2 is
-     * represented by a playlist containing a real blank gap followed by B.
-     * The primary movie remains duration-authoritative, so B is clipped to
-     * the number of frames remaining after its start offset.
+     * POC 10.3 uses the viewer playhead as the placement point. Preview and
+     * export now share the exact same Layer 2 timing/playlist builder.
      */
-    mlt_position pending_start =
-        (mlt_position)start_frame;
+    mlt_position pending_start = 0;
 
-    if (pending_start < 0) {
-        pending_start = 0;
-    }
-    if (pending_start >= primary_length) {
-        pending_start = primary_length - 1;
-    }
+    const SecondaryPlacementResult placement_result =
+        build_secondary_playlist(
+            profile,
+            pending_secondary,
+            (mlt_position)start_frame,
+            primary_length,
+            secondary_still,
+            &pending_secondary_playlist,
+            &pending_start
+        );
 
-    const mlt_position available_length =
-        primary_length - pending_start;
-    const mlt_position secondary_playtime =
-        secondary_still
-            ? available_length
-            : (secondary_length < available_length
-                   ? secondary_length
-                   : available_length);
+    if (placement_result != SECONDARY_PLACEMENT_OK) {
+        const char *placement_error =
+            "Could not configure the added layer's timing and placement.";
 
-    if (secondary_playtime <= 0) {
+        switch (placement_result) {
+            case SECONDARY_PLACEMENT_NO_DURATION:
+                placement_error =
+                    "The added video layer reports no usable duration.";
+                break;
+
+            case SECONDARY_PLACEMENT_NO_ROOM:
+                placement_error =
+                    "There is no room for the added layer at that playhead.";
+                break;
+
+            case SECONDARY_PLACEMENT_SOURCE_INIT_FAILED:
+                placement_error =
+                    "MLT could not initialize the added layer.";
+                break;
+
+            case SECONDARY_PLACEMENT_PLAYLIST_CREATE_FAILED:
+                placement_error =
+                    "Could not create the offset playlist for layer 2.";
+                break;
+
+            case SECONDARY_PLACEMENT_LEAD_IN_FAILED:
+                placement_error =
+                    "Could not create the blank lead-in for layer 2.";
+                break;
+
+            case SECONDARY_PLACEMENT_APPEND_FAILED:
+                placement_error =
+                    "Could not place the added media on layer 2.";
+                break;
+
+            case SECONDARY_PLACEMENT_INVALID_ARGUMENT:
+            case SECONDARY_PLACEMENT_OK:
+            default:
+                break;
+        }
+
         snprintf(
             failure,
             sizeof(failure),
             "%s",
-            "There is no room for the added layer at that playhead."
+            placement_error
         );
         goto add_track_cleanup;
     }
-
-    const mlt_position secondary_out =
-        secondary_playtime - 1;
-
-    if (secondary_still) {
-        /*
-         * Still-image producers have a synthetic default length. Make the
-         * layer explicitly last for every frame remaining in Movie A so a
-         * PNG logo/template behaves like a held Paint-style layer.
-         */
-        mlt_properties_set_position(
-            MLT_PRODUCER_PROPERTIES(
-                pending_secondary
-            ),
-            "length",
-            secondary_playtime
-        );
-    }
-
-    mlt_producer_set_in_and_out(
-        pending_secondary,
-        0,
-        secondary_out
-    );
-    mlt_producer_set_speed(
-        pending_secondary,
-        0.0
-    );
-    mlt_producer_seek(
-        pending_secondary,
-        0
-    );
 
     secondary_has_audio =
         secondary_still
@@ -5852,50 +5938,6 @@ int mlt_bridge_add_track(
                   "audio_index",
                   "audio"
               );
-
-    pending_secondary_playlist =
-        mlt_playlist_new(
-            profile
-        );
-
-    if (pending_secondary_playlist == NULL) {
-        snprintf(
-            failure,
-            sizeof(failure),
-            "%s",
-            "Could not create the offset playlist for layer 2."
-        );
-        goto add_track_cleanup;
-    }
-
-    if (pending_start > 0 &&
-        mlt_playlist_blank(
-            pending_secondary_playlist,
-            pending_start - 1
-        ) != 0) {
-        snprintf(
-            failure,
-            sizeof(failure),
-            "%s",
-            "Could not create the blank lead-in for layer 2."
-        );
-        goto add_track_cleanup;
-    }
-
-    if (mlt_playlist_append_io(
-            pending_secondary_playlist,
-            pending_secondary,
-            0,
-            secondary_out
-        ) != 0) {
-        snprintf(
-            failure,
-            sizeof(failure),
-            "%s",
-            "Could not place the added media on layer 2."
-        );
-        goto add_track_cleanup;
-    }
 
     if (secondary_has_audio) {
         pending_secondary_audio_filter =
