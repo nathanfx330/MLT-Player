@@ -274,6 +274,71 @@ static gboolean run_step(
             "track 2 opacity clamps at one"
         );
 
+        printf("track audio gain\n");
+
+        check(
+            mlt_bridge_track_has_audio(0),
+            "track 1 reports audio"
+        );
+
+        check(
+            mlt_bridge_track_has_audio(1),
+            "track 2 reports audio"
+        );
+
+        check(
+            mlt_bridge_track_audio_gain(0) == 1.0 &&
+                mlt_bridge_track_audio_gain(1) == 1.0,
+            "both track audio levels start at 100 percent"
+        );
+
+        check(
+            mlt_bridge_set_track_audio_gain(0, 0.40),
+            "track 1 audio level accepts a live change"
+        );
+
+        check(
+            mlt_bridge_track_audio_gain(0) > 0.399 &&
+                mlt_bridge_track_audio_gain(0) < 0.401,
+            "track 1 audio level round trips"
+        );
+
+        check(
+            mlt_bridge_set_track_audio_gain(1, 0.25),
+            "track 2 audio level accepts a live change"
+        );
+
+        check(
+            mlt_bridge_track_audio_gain(1) > 0.249 &&
+                mlt_bridge_track_audio_gain(1) < 0.251,
+            "track 2 audio level round trips"
+        );
+
+        check(
+            mlt_bridge_set_track_audio_gain(1, -1.0),
+            "track 2 audio level accepts a low clamp"
+        );
+
+        check(
+            mlt_bridge_track_audio_gain(1) == 0.0,
+            "track 2 audio level clamps at zero"
+        );
+
+        check(
+            mlt_bridge_set_track_audio_gain(1, 2.0),
+            "track 2 audio level accepts a high clamp"
+        );
+
+        check(
+            mlt_bridge_track_audio_gain(1) == 1.0,
+            "track 2 audio level clamps at one"
+        );
+
+        check(
+            mlt_bridge_set_track_audio_gain(0, 1.0),
+            "track 1 audio level restores to unity"
+        );
+
         break;
 
     case 1:
@@ -489,6 +554,16 @@ static gboolean run_step(
         check(
             mlt_bridge_secondary_opacity() == 1.0,
             "opening a new movie resets track-2 opacity"
+        );
+
+        check(
+            mlt_bridge_track_audio_gain(0) == 1.0,
+            "opening a new movie resets track-1 audio level"
+        );
+
+        check(
+            !mlt_bridge_track_has_audio(1),
+            "opening a new movie clears track-2 audio state"
         );
 
         break;

@@ -32,6 +32,12 @@ typedef _IndexedIntDart = int Function(int);
 typedef _IndexedInt64Native = Int64 Function(Int32);
 typedef _IndexedInt64Dart = int Function(int);
 
+typedef _IndexedDoubleNative = Double Function(Int32);
+typedef _IndexedDoubleDart = double Function(int);
+
+typedef _TrackGainNative = Int32 Function(Int32, Double);
+typedef _TrackGainDart = int Function(int, double);
+
 typedef _CopyStringNative = Int32 Function(Pointer<Utf8>, Int32);
 typedef _CopyStringDart = int Function(Pointer<Utf8>, int);
 
@@ -147,6 +153,14 @@ class MltBridge {
             'mlt_bridge_set_secondary_opacity');
     _secondaryOpacity = _library.lookupFunction<_DoubleNative, _DoubleDart>(
         'mlt_bridge_secondary_opacity');
+    _trackHasAudio = _library.lookupFunction<_IndexedIntNative, _IndexedIntDart>(
+        'mlt_bridge_track_has_audio');
+    _setTrackAudioGain =
+        _library.lookupFunction<_TrackGainNative, _TrackGainDart>(
+            'mlt_bridge_set_track_audio_gain');
+    _trackAudioGain =
+        _library.lookupFunction<_IndexedDoubleNative, _IndexedDoubleDart>(
+            'mlt_bridge_track_audio_gain');
     _closeMedia = _library
         .lookupFunction<_VoidNative, _VoidDart>('mlt_bridge_close_media');
 
@@ -287,6 +301,9 @@ class MltBridge {
   late final _Int64Dart _secondaryStartFrame;
   late final _SetOpacityDart _setSecondaryOpacity;
   late final _DoubleDart _secondaryOpacity;
+  late final _IndexedIntDart _trackHasAudio;
+  late final _TrackGainDart _setTrackAudioGain;
+  late final _IndexedDoubleDart _trackAudioGain;
   late final _VoidDart _closeMedia;
   late final _IntDart _play;
   late final _IntDart _pause;
@@ -494,6 +511,15 @@ class MltBridge {
       _withEngine(false, () => _setSecondaryOpacity(opacity) != 0);
 
   double get secondaryOpacity => _withEngine(1.0, _secondaryOpacity);
+
+  bool trackHasAudio(int trackIndex) =>
+      _withEngine(false, () => _trackHasAudio(trackIndex) != 0);
+
+  bool setTrackAudioGain(int trackIndex, double gain) =>
+      _withEngine(false, () => _setTrackAudioGain(trackIndex, gain) != 0);
+
+  double trackAudioGain(int trackIndex) =>
+      _withEngine(1.0, () => _trackAudioGain(trackIndex));
 
   void closeMedia() => _withEngineVoid(_closeMedia);
 

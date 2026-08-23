@@ -77,6 +77,15 @@ struct _MltBridgeEngine {
     mlt_tractor e_tractor;
     mlt_transition e_video_composite;
     mlt_transition e_audio_mix;
+
+    /*
+     * Track-local audio gain is applied before the tractor's A+B mix.
+     * The filter pointers are borrowed references owned by their producers.
+     */
+    mlt_filter e_track_audio_filters[2];
+    double e_track_audio_gain[2];
+    int e_track_has_audio[2];
+
     int e_track_count;
     int64_t e_secondary_start_frame;
     double e_secondary_opacity;
@@ -155,6 +164,9 @@ static void activate_engine_local(MltBridgeEngine *engine)
 #define tractor (current_engine()->e_tractor)
 #define video_composite (current_engine()->e_video_composite)
 #define audio_mix (current_engine()->e_audio_mix)
+#define track_audio_filters (current_engine()->e_track_audio_filters)
+#define track_audio_gain (current_engine()->e_track_audio_gain)
+#define track_has_audio (current_engine()->e_track_has_audio)
 #define track_count (current_engine()->e_track_count)
 #define secondary_start_frame (current_engine()->e_secondary_start_frame)
 #define secondary_opacity (current_engine()->e_secondary_opacity)
@@ -1143,6 +1155,13 @@ static void close_producer_locked(void)
         audio_mix = NULL;
     }
 
+    /*
+     * These filters are attached to primary_producer and secondary_playlist.
+     * Drop the borrowed pointers before those producers release the filters.
+     */
+    track_audio_filters[0] = NULL;
+    track_audio_filters[1] = NULL;
+
     if (secondary_playlist != NULL) {
         mlt_playlist_close(secondary_playlist);
         secondary_playlist = NULL;
@@ -1161,6 +1180,11 @@ static void close_producer_locked(void)
     track_count = 0;
     secondary_start_frame = -1;
     secondary_opacity = 1.0;
+
+    track_audio_gain[0] = 1.0;
+    track_audio_gain[1] = 1.0;
+    track_has_audio[0] = 0;
+    track_has_audio[1] = 0;
 
     has_video = 0;
     has_audio = 0;
@@ -3187,6 +3211,8 @@ MltBridgeEngine *mlt_bridge_engine_create(void)
     engine->e_requested_volume = 1.0;
     engine->e_secondary_opacity = 1.0;
     engine->e_secondary_start_frame = -1;
+    engine->e_track_audio_gain[0] = 1.0;
+    engine->e_track_audio_gain[1] = 1.0;
     engine->e_selected_video_stream_index = -1;
     engine->e_selected_audio_stream_index = -1;
     engine->e_video_colorspace = -1;
@@ -3584,6 +3610,53 @@ int mlt_bridge_export_error_copy(
 /* Media                                                                     */
 /* ------------------------------------------------------------------------- */
 
+
+/*
+ * Attach MLT's standard volume filter and then release the factory reference.
+ * The target producer owns the attached filter reference; the returned pointer
+ * is borrowed and remains valid until that producer is closed.
+ */
+static mlt_filter attach_track_audio_filter_locked(
+    mlt_producer target)
+{
+    if (target == NULL) {
+        return NULL;
+    }
+
+    mlt_filter filter =
+        mlt_factory_filter(
+            profile,
+            "volume",
+            NULL
+        );
+
+    if (filter == NULL) {
+        return NULL;
+    }
+
+    mlt_properties_set_double(
+        MLT_FILTER_PROPERTIES(filter),
+        "gain",
+        1.0
+    );
+
+    if (mlt_producer_attach(
+            target,
+            filter) != 0) {
+        mlt_filter_close(filter);
+        return NULL;
+    }
+
+    /*
+     * mlt_service_attach() increments the filter reference. Release the
+     * factory's original reference and keep a borrowed pointer for live gain
+     * property changes.
+     */
+    mlt_filter_close(filter);
+
+    return filter;
+}
+
 MLT_BRIDGE_EXPORT
 int mlt_bridge_open(
     const char *path)
@@ -3911,6 +3984,20 @@ int mlt_bridge_open(
     secondary_start_frame = -1;
     secondary_opacity = 1.0;
 
+    track_audio_gain[0] = 1.0;
+    track_audio_gain[1] = 1.0;
+    track_has_audio[0] = has_audio ? 1 : 0;
+    track_has_audio[1] = 0;
+    track_audio_filters[0] = NULL;
+    track_audio_filters[1] = NULL;
+
+    if (track_has_audio[0]) {
+        track_audio_filters[0] =
+            attach_track_audio_filter_locked(
+                primary_producer
+            );
+    }
+
     g_atomic_int_set(
         &target_width,
         profile->width
@@ -4059,6 +4146,7 @@ int mlt_bridge_add_track(
     mlt_tractor pending_tractor = NULL;
     mlt_transition pending_composite = NULL;
     mlt_transition pending_mix = NULL;
+    mlt_filter pending_secondary_audio_filter = NULL;
 
     int secondary_has_audio = 0;
     int succeeded = 0;
@@ -4220,6 +4308,15 @@ int mlt_bridge_add_track(
         goto add_track_cleanup;
     }
 
+    if (secondary_has_audio) {
+        pending_secondary_audio_filter =
+            attach_track_audio_filter_locked(
+                mlt_playlist_producer(
+                    pending_secondary_playlist
+                )
+            );
+    }
+
     pending_tractor =
         mlt_tractor_new();
 
@@ -4343,14 +4440,14 @@ int mlt_bridge_add_track(
         "middle"
     );
     /*
-     * The final geometry component is opacity in percent. POC 10.4 keeps the
-     * existing full-frame/aspect-preserving placement but makes this value a
-     * live track-2 control. Start at the established 100% behavior.
+     * The final geometry component is MLT's normalized 0.0-1.0 opacity.
+     * POC 10.4 keeps the existing full-frame/aspect-preserving placement but
+     * makes this value a live track-2 control. Start at full opacity.
      */
     mlt_properties_set(
         composite_properties,
         "geometry",
-        "0%/0%:100%x100%:100"
+        "0%/0%:100%x100%:1.0"
     );
 
     if (mlt_field_plant_transition(
@@ -4408,8 +4505,8 @@ int mlt_bridge_add_track(
         /*
          * The default mix algorithm crossfades: mix=1.0 means B only.
          * Add to Movie needs both tracks at full level, so use MLT's sum
-         * mode where mix=1.0 means A + B. Per-track gain/limiting comes
-         * later with the track controls.
+         * mode where mix=1.0 means A + B. POC 10.5 applies independent
+         * per-track gain before this mix; limiting remains a later concern.
          */
         mlt_properties_set_int(
             mix_properties,
@@ -4509,6 +4606,11 @@ int mlt_bridge_add_track(
     track_count = 2;
     secondary_start_frame = (int64_t)pending_start;
     secondary_opacity = 1.0;
+
+    track_has_audio[1] = secondary_has_audio ? 1 : 0;
+    track_audio_gain[1] = 1.0;
+    track_audio_filters[1] = pending_secondary_audio_filter;
+
     has_audio = primary_has_audio || secondary_has_audio;
 
     pending_secondary = NULL;
@@ -4751,6 +4853,134 @@ double mlt_bridge_secondary_opacity(void)
             result = 1.0;
         } else {
             result = applied.o;
+        }
+    }
+
+    g_mutex_unlock(&engine_mutex);
+
+    return result;
+}
+
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_track_has_audio(
+    int track_index)
+{
+    ensure_locks();
+
+    g_mutex_lock(&engine_mutex);
+
+    const int result =
+        track_index >= 0 &&
+        track_index < track_count &&
+        track_index < 2
+            ? track_has_audio[track_index]
+            : 0;
+
+    g_mutex_unlock(&engine_mutex);
+
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_set_track_audio_gain(
+    int track_index,
+    double gain)
+{
+    ensure_locks();
+
+    g_mutex_lock(&engine_mutex);
+
+    if (track_index < 0 ||
+        track_index >= track_count ||
+        track_index >= 2) {
+        set_error(
+            "That track is not available."
+        );
+        g_mutex_unlock(&engine_mutex);
+        return 0;
+    }
+
+    if (!track_has_audio[track_index]) {
+        set_error(
+            "That track has no audio."
+        );
+        g_mutex_unlock(&engine_mutex);
+        return 0;
+    }
+
+    mlt_filter filter =
+        track_audio_filters[track_index];
+
+    if (filter == NULL) {
+        set_error(
+            "MLT's volume filter is unavailable for that track."
+        );
+        g_mutex_unlock(&engine_mutex);
+        return 0;
+    }
+
+    if (gain < 0.0) {
+        gain = 0.0;
+    } else if (gain > 1.0) {
+        gain = 1.0;
+    }
+
+    mlt_service_lock(
+        MLT_FILTER_SERVICE(filter)
+    );
+
+    mlt_properties_set_double(
+        MLT_FILTER_PROPERTIES(filter),
+        "gain",
+        gain
+    );
+
+    mlt_service_unlock(
+        MLT_FILTER_SERVICE(filter)
+    );
+
+    track_audio_gain[track_index] = gain;
+    set_error(NULL);
+
+    g_mutex_unlock(&engine_mutex);
+
+    return 1;
+}
+
+MLT_BRIDGE_EXPORT
+double mlt_bridge_track_audio_gain(
+    int track_index)
+{
+    ensure_locks();
+
+    g_mutex_lock(&engine_mutex);
+
+    double result = 1.0;
+
+    if (track_index >= 0 &&
+        track_index < track_count &&
+        track_index < 2) {
+        mlt_filter filter =
+            track_audio_filters[track_index];
+
+        if (filter != NULL) {
+            mlt_service_lock(
+                MLT_FILTER_SERVICE(filter)
+            );
+
+            result =
+                mlt_properties_get_double(
+                    MLT_FILTER_PROPERTIES(filter),
+                    "gain"
+                );
+
+            mlt_service_unlock(
+                MLT_FILTER_SERVICE(filter)
+            );
+        } else {
+            result =
+                track_audio_gain[track_index];
         }
     }
 

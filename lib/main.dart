@@ -13,6 +13,7 @@ import 'services/host_channel.dart';
 import 'services/mlt_bridge.dart';
 import 'services/player_engine.dart';
 import 'ui/widgets/media_inspector.dart';
+import 'ui/widgets/tracks_inspector.dart';
 
 // ---------------------------------------------------------------------------
 // Application
@@ -111,6 +112,7 @@ class _PlayerPageState extends State<PlayerPage>
 
   bool _overlayVisible = true;
   bool _infoOpen = false;
+  bool _tracksOpen = false;
   bool _pointerOverControls = false;
   bool _fullscreen = false;
 
@@ -223,6 +225,7 @@ class _PlayerPageState extends State<PlayerPage>
       _pointerOverControls ||
       _scrubbing ||
       _infoOpen ||
+      _tracksOpen ||
       _engine.exporting ||
       _engine.error != null;
 
@@ -326,17 +329,23 @@ class _PlayerPageState extends State<PlayerPage>
       return;
     }
 
-    await _engine.addTrack(file.path);
+    final added = await _engine.addTrack(file.path);
 
     if (mounted) {
+      if (added) {
+        setState(() => _tracksOpen = true);
+      }
       _showOverlay();
     }
   }
 
   Future<void> _openPath(String path) async {
     // A new file starts closed, whatever the previous one was doing.
-    if (_infoOpen) {
-      setState(() => _infoOpen = false);
+    if (_infoOpen || _tracksOpen) {
+      setState(() {
+        _infoOpen = false;
+        _tracksOpen = false;
+      });
       _infoController.reverse();
     }
     await _engine.open(path);
@@ -648,6 +657,15 @@ class _PlayerPageState extends State<PlayerPage>
     } else {
       _infoController.reverse();
     }
+    _showOverlay();
+  }
+
+  void _toggleTracksInspector() {
+    if (!_engine.hasSecondaryTrack) {
+      return;
+    }
+
+    setState(() => _tracksOpen = !_tracksOpen);
     _showOverlay();
   }
 
@@ -981,6 +999,7 @@ class _PlayerPageState extends State<PlayerPage>
                 _buildViewport(media),
                 _buildTopBar(media),
                 _buildBottomOverlay(media),
+                _buildTracksInspector(media),
               ],
             ),
           ),
@@ -1069,6 +1088,50 @@ class _PlayerPageState extends State<PlayerPage>
                 style: const TextStyle(fontSize: 11, color: Colors.white54),
               ),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTracksInspector(MediaInfo? media) {
+    if (!_tracksOpen ||
+        media == null ||
+        !_engine.hasSecondaryTrack) {
+      return const SizedBox.shrink();
+    }
+
+    final secondaryPath = _engine.secondaryTrackPath ?? 'Movie B';
+    final secondaryName = _basename(secondaryPath);
+    final secondaryStartFrame =
+        _engine.secondaryTrackStartFrame ?? 0;
+
+    return Positioned(
+      top: 58,
+      right: 16,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () {},
+        onDoubleTap: () {},
+        onSecondaryTap: () {},
+        child: ExcludeFocus(
+          child: TracksInspector(
+            primaryName: media.name,
+            secondaryName: secondaryName,
+            secondaryStart:
+                _formatClipTimecode(media, secondaryStartFrame),
+            primaryHasAudio: media.hasAudio,
+            secondaryHasAudio: _engine.secondaryTrackHasAudio,
+            primaryAudioGain: _engine.primaryTrackAudioGain,
+            secondaryAudioGain: _engine.secondaryTrackAudioGain,
+            secondaryOpacity: _engine.secondaryTrackOpacity,
+            onPrimaryAudioChanged: (value) =>
+                _engine.setTrackAudioGain(0, value),
+            onSecondaryAudioChanged: (value) =>
+                _engine.setTrackAudioGain(1, value),
+            onSecondaryOpacityChanged:
+                _engine.setSecondaryTrackOpacity,
+            onClose: _toggleTracksInspector,
           ),
         ),
       ),
@@ -1527,20 +1590,17 @@ class _PlayerPageState extends State<PlayerPage>
                 ? 'ADDING…'
                 : (_engine.hasSecondaryTrack ? '2 TRACKS' : 'ADD MOVIE'),
             tooltip: _engine.hasSecondaryTrack
-                ? 'Track 2 starts at frame '
-                    '${(_engine.secondaryTrackStartFrame ?? 0) + 1}'
+                ? (_tracksOpen
+                    ? 'Hide Tracks Inspector'
+                    : 'Open Tracks Inspector')
                 : 'Add another video as track 2 at the current playhead',
-            active: _engine.hasSecondaryTrack,
-            onPressed: !_engine.addingTrack &&
-                    !_engine.hasSecondaryTrack &&
-                    !_engine.exporting
-                ? _pickSecondTrack
-                : null,
+            active: _tracksOpen,
+            onPressed: _engine.hasSecondaryTrack
+                ? _toggleTracksInspector
+                : (!_engine.addingTrack && !_engine.exporting
+                    ? _pickSecondTrack
+                    : null),
           ),
-          if (_engine.hasSecondaryTrack) ...[
-            const SizedBox(width: 2),
-            _buildTrackOpacity(),
-          ],
           const SizedBox(width: 2),
           _ExportSplitButton(
             mode: _exportMode,
@@ -1632,67 +1692,6 @@ class _PlayerPageState extends State<PlayerPage>
           onPressed: _toggleFullscreen,
         ),
       ],
-    );
-  }
-
-  Widget _buildTrackOpacity() {
-    final opacity =
-        _engine.secondaryTrackOpacity.clamp(0.0, 1.0).toDouble();
-    final percent = (opacity * 100).round();
-
-    return Tooltip(
-      message: 'Movie B video opacity: $percent% (audio unchanged)',
-      child: Container(
-        height: 30,
-        padding: const EdgeInsets.only(left: 6, right: 5),
-        decoration: BoxDecoration(
-          color: const Color(0xB8121212),
-          border: Border.all(color: Colors.white24),
-          borderRadius: BorderRadius.circular(5),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(
-              Icons.opacity,
-              size: 14,
-              color: Colors.white70,
-            ),
-            SizedBox(
-              width: 76,
-              child: SliderTheme(
-                data: SliderTheme.of(context).copyWith(
-                  trackHeight: 3,
-                  thumbShape:
-                      const RoundSliderThumbShape(enabledThumbRadius: 5),
-                  overlayShape:
-                      const RoundSliderOverlayShape(overlayRadius: 11),
-                  inactiveTrackColor: Colors.white24,
-                ),
-                child: Slider(
-                  min: 0,
-                  max: 1,
-                  value: opacity,
-                  onChanged: _engine.setSecondaryTrackOpacity,
-                  onChangeEnd: (_) => _restartOverlayTimer(),
-                ),
-              ),
-            ),
-            SizedBox(
-              width: 34,
-              child: Text(
-                '$percent%',
-                textAlign: TextAlign.right,
-                style: const TextStyle(
-                  fontSize: 10,
-                  color: Colors.white70,
-                  fontFeatures: [ui.FontFeature.tabularFigures()],
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
     );
   }
 

@@ -59,6 +59,9 @@ class PlayerEngine extends ChangeNotifier {
   String? _secondaryTrackPath;
   int? _secondaryTrackStartFrame;
   double _secondaryTrackOpacity = 1.0;
+  double _primaryTrackAudioGain = 1.0;
+  double _secondaryTrackAudioGain = 1.0;
+  bool _secondaryTrackHasAudio = false;
 
   bool _playing = false;
   bool _playingSelection = false;
@@ -103,6 +106,9 @@ class PlayerEngine extends ChangeNotifier {
   String? get secondaryTrackPath => _secondaryTrackPath;
   int? get secondaryTrackStartFrame => _secondaryTrackStartFrame;
   double get secondaryTrackOpacity => _secondaryTrackOpacity;
+  double get primaryTrackAudioGain => _primaryTrackAudioGain;
+  double get secondaryTrackAudioGain => _secondaryTrackAudioGain;
+  bool get secondaryTrackHasAudio => _secondaryTrackHasAudio;
   bool get hasSecondaryTrack => _secondaryTrackPath != null;
   int get trackCount => _media == null ? 0 : (hasSecondaryTrack ? 2 : 1);
   bool get sourceOnlyExportsAvailable => !hasSecondaryTrack;
@@ -961,6 +967,9 @@ class PlayerEngine extends ChangeNotifier {
     _secondaryTrackPath = null;
     _secondaryTrackStartFrame = null;
     _secondaryTrackOpacity = 1.0;
+    _primaryTrackAudioGain = 1.0;
+    _secondaryTrackAudioGain = 1.0;
+    _secondaryTrackHasAudio = false;
     _playingSelection = false;
     _inFrame = null;
     _outFrame = null;
@@ -1079,6 +1088,9 @@ class PlayerEngine extends ChangeNotifier {
     _volume = bridge.volume;
     _muted = _volume <= 0.0;
 
+    _primaryTrackAudioGain =
+        bridge.trackAudioGain(0).clamp(0.0, 1.0).toDouble();
+
     notifyListeners();
     return true;
   }
@@ -1156,6 +1168,11 @@ class PlayerEngine extends ChangeNotifier {
         nativeStartFrame >= 0 ? nativeStartFrame : startFrame;
     _secondaryTrackOpacity =
         bridge.secondaryOpacity.clamp(0.0, 1.0).toDouble();
+    _primaryTrackAudioGain =
+        bridge.trackAudioGain(0).clamp(0.0, 1.0).toDouble();
+    _secondaryTrackHasAudio = bridge.trackHasAudio(1);
+    _secondaryTrackAudioGain =
+        bridge.trackAudioGain(1).clamp(0.0, 1.0).toDouble();
     _exportSucceeded = false;
     _exportError = null;
     _exportPath = null;
@@ -1196,6 +1213,65 @@ class PlayerEngine extends ChangeNotifier {
         bridge.secondaryOpacity.clamp(0.0, 1.0).toDouble();
     _error = null;
     notifyListeners();
+  }
+
+  /// POC 10.5: adjust one track's audio gain before the tractor mix.
+  ///
+  /// Track 0 is Movie A and track 1 is Movie B. The existing master volume
+  /// remains independent and is applied after the mixed track audio.
+  void setTrackAudioGain(int trackIndex, double value) {
+    if (_media == null ||
+        trackIndex < 0 ||
+        trackIndex >= trackCount ||
+        !trackHasAudio(trackIndex)) {
+      return;
+    }
+
+    final requested = value.clamp(0.0, 1.0).toDouble();
+
+    if (!bridge.setTrackAudioGain(trackIndex, requested)) {
+      _error = bridge.lastError.isEmpty
+          ? 'MLT could not change track ${trackIndex + 1} audio level.'
+          : bridge.lastError;
+      _syncTrackAudioGain(trackIndex);
+      notifyListeners();
+      return;
+    }
+
+    _syncTrackAudioGain(trackIndex);
+    _error = null;
+    notifyListeners();
+  }
+
+  bool trackHasAudio(int trackIndex) {
+    if (trackIndex == 0) {
+      return _media?.hasAudio ?? false;
+    }
+    if (trackIndex == 1) {
+      return hasSecondaryTrack && _secondaryTrackHasAudio;
+    }
+    return false;
+  }
+
+  double trackAudioGain(int trackIndex) {
+    if (trackIndex == 0) {
+      return _primaryTrackAudioGain;
+    }
+    if (trackIndex == 1) {
+      return _secondaryTrackAudioGain;
+    }
+    return 1.0;
+  }
+
+  void _syncTrackAudioGain(int trackIndex) {
+    final applied =
+        bridge.trackAudioGain(trackIndex).clamp(0.0, 1.0).toDouble();
+
+    if (trackIndex == 0) {
+      _primaryTrackAudioGain = applied;
+    } else if (trackIndex == 1) {
+      _secondaryTrackAudioGain = applied;
+    }
   }
 
   void togglePlayback() {
