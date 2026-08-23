@@ -57,6 +57,7 @@ class PlayerEngine extends ChangeNotifier {
   bool _opening = false;
   bool _addingTrack = false;
   String? _secondaryTrackPath;
+  int? _secondaryTrackStartFrame;
 
   bool _playing = false;
   bool _playingSelection = false;
@@ -99,6 +100,7 @@ class PlayerEngine extends ChangeNotifier {
   bool get opening => _opening;
   bool get addingTrack => _addingTrack;
   String? get secondaryTrackPath => _secondaryTrackPath;
+  int? get secondaryTrackStartFrame => _secondaryTrackStartFrame;
   bool get hasSecondaryTrack => _secondaryTrackPath != null;
   int get trackCount => _media == null ? 0 : (hasSecondaryTrack ? 2 : 1);
   bool get sourceOnlyExportsAvailable => !hasSecondaryTrack;
@@ -955,6 +957,7 @@ class PlayerEngine extends ChangeNotifier {
     _opening = true;
     _addingTrack = false;
     _secondaryTrackPath = null;
+    _secondaryTrackStartFrame = null;
     _playingSelection = false;
     _inFrame = null;
     _outFrame = null;
@@ -1077,8 +1080,8 @@ class PlayerEngine extends ChangeNotifier {
     return true;
   }
 
-  /// POC 10.2: align one additional timed video source at frame zero and
-  /// promote the native viewer graph to a two-track tractor.
+  /// POC 10.3: place one additional timed video source at the current exact
+  /// playhead frame and promote the native viewer graph to a two-track tractor.
   Future<bool> addTrack(String path) async {
     final media = _media;
 
@@ -1108,13 +1111,25 @@ class PlayerEngine extends ChangeNotifier {
       _positionMs = bridge.positionMs;
     }
 
+    var startFrame = bridge.positionFrame;
+    if (startFrame < 0) {
+      startFrame = 0;
+    }
+    if (media.frames > 0 && startFrame >= media.frames) {
+      startFrame = media.frames - 1;
+    }
+
     _addingTrack = true;
     _error = null;
     notifyListeners();
 
     bool added;
     try {
-      added = await addTrackOnHelperIsolate(path, bridge.engineAddress);
+      added = await addTrackOnHelperIsolate(
+        path,
+        startFrame,
+        bridge.engineAddress,
+      );
     } catch (error) {
       _addingTrack = false;
       _error = error.toString();
@@ -1133,6 +1148,9 @@ class PlayerEngine extends ChangeNotifier {
     }
 
     _secondaryTrackPath = path;
+    final nativeStartFrame = bridge.secondaryStartFrame;
+    _secondaryTrackStartFrame =
+        nativeStartFrame >= 0 ? nativeStartFrame : startFrame;
     _exportSucceeded = false;
     _exportError = null;
     _exportPath = null;

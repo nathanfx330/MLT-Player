@@ -297,6 +297,16 @@ class _PlayerPageState extends State<PlayerPage>
       return;
     }
 
+    // POC 10.3 treats the playhead as the insertion point. Park it before
+    // opening the file chooser so the chosen frame cannot drift while the
+    // user is browsing for track 2.
+    if (_engine.playing) {
+      _engine.togglePlayback();
+      if (_engine.playing) {
+        return;
+      }
+    }
+
     _showOverlay();
 
     final typeGroup = XTypeGroup(
@@ -1517,8 +1527,9 @@ class _PlayerPageState extends State<PlayerPage>
                 ? 'ADDING…'
                 : (_engine.hasSecondaryTrack ? '2 TRACKS' : 'ADD MOVIE'),
             tooltip: _engine.hasSecondaryTrack
-                ? 'Two-track tractor preview is active'
-                : 'Add another video as track 2',
+                ? 'Track 2 starts at frame '
+                    '${(_engine.secondaryTrackStartFrame ?? 0) + 1}'
+                : 'Add another video as track 2 at the current playhead',
             active: _engine.hasSecondaryTrack,
             onPressed: !_engine.addingTrack &&
                     !_engine.hasSecondaryTrack &&

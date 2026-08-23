@@ -52,6 +52,9 @@ typedef _VoidDart = void Function();
 typedef _OpenNative = Int32 Function(Pointer<Utf8>);
 typedef _OpenDart = int Function(Pointer<Utf8>);
 
+typedef _AddTrackNative = Int32 Function(Pointer<Utf8>, Int64);
+typedef _AddTrackDart = int Function(Pointer<Utf8>, int);
+
 typedef _SeekNative = Int32 Function(Int64);
 typedef _SeekDart = int Function(int);
 
@@ -130,10 +133,12 @@ class MltBridge {
         .lookupFunction<_Int64Native, _Int64Dart>('mlt_bridge_texture_id');
 
     _open = _library.lookupFunction<_OpenNative, _OpenDart>('mlt_bridge_open');
-    _addTrack =
-        _library.lookupFunction<_OpenNative, _OpenDart>('mlt_bridge_add_track');
+    _addTrack = _library.lookupFunction<_AddTrackNative, _AddTrackDart>(
+        'mlt_bridge_add_track');
     _trackCount = _library.lookupFunction<_IntNative, _IntDart>(
         'mlt_bridge_track_count');
+    _secondaryStartFrame = _library.lookupFunction<_Int64Native, _Int64Dart>(
+        'mlt_bridge_secondary_start_frame');
     _closeMedia = _library
         .lookupFunction<_VoidNative, _VoidDart>('mlt_bridge_close_media');
 
@@ -269,8 +274,9 @@ class MltBridge {
   late final _CopyStringDart _lastError;
   late final _Int64Dart _textureId;
   late final _OpenDart _open;
-  late final _OpenDart _addTrack;
+  late final _AddTrackDart _addTrack;
   late final _IntDart _trackCount;
+  late final _Int64Dart _secondaryStartFrame;
   late final _VoidDart _closeMedia;
   late final _IntDart _play;
   late final _IntDart _pause;
@@ -458,20 +464,21 @@ class MltBridge {
     }
   }
 
-  bool addTrack(String path) {
+  bool addTrack(String path, {required int startFrame}) {
     if (!_activate()) {
       return false;
     }
 
     final nativePath = path.toNativeUtf8(allocator: malloc);
     try {
-      return _addTrack(nativePath) != 0;
+      return _addTrack(nativePath, startFrame) != 0;
     } finally {
       malloc.free(nativePath);
     }
   }
 
   int get trackCount => _withEngine(0, _trackCount);
+  int get secondaryStartFrame => _withEngine(-1, _secondaryStartFrame);
 
   void closeMedia() => _withEngineVoid(_closeMedia);
 
@@ -661,14 +668,16 @@ Future<bool> openMediaOnHelperIsolate(
   });
 }
 
-/// Adds the POC 10.2 secondary track away from Flutter's frame pump. Native
-/// engine locking serializes the graph rebuild with transport/property reads.
+/// Adds the POC 10.3 secondary track away from Flutter's frame pump. The
+/// exact primary-timeline start frame is passed with the edit so native can
+/// build a blank lead-in without consulting transport from another isolate.
 Future<bool> addTrackOnHelperIsolate(
   String path,
+  int startFrame,
   int engineAddress,
 ) {
   return Isolate.run(() {
     final bridge = MltBridge.attach(engineAddress);
-    return bridge.addTrack(path);
+    return bridge.addTrack(path, startFrame: startFrame);
   });
 }

@@ -186,16 +186,26 @@ static gboolean run_step(
 
         check_engine_isolation();
 
-        printf("tractor\n");
+        printf("tractor offset\n");
 
         check(
             mlt_bridge_track_count() == 1,
             "primary movie starts as one track"
         );
 
+        const int64_t offset_frame =
+            mlt_bridge_duration_frames() > 75
+                ? 50
+                : mlt_bridge_duration_frames() / 3;
+
         check(
-            mlt_bridge_add_track(media_path),
-            "second movie can be added to the tractor"
+            mlt_bridge_seek_frame(offset_frame),
+            "primary can park at the track-2 insertion frame"
+        );
+
+        check(
+            mlt_bridge_add_track(media_path, offset_frame),
+            "second movie can be added at the parked playhead"
         );
 
         check(
@@ -204,8 +214,26 @@ static gboolean run_step(
         );
 
         check(
-            mlt_bridge_position_frame() == 0,
+            mlt_bridge_secondary_start_frame() == offset_frame,
+            "tractor records the exact track-2 start offset"
+        );
+
+        check(
+            mlt_bridge_position_frame() == offset_frame,
             "tractor rebuild preserves the parked playhead"
+        );
+
+        const int64_t lead_in_frame =
+            offset_frame > 10 ? offset_frame - 10 : 0;
+
+        check(
+            mlt_bridge_seek_frame(lead_in_frame),
+            "tractor can seek into track 2's blank lead-in"
+        );
+
+        check(
+            mlt_bridge_position_frame() == lead_in_frame,
+            "blank lead-in seek round trips exactly"
         );
 
         break;
@@ -413,6 +441,11 @@ static gboolean run_step(
         check(
             mlt_bridge_track_count() == 1,
             "opening a new movie resets the tractor to one track"
+        );
+
+        check(
+            mlt_bridge_secondary_start_frame() == -1,
+            "opening a new movie clears the track-2 start offset"
         );
 
         break;

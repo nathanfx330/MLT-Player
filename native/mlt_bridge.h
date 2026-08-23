@@ -166,19 +166,22 @@ mlt_bridge_open(
 );
 
 /*
- * POC 10.2 Add to Movie: align one additional timed video source at frame 0,
- * promote the viewer graph to a two-track tractor, composite track 1 above
- * track 0, and mix track 1 audio when present. The primary movie remains the
- * duration/profile/inspection authority. Exactly one secondary track is
- * supported in this proof.
+ * POC 10.3 Add to Movie: place one additional timed video source at an exact
+ * primary-timeline frame. Native builds track 2 as an MLT playlist containing
+ * a blank lead-in followed by the second movie, then composites/mixes it over
+ * track 0. The primary movie remains the duration/profile/inspection authority.
  */
 MLT_BRIDGE_EXPORT int
 mlt_bridge_add_track(
-    const char *path
+    const char *path,
+    int64_t start_frame
 );
 
 MLT_BRIDGE_EXPORT int
 mlt_bridge_track_count(void);
+
+MLT_BRIDGE_EXPORT int64_t
+mlt_bridge_secondary_start_frame(void);
 
 MLT_BRIDGE_EXPORT void
 mlt_bridge_close_media(void);

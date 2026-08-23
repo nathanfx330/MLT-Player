@@ -66,16 +66,18 @@ struct _MltBridgeEngine {
     mlt_consumer e_consumer;
 
     /*
-     * POC 10.2 keeps source ownership separate from the top-level producer.
+     * POC 10.3 keeps source ownership separate from the top-level producer.
      * e_producer is what transport/preview sees: the primary producer for a
      * one-track movie, or the tractor producer after Add to Movie.
      */
     mlt_producer e_primary_producer;
     mlt_producer e_secondary_producer;
+    mlt_playlist e_secondary_playlist;
     mlt_tractor e_tractor;
     mlt_transition e_video_composite;
     mlt_transition e_audio_mix;
     int e_track_count;
+    int64_t e_secondary_start_frame;
 
     int e_has_video;
     int e_has_audio;
@@ -147,10 +149,12 @@ static void activate_engine_local(MltBridgeEngine *engine)
 #define consumer (current_engine()->e_consumer)
 #define primary_producer (current_engine()->e_primary_producer)
 #define secondary_producer (current_engine()->e_secondary_producer)
+#define secondary_playlist (current_engine()->e_secondary_playlist)
 #define tractor (current_engine()->e_tractor)
 #define video_composite (current_engine()->e_video_composite)
 #define audio_mix (current_engine()->e_audio_mix)
 #define track_count (current_engine()->e_track_count)
+#define secondary_start_frame (current_engine()->e_secondary_start_frame)
 #define has_video (current_engine()->e_has_video)
 #define has_audio (current_engine()->e_has_audio)
 #define is_still (current_engine()->e_is_still)
@@ -1136,6 +1140,11 @@ static void close_producer_locked(void)
         audio_mix = NULL;
     }
 
+    if (secondary_playlist != NULL) {
+        mlt_playlist_close(secondary_playlist);
+        secondary_playlist = NULL;
+    }
+
     if (secondary_producer != NULL) {
         mlt_producer_close(secondary_producer);
         secondary_producer = NULL;
@@ -1147,6 +1156,7 @@ static void close_producer_locked(void)
     }
 
     track_count = 0;
+    secondary_start_frame = -1;
 
     has_video = 0;
     has_audio = 0;
@@ -3892,6 +3902,7 @@ int mlt_bridge_open(
     }
 
     track_count = 1;
+    secondary_start_frame = -1;
 
     g_atomic_int_set(
         &target_width,
@@ -3947,7 +3958,8 @@ int mlt_bridge_open(
 
 MLT_BRIDGE_EXPORT
 int mlt_bridge_add_track(
-    const char *path)
+    const char *path,
+    int64_t start_frame)
 {
     ensure_locks();
 
@@ -4036,6 +4048,7 @@ int mlt_bridge_add_track(
     close_consumer_locked();
 
     mlt_producer pending_secondary = NULL;
+    mlt_playlist pending_secondary_playlist = NULL;
     mlt_tractor pending_tractor = NULL;
     mlt_transition pending_composite = NULL;
     mlt_transition pending_mix = NULL;
@@ -4100,15 +4113,40 @@ int mlt_bridge_add_track(
     }
 
     /*
-     * POC 10.2 aligns the second track at frame zero and keeps the primary
-     * movie's duration authoritative. A longer second source is clipped to
-     * the primary duration; a shorter source naturally becomes blank after
-     * its own out point under the multitrack's eof=continue behavior.
+     * POC 10.3 uses the viewer playhead as the placement point. Track 2 is
+     * represented by a playlist containing a real blank gap followed by B.
+     * The primary movie remains duration-authoritative, so B is clipped to
+     * the number of frames remaining after its start offset.
      */
+    mlt_position pending_start =
+        (mlt_position)start_frame;
+
+    if (pending_start < 0) {
+        pending_start = 0;
+    }
+    if (pending_start >= primary_length) {
+        pending_start = primary_length - 1;
+    }
+
+    const mlt_position available_length =
+        primary_length - pending_start;
+    const mlt_position secondary_playtime =
+        secondary_length < available_length
+            ? secondary_length
+            : available_length;
+
+    if (secondary_playtime <= 0) {
+        snprintf(
+            failure,
+            sizeof(failure),
+            "%s",
+            "There is no room for the second movie at that playhead."
+        );
+        goto add_track_cleanup;
+    }
+
     const mlt_position secondary_out =
-        secondary_length < primary_length
-            ? secondary_length - 1
-            : primary_length - 1;
+        secondary_playtime - 1;
 
     mlt_producer_set_in_and_out(
         pending_secondary,
@@ -4130,6 +4168,50 @@ int mlt_bridge_add_track(
             "audio_index",
             "audio"
         );
+
+    pending_secondary_playlist =
+        mlt_playlist_new(
+            profile
+        );
+
+    if (pending_secondary_playlist == NULL) {
+        snprintf(
+            failure,
+            sizeof(failure),
+            "%s",
+            "Could not create the offset playlist for track 2."
+        );
+        goto add_track_cleanup;
+    }
+
+    if (pending_start > 0 &&
+        mlt_playlist_blank(
+            pending_secondary_playlist,
+            pending_start - 1
+        ) != 0) {
+        snprintf(
+            failure,
+            sizeof(failure),
+            "%s",
+            "Could not create the blank lead-in for track 2."
+        );
+        goto add_track_cleanup;
+    }
+
+    if (mlt_playlist_append_io(
+            pending_secondary_playlist,
+            pending_secondary,
+            0,
+            secondary_out
+        ) != 0) {
+        snprintf(
+            failure,
+            sizeof(failure),
+            "%s",
+            "Could not place the second movie on its offset track."
+        );
+        goto add_track_cleanup;
+    }
 
     pending_tractor =
         mlt_tractor_new();
@@ -4162,7 +4244,9 @@ int mlt_bridge_add_track(
             0) != 0 ||
         mlt_tractor_set_track(
             pending_tractor,
-            pending_secondary,
+            mlt_playlist_producer(
+                pending_secondary_playlist
+            ),
             1) != 0) {
         snprintf(
             failure,
@@ -4406,13 +4490,16 @@ int mlt_bridge_add_track(
     }
 
     secondary_producer = pending_secondary;
+    secondary_playlist = pending_secondary_playlist;
     tractor = pending_tractor;
     video_composite = pending_composite;
     audio_mix = pending_mix;
     track_count = 2;
+    secondary_start_frame = (int64_t)pending_start;
     has_audio = primary_has_audio || secondary_has_audio;
 
     pending_secondary = NULL;
+    pending_secondary_playlist = NULL;
     pending_tractor = NULL;
     pending_composite = NULL;
     pending_mix = NULL;
@@ -4445,6 +4532,13 @@ add_track_cleanup:
                 pending_mix
             );
             pending_mix = NULL;
+        }
+
+        if (pending_secondary_playlist != NULL) {
+            mlt_playlist_close(
+                pending_secondary_playlist
+            );
+            pending_secondary_playlist = NULL;
         }
 
         if (pending_secondary != NULL) {
@@ -4504,6 +4598,21 @@ int mlt_bridge_track_count(void)
 
     g_mutex_lock(&engine_mutex);
     const int result = track_count;
+    g_mutex_unlock(&engine_mutex);
+
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+int64_t mlt_bridge_secondary_start_frame(void)
+{
+    ensure_locks();
+
+    g_mutex_lock(&engine_mutex);
+    const int64_t result =
+        track_count >= 2
+            ? secondary_start_frame
+            : -1;
     g_mutex_unlock(&engine_mutex);
 
     return result;
