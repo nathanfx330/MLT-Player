@@ -169,7 +169,8 @@ mlt_bridge_open(
  * POC 10.3 Add to Movie: place one additional timed video source at an exact
  * primary-timeline frame. Native builds track 2 as an MLT playlist containing
  * a blank lead-in followed by the second movie, then composites/mixes it over
- * track 0. The primary movie remains the duration/profile/inspection authority.
+ * track 0. POC 10.4 adds a live 0.0-1.0 opacity control for track 2's video.
+ * The primary movie remains the duration/profile/inspection authority.
  */
 MLT_BRIDGE_EXPORT int
 mlt_bridge_add_track(
@@ -182,6 +183,15 @@ mlt_bridge_track_count(void);
 
 MLT_BRIDGE_EXPORT int64_t
 mlt_bridge_secondary_start_frame(void);
+
+/* Track 2 video opacity only; audio mix level is intentionally unchanged. */
+MLT_BRIDGE_EXPORT int
+mlt_bridge_set_secondary_opacity(
+    double opacity
+);
+
+MLT_BRIDGE_EXPORT double
+mlt_bridge_secondary_opacity(void);
 
 MLT_BRIDGE_EXPORT void
 mlt_bridge_close_media(void);

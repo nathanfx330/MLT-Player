@@ -236,6 +236,44 @@ static gboolean run_step(
             "blank lead-in seek round trips exactly"
         );
 
+        printf("track opacity\n");
+
+        check(
+            mlt_bridge_secondary_opacity() == 1.0,
+            "track 2 opacity starts at 100 percent"
+        );
+
+        check(
+            mlt_bridge_set_secondary_opacity(0.35),
+            "track 2 opacity accepts a live change"
+        );
+
+        check(
+            mlt_bridge_secondary_opacity() > 0.349 &&
+                mlt_bridge_secondary_opacity() < 0.351,
+            "track 2 opacity round trips"
+        );
+
+        check(
+            mlt_bridge_set_secondary_opacity(-1.0),
+            "track 2 opacity accepts a low clamp"
+        );
+
+        check(
+            mlt_bridge_secondary_opacity() == 0.0,
+            "track 2 opacity clamps at zero"
+        );
+
+        check(
+            mlt_bridge_set_secondary_opacity(2.0),
+            "track 2 opacity accepts a high clamp"
+        );
+
+        check(
+            mlt_bridge_secondary_opacity() == 1.0,
+            "track 2 opacity clamps at one"
+        );
+
         break;
 
     case 1:
@@ -446,6 +484,11 @@ static gboolean run_step(
         check(
             mlt_bridge_secondary_start_frame() == -1,
             "opening a new movie clears the track-2 start offset"
+        );
+
+        check(
+            mlt_bridge_secondary_opacity() == 1.0,
+            "opening a new movie resets track-2 opacity"
         );
 
         break;

@@ -64,6 +64,9 @@ typedef _SetVolumeDart = void Function(double);
 typedef _SetSpeedNative = Int32 Function(Double);
 typedef _SetSpeedDart = int Function(double);
 
+typedef _SetOpacityNative = Int32 Function(Double);
+typedef _SetOpacityDart = int Function(double);
+
 typedef _SetIntNative = Int32 Function(Int32);
 typedef _SetIntDart = int Function(int);
 
@@ -139,6 +142,11 @@ class MltBridge {
         'mlt_bridge_track_count');
     _secondaryStartFrame = _library.lookupFunction<_Int64Native, _Int64Dart>(
         'mlt_bridge_secondary_start_frame');
+    _setSecondaryOpacity =
+        _library.lookupFunction<_SetOpacityNative, _SetOpacityDart>(
+            'mlt_bridge_set_secondary_opacity');
+    _secondaryOpacity = _library.lookupFunction<_DoubleNative, _DoubleDart>(
+        'mlt_bridge_secondary_opacity');
     _closeMedia = _library
         .lookupFunction<_VoidNative, _VoidDart>('mlt_bridge_close_media');
 
@@ -277,6 +285,8 @@ class MltBridge {
   late final _AddTrackDart _addTrack;
   late final _IntDart _trackCount;
   late final _Int64Dart _secondaryStartFrame;
+  late final _SetOpacityDart _setSecondaryOpacity;
+  late final _DoubleDart _secondaryOpacity;
   late final _VoidDart _closeMedia;
   late final _IntDart _play;
   late final _IntDart _pause;
@@ -479,6 +489,11 @@ class MltBridge {
 
   int get trackCount => _withEngine(0, _trackCount);
   int get secondaryStartFrame => _withEngine(-1, _secondaryStartFrame);
+
+  bool setSecondaryOpacity(double opacity) =>
+      _withEngine(false, () => _setSecondaryOpacity(opacity) != 0);
+
+  double get secondaryOpacity => _withEngine(1.0, _secondaryOpacity);
 
   void closeMedia() => _withEngineVoid(_closeMedia);
 

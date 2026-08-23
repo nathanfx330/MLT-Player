@@ -58,6 +58,7 @@ class PlayerEngine extends ChangeNotifier {
   bool _addingTrack = false;
   String? _secondaryTrackPath;
   int? _secondaryTrackStartFrame;
+  double _secondaryTrackOpacity = 1.0;
 
   bool _playing = false;
   bool _playingSelection = false;
@@ -101,6 +102,7 @@ class PlayerEngine extends ChangeNotifier {
   bool get addingTrack => _addingTrack;
   String? get secondaryTrackPath => _secondaryTrackPath;
   int? get secondaryTrackStartFrame => _secondaryTrackStartFrame;
+  double get secondaryTrackOpacity => _secondaryTrackOpacity;
   bool get hasSecondaryTrack => _secondaryTrackPath != null;
   int get trackCount => _media == null ? 0 : (hasSecondaryTrack ? 2 : 1);
   bool get sourceOnlyExportsAvailable => !hasSecondaryTrack;
@@ -958,6 +960,7 @@ class PlayerEngine extends ChangeNotifier {
     _addingTrack = false;
     _secondaryTrackPath = null;
     _secondaryTrackStartFrame = null;
+    _secondaryTrackOpacity = 1.0;
     _playingSelection = false;
     _inFrame = null;
     _outFrame = null;
@@ -1151,6 +1154,8 @@ class PlayerEngine extends ChangeNotifier {
     final nativeStartFrame = bridge.secondaryStartFrame;
     _secondaryTrackStartFrame =
         nativeStartFrame >= 0 ? nativeStartFrame : startFrame;
+    _secondaryTrackOpacity =
+        bridge.secondaryOpacity.clamp(0.0, 1.0).toDouble();
     _exportSucceeded = false;
     _exportError = null;
     _exportPath = null;
@@ -1165,6 +1170,32 @@ class PlayerEngine extends ChangeNotifier {
 
     notifyListeners();
     return true;
+  }
+
+  /// POC 10.4: update track 2's video opacity in place without rebuilding
+  /// the tractor or changing audio gain. The native bridge refreshes a paused
+  /// preview frame immediately, so this is safe to drive directly from Slider.
+  void setSecondaryTrackOpacity(double value) {
+    if (!hasSecondaryTrack) {
+      return;
+    }
+
+    final requested = value.clamp(0.0, 1.0).toDouble();
+
+    if (!bridge.setSecondaryOpacity(requested)) {
+      _error = bridge.lastError.isEmpty
+          ? 'MLT could not change track 2 opacity.'
+          : bridge.lastError;
+      _secondaryTrackOpacity =
+          bridge.secondaryOpacity.clamp(0.0, 1.0).toDouble();
+      notifyListeners();
+      return;
+    }
+
+    _secondaryTrackOpacity =
+        bridge.secondaryOpacity.clamp(0.0, 1.0).toDouble();
+    _error = null;
+    notifyListeners();
   }
 
   void togglePlayback() {

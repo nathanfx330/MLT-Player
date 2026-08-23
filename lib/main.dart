@@ -1537,6 +1537,10 @@ class _PlayerPageState extends State<PlayerPage>
                 ? _pickSecondTrack
                 : null,
           ),
+          if (_engine.hasSecondaryTrack) ...[
+            const SizedBox(width: 2),
+            _buildTrackOpacity(),
+          ],
           const SizedBox(width: 2),
           _ExportSplitButton(
             mode: _exportMode,
@@ -1628,6 +1632,67 @@ class _PlayerPageState extends State<PlayerPage>
           onPressed: _toggleFullscreen,
         ),
       ],
+    );
+  }
+
+  Widget _buildTrackOpacity() {
+    final opacity =
+        _engine.secondaryTrackOpacity.clamp(0.0, 1.0).toDouble();
+    final percent = (opacity * 100).round();
+
+    return Tooltip(
+      message: 'Movie B video opacity: $percent% (audio unchanged)',
+      child: Container(
+        height: 30,
+        padding: const EdgeInsets.only(left: 6, right: 5),
+        decoration: BoxDecoration(
+          color: const Color(0xB8121212),
+          border: Border.all(color: Colors.white24),
+          borderRadius: BorderRadius.circular(5),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(
+              Icons.opacity,
+              size: 14,
+              color: Colors.white70,
+            ),
+            SizedBox(
+              width: 76,
+              child: SliderTheme(
+                data: SliderTheme.of(context).copyWith(
+                  trackHeight: 3,
+                  thumbShape:
+                      const RoundSliderThumbShape(enabledThumbRadius: 5),
+                  overlayShape:
+                      const RoundSliderOverlayShape(overlayRadius: 11),
+                  inactiveTrackColor: Colors.white24,
+                ),
+                child: Slider(
+                  min: 0,
+                  max: 1,
+                  value: opacity,
+                  onChanged: _engine.setSecondaryTrackOpacity,
+                  onChangeEnd: (_) => _restartOverlayTimer(),
+                ),
+              ),
+            ),
+            SizedBox(
+              width: 34,
+              child: Text(
+                '$percent%',
+                textAlign: TextAlign.right,
+                style: const TextStyle(
+                  fontSize: 10,
+                  color: Colors.white70,
+                  fontFeatures: [ui.FontFeature.tabularFigures()],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 

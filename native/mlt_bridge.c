@@ -7,6 +7,7 @@
 #include <framework/mlt.h>
 #include <glib.h>
 
+#include <float.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -78,6 +79,7 @@ struct _MltBridgeEngine {
     mlt_transition e_audio_mix;
     int e_track_count;
     int64_t e_secondary_start_frame;
+    double e_secondary_opacity;
 
     int e_has_video;
     int e_has_audio;
@@ -155,6 +157,7 @@ static void activate_engine_local(MltBridgeEngine *engine)
 #define audio_mix (current_engine()->e_audio_mix)
 #define track_count (current_engine()->e_track_count)
 #define secondary_start_frame (current_engine()->e_secondary_start_frame)
+#define secondary_opacity (current_engine()->e_secondary_opacity)
 #define has_video (current_engine()->e_has_video)
 #define has_audio (current_engine()->e_has_audio)
 #define is_still (current_engine()->e_is_still)
@@ -1157,6 +1160,7 @@ static void close_producer_locked(void)
 
     track_count = 0;
     secondary_start_frame = -1;
+    secondary_opacity = 1.0;
 
     has_video = 0;
     has_audio = 0;
@@ -3181,6 +3185,8 @@ MltBridgeEngine *mlt_bridge_engine_create(void)
     g_cond_init(&engine->e_frame_idle_cond);
 
     engine->e_requested_volume = 1.0;
+    engine->e_secondary_opacity = 1.0;
+    engine->e_secondary_start_frame = -1;
     engine->e_selected_video_stream_index = -1;
     engine->e_selected_audio_stream_index = -1;
     engine->e_video_colorspace = -1;
@@ -3903,6 +3909,7 @@ int mlt_bridge_open(
 
     track_count = 1;
     secondary_start_frame = -1;
+    secondary_opacity = 1.0;
 
     g_atomic_int_set(
         &target_width,
@@ -4335,10 +4342,15 @@ int mlt_bridge_add_track(
         "valign",
         "middle"
     );
+    /*
+     * The final geometry component is opacity in percent. POC 10.4 keeps the
+     * existing full-frame/aspect-preserving placement but makes this value a
+     * live track-2 control. Start at the established 100% behavior.
+     */
     mlt_properties_set(
         composite_properties,
         "geometry",
-        "0%/0%:100%x100%"
+        "0%/0%:100%x100%:100"
     );
 
     if (mlt_field_plant_transition(
@@ -4496,6 +4508,7 @@ int mlt_bridge_add_track(
     audio_mix = pending_mix;
     track_count = 2;
     secondary_start_frame = (int64_t)pending_start;
+    secondary_opacity = 1.0;
     has_audio = primary_has_audio || secondary_has_audio;
 
     pending_secondary = NULL;
@@ -4613,6 +4626,134 @@ int64_t mlt_bridge_secondary_start_frame(void)
         track_count >= 2
             ? secondary_start_frame
             : -1;
+    g_mutex_unlock(&engine_mutex);
+
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_set_secondary_opacity(
+    double opacity)
+{
+    ensure_locks();
+
+    g_mutex_lock(&engine_mutex);
+
+    if (track_count < 2 ||
+        video_composite == NULL) {
+        set_error(
+            "Track 2 opacity requires a two-track movie."
+        );
+        g_mutex_unlock(&engine_mutex);
+        return 0;
+    }
+
+    if (opacity < 0.0) {
+        opacity = 0.0;
+    } else if (opacity > 1.0) {
+        opacity = 1.0;
+    }
+
+    char geometry[96];
+    snprintf(
+        geometry,
+        sizeof(geometry),
+        "0%%/0%%:100%%x100%%:%.6f",
+        opacity
+    );
+
+    /*
+     * composite_calculate() reads the transition properties while holding the
+     * service lock. Use the same lock for a live property mutation so slider
+     * changes are safe while MLT render threads are active.
+     */
+    mlt_service_lock(
+        MLT_TRANSITION_SERVICE(
+            video_composite
+        )
+    );
+
+    mlt_properties_set(
+        MLT_TRANSITION_PROPERTIES(
+            video_composite
+        ),
+        "geometry",
+        geometry
+    );
+
+    mlt_service_unlock(
+        MLT_TRANSITION_SERVICE(
+            video_composite
+        )
+    );
+
+    secondary_opacity = opacity;
+    set_error(NULL);
+
+    /*
+     * Forget the previously published frame before asking a paused consumer
+     * to redraw it. Otherwise the frame callback would correctly recognize the
+     * same timeline position as a duplicate and skip the opacity-only update.
+     */
+    invalidate_frames();
+
+    /*
+     * A paused consumer needs an explicit refresh to repaint the same frame.
+     * During playback this simply schedules the next frame with the new value.
+     */
+    refresh_locked();
+
+    g_mutex_unlock(&engine_mutex);
+
+    return 1;
+}
+
+MLT_BRIDGE_EXPORT
+double mlt_bridge_secondary_opacity(void)
+{
+    ensure_locks();
+
+    g_mutex_lock(&engine_mutex);
+
+    double result = 1.0;
+
+    if (track_count >= 2 &&
+        video_composite != NULL) {
+        /*
+         * Read the value MLT will actually apply, rather than only returning
+         * the bridge's requested cache. This makes the public getter and the
+         * smoke test catch geometry-encoding mistakes such as supplying 35.0
+         * where MLT's rect opacity field expects 0.35.
+         */
+        mlt_service_lock(
+            MLT_TRANSITION_SERVICE(
+                video_composite
+            )
+        );
+
+        const mlt_rect applied =
+            mlt_properties_anim_get_rect(
+                MLT_TRANSITION_PROPERTIES(
+                    video_composite
+                ),
+                "geometry",
+                0,
+                0
+            );
+
+        mlt_service_unlock(
+            MLT_TRANSITION_SERVICE(
+                video_composite
+            )
+        );
+
+        if (applied.o == DBL_MIN) {
+            result = 1.0;
+        } else {
+            result = applied.o;
+        }
+    }
+
     g_mutex_unlock(&engine_mutex);
 
     return result;
