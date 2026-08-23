@@ -153,6 +153,14 @@ class MltBridge {
             'mlt_bridge_set_secondary_opacity');
     _secondaryOpacity = _library.lookupFunction<_DoubleNative, _DoubleDart>(
         'mlt_bridge_secondary_opacity');
+    _secondaryIsStill = _library.lookupFunction<_IntNative, _IntDart>(
+        'mlt_bridge_secondary_is_still');
+    _secondaryHasAlpha = _library.lookupFunction<_IntNative, _IntDart>(
+        'mlt_bridge_secondary_has_alpha');
+    _setSecondaryAlphaMode = _library.lookupFunction<_SetIntNative, _SetIntDart>(
+        'mlt_bridge_set_secondary_alpha_mode');
+    _secondaryAlphaMode = _library.lookupFunction<_IntNative, _IntDart>(
+        'mlt_bridge_secondary_alpha_mode');
     _trackHasAudio = _library.lookupFunction<_IndexedIntNative, _IndexedIntDart>(
         'mlt_bridge_track_has_audio');
     _setTrackAudioGain =
@@ -301,6 +309,10 @@ class MltBridge {
   late final _Int64Dart _secondaryStartFrame;
   late final _SetOpacityDart _setSecondaryOpacity;
   late final _DoubleDart _secondaryOpacity;
+  late final _IntDart _secondaryIsStill;
+  late final _IntDart _secondaryHasAlpha;
+  late final _SetIntDart _setSecondaryAlphaMode;
+  late final _IntDart _secondaryAlphaMode;
   late final _IndexedIntDart _trackHasAudio;
   late final _TrackGainDart _setTrackAudioGain;
   late final _IndexedDoubleDart _trackAudioGain;
@@ -511,6 +523,15 @@ class MltBridge {
       _withEngine(false, () => _setSecondaryOpacity(opacity) != 0);
 
   double get secondaryOpacity => _withEngine(1.0, _secondaryOpacity);
+
+  bool get secondaryIsStill => _withEngine(false, () => _secondaryIsStill() != 0);
+  bool get secondaryHasAlpha =>
+      _withEngine(false, () => _secondaryHasAlpha() != 0);
+
+  bool setSecondaryAlphaMode(int mode) =>
+      _withEngine(false, () => _setSecondaryAlphaMode(mode) != 0);
+
+  int get secondaryAlphaMode => _withEngine(0, _secondaryAlphaMode);
 
   bool trackHasAudio(int trackIndex) =>
       _withEngine(false, () => _trackHasAudio(trackIndex) != 0);

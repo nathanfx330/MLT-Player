@@ -86,6 +86,12 @@ struct _MltBridgeEngine {
     double e_track_audio_gain[2];
     int e_track_has_audio[2];
 
+    /* POC 10.6: layer-2 alpha interpretation and still-overlay state. */
+    mlt_filter e_secondary_alpha_filter;
+    int e_secondary_has_alpha;
+    int e_secondary_alpha_mode;
+    int e_secondary_is_still;
+
     int e_track_count;
     int64_t e_secondary_start_frame;
     double e_secondary_opacity;
@@ -167,6 +173,10 @@ static void activate_engine_local(MltBridgeEngine *engine)
 #define track_audio_filters (current_engine()->e_track_audio_filters)
 #define track_audio_gain (current_engine()->e_track_audio_gain)
 #define track_has_audio (current_engine()->e_track_has_audio)
+#define secondary_alpha_filter (current_engine()->e_secondary_alpha_filter)
+#define secondary_has_alpha (current_engine()->e_secondary_has_alpha)
+#define secondary_alpha_mode (current_engine()->e_secondary_alpha_mode)
+#define secondary_is_still (current_engine()->e_secondary_is_still)
 #define track_count (current_engine()->e_track_count)
 #define secondary_start_frame (current_engine()->e_secondary_start_frame)
 #define secondary_opacity (current_engine()->e_secondary_opacity)
@@ -1161,6 +1171,7 @@ static void close_producer_locked(void)
      */
     track_audio_filters[0] = NULL;
     track_audio_filters[1] = NULL;
+    secondary_alpha_filter = NULL;
 
     if (secondary_playlist != NULL) {
         mlt_playlist_close(secondary_playlist);
@@ -1180,6 +1191,9 @@ static void close_producer_locked(void)
     track_count = 0;
     secondary_start_frame = -1;
     secondary_opacity = 1.0;
+    secondary_has_alpha = 0;
+    secondary_alpha_mode = 0;
+    secondary_is_still = 0;
 
     track_audio_gain[0] = 1.0;
     track_audio_gain[1] = 1.0;
@@ -1226,6 +1240,39 @@ typedef enum _MediaKind {
     MEDIA_STILL,       /* one picture, synthetic length  */
     MEDIA_UNSUPPORTED  /* opened, but not playable media */
 } MediaKind;
+
+
+static int path_has_still_image_extension(const char *path)
+{
+    if (path == NULL) {
+        return 0;
+    }
+
+    const char *dot = strrchr(path, '.');
+    if (dot == NULL) {
+        return 0;
+    }
+
+    static const char *extensions[] = {
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".webp",
+        ".bmp",
+        ".tif",
+        ".tiff",
+        ".exr",
+        NULL
+    };
+
+    for (int index = 0; extensions[index] != NULL; index++) {
+        if (g_ascii_strcasecmp(dot, extensions[index]) == 0) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
 
 static MediaKind classify_producer_locked(
     mlt_producer candidate)
@@ -3211,6 +3258,9 @@ MltBridgeEngine *mlt_bridge_engine_create(void)
     engine->e_requested_volume = 1.0;
     engine->e_secondary_opacity = 1.0;
     engine->e_secondary_start_frame = -1;
+    engine->e_secondary_has_alpha = 0;
+    engine->e_secondary_alpha_mode = 0;
+    engine->e_secondary_is_still = 0;
     engine->e_track_audio_gain[0] = 1.0;
     engine->e_track_audio_gain[1] = 1.0;
     engine->e_selected_video_stream_index = -1;
@@ -3657,6 +3707,386 @@ static mlt_filter attach_track_audio_filter_locked(
     return filter;
 }
 
+/* ------------------------------------------------------------------------- */
+/* POC 10.6 alpha-layer helpers                                              */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Direct still-image producers bypass MLT's loader producer. The loader
+ * normally guarantees that every producer has an image converter attached
+ * (avcolor_space first, imageconvert as fallback). The core composite
+ * transition requests YUV422 and assumes the producer honors that request.
+ * Without a converter, pixbuf can return RGBA directly and composite will
+ * interpret the 4-byte RGBA buffer as 2-byte YUV422, producing green/stride
+ * corruption. Mirror the loader's conversion guarantee for direct stills.
+ */
+static int attach_still_image_converter_locked(
+    mlt_producer target)
+{
+    if (target == NULL) {
+        return 0;
+    }
+
+    mlt_filter filter =
+        mlt_factory_filter(
+            profile,
+            "avcolor_space",
+            NULL
+        );
+
+    if (filter == NULL) {
+        filter =
+            mlt_factory_filter(
+                profile,
+                "imageconvert",
+                NULL
+            );
+    }
+
+    if (filter == NULL) {
+        return 0;
+    }
+
+    if (mlt_producer_attach(
+            target,
+            filter) != 0) {
+        mlt_filter_close(filter);
+        return 0;
+    }
+
+    /*
+     * mlt_service_attach() owns a reference after a successful attach.
+     * Release the factory reference, matching MLT loader behavior.
+     */
+    mlt_filter_close(filter);
+    return 1;
+}
+
+/*
+ * Validate the exact format contract used by core/composite for a still
+ * overlay. This turns the visual green-buffer failure into an import-time
+ * failure that the existing smoke test can catch. Alpha-bearing stills must
+ * also retain a separate alpha plane after the RGBA -> YUV422 conversion.
+ */
+static int still_source_is_composite_ready_locked(
+    mlt_producer candidate,
+    int require_alpha)
+{
+    if (candidate == NULL || profile == NULL) {
+        return 0;
+    }
+
+    const mlt_position saved_position =
+        mlt_producer_position(candidate);
+    const double saved_speed =
+        mlt_producer_get_speed(candidate);
+
+    mlt_producer_set_speed(candidate, 0.0);
+    mlt_producer_seek(candidate, 0);
+
+    mlt_frame frame = NULL;
+    int ready = 0;
+
+    if (mlt_service_get_frame(
+            MLT_PRODUCER_SERVICE(candidate),
+            &frame,
+            0) == 0 &&
+        frame != NULL) {
+        uint8_t *image = NULL;
+        mlt_image_format format = mlt_image_yuv422;
+        int width = profile->width;
+        int height = profile->height;
+
+        if (mlt_frame_get_image(
+                frame,
+                &image,
+                &format,
+                &width,
+                &height,
+                1) == 0 &&
+            image != NULL &&
+            format == mlt_image_yuv422 &&
+            width > 0 &&
+            height > 0 &&
+            (!require_alpha ||
+             mlt_frame_get_alpha(frame) != NULL)) {
+            ready = 1;
+        }
+
+        mlt_frame_close(frame);
+    }
+
+    mlt_producer_set_speed(candidate, saved_speed);
+    mlt_producer_seek(candidate, saved_position);
+
+    return ready;
+}
+
+static int pixel_format_has_alpha_channel(
+    const char *pixel_format)
+{
+    if (pixel_format == NULL || pixel_format[0] == '\0') {
+        return 0;
+    }
+
+    if (strncmp(pixel_format, "yuva", 4) == 0 ||
+        strncmp(pixel_format, "gbrap", 5) == 0 ||
+        strncmp(pixel_format, "rgba", 4) == 0 ||
+        strncmp(pixel_format, "bgra", 4) == 0 ||
+        strncmp(pixel_format, "argb", 4) == 0 ||
+        strncmp(pixel_format, "abgr", 4) == 0 ||
+        strncmp(pixel_format, "ayuv", 4) == 0 ||
+        strncmp(pixel_format, "ya8", 3) == 0 ||
+        strncmp(pixel_format, "ya16", 4) == 0) {
+        return 1;
+    }
+
+    return 0;
+}
+
+/*
+ * Ask one source frame for its native image representation. This catches
+ * image producers such as qimage/pixbuf, while codec metadata catches timed
+ * alpha formats such as yuva444p10le and argb before any compositing occurs.
+ */
+static int producer_frame_reports_alpha_locked(
+    mlt_producer candidate)
+{
+    if (candidate == NULL) {
+        return 0;
+    }
+
+    const mlt_position saved_position =
+        mlt_producer_position(candidate);
+    const double saved_speed =
+        mlt_producer_get_speed(candidate);
+
+    mlt_producer_set_speed(candidate, 0.0);
+    mlt_producer_seek(candidate, 0);
+
+    mlt_frame frame = NULL;
+    int result = 0;
+
+    if (mlt_service_get_frame(
+            MLT_PRODUCER_SERVICE(candidate),
+            &frame,
+            0) == 0 &&
+        frame != NULL) {
+        uint8_t *image = NULL;
+        mlt_image_format format = mlt_image_none;
+        int width = profile != NULL ? profile->width : 0;
+        int height = profile != NULL ? profile->height : 0;
+
+        if (mlt_frame_get_image(
+                frame,
+                &image,
+                &format,
+                &width,
+                &height,
+                0) == 0) {
+            result =
+                format == mlt_image_rgba ||
+                mlt_frame_get_alpha(frame) != NULL;
+        }
+
+        mlt_frame_close(frame);
+    }
+
+    mlt_producer_set_speed(candidate, saved_speed);
+    mlt_producer_seek(candidate, saved_position);
+
+    return result;
+}
+
+static int producer_has_alpha_locked(
+    mlt_producer candidate,
+    MediaKind kind)
+{
+    if (candidate == NULL) {
+        return 0;
+    }
+
+    mlt_properties properties =
+        MLT_PRODUCER_PROPERTIES(candidate);
+
+    if (kind == MEDIA_TIMED &&
+        mlt_properties_get(properties, "video_index") != NULL) {
+        const int stream_index =
+            mlt_properties_get_int(properties, "video_index");
+
+        if (stream_index >= 0) {
+            char key[128];
+            snprintf(
+                key,
+                sizeof(key),
+                "meta.media.%d.codec.pix_fmt",
+                stream_index
+            );
+
+            if (pixel_format_has_alpha_channel(
+                    mlt_properties_get(properties, key))) {
+                return 1;
+            }
+        }
+    }
+
+    return producer_frame_reports_alpha_locked(candidate);
+}
+
+static int alpha_unpremultiply_get_image(
+    mlt_frame frame,
+    uint8_t **image,
+    mlt_image_format *format,
+    int *width,
+    int *height,
+    int writable)
+{
+    (void)writable;
+
+    mlt_filter filter =
+        (mlt_filter)mlt_frame_pop_service(frame);
+
+    const mlt_image_format requested_format =
+        *format;
+
+    *format = mlt_image_rgba;
+
+    int error =
+        mlt_frame_get_image(
+            frame,
+            image,
+            format,
+            width,
+            height,
+            1
+        );
+
+    if (error != 0 ||
+        image == NULL ||
+        *image == NULL ||
+        *format != mlt_image_rgba ||
+        *width <= 0 ||
+        *height <= 0) {
+        return error;
+    }
+
+    if (mlt_properties_get_int(
+            MLT_FILTER_PROPERTIES(filter),
+            "mlt_player_alpha_mode") != 2) {
+        return error;
+    }
+
+    const size_t pixels =
+        (size_t)(*width) * (size_t)(*height);
+
+    for (size_t index = 0; index < pixels; index++) {
+        uint8_t *pixel =
+            *image + index * 4;
+        const unsigned int alpha =
+            pixel[3];
+
+        if (alpha == 0) {
+            pixel[0] = 0;
+            pixel[1] = 0;
+            pixel[2] = 0;
+            continue;
+        }
+
+        if (alpha >= 255) {
+            continue;
+        }
+
+        for (int channel = 0; channel < 3; channel++) {
+            const unsigned int expanded =
+                ((unsigned int)pixel[channel] * 255u + alpha / 2u) /
+                alpha;
+            pixel[channel] =
+                (uint8_t)(expanded > 255u ? 255u : expanded);
+        }
+    }
+
+    /*
+     * The correction must be transparent to the caller's image-format
+     * contract. Core/composite requests YUV422; returning RGBA here would
+     * make it interpret four-byte pixels with a two-byte stride. Convert the
+     * corrected RGBA back to whatever the caller originally requested.
+     */
+    if (requested_format != mlt_image_none &&
+        requested_format != mlt_image_movit &&
+        requested_format != mlt_image_rgba) {
+        if (frame->convert_image == NULL) {
+            return 1;
+        }
+
+        error =
+            frame->convert_image(
+                frame,
+                image,
+                format,
+                requested_format
+            );
+    }
+
+    return error;
+}
+
+static mlt_frame alpha_interpret_process(
+    mlt_filter filter,
+    mlt_frame frame)
+{
+    mlt_frame_push_service(frame, filter);
+    mlt_frame_push_get_image(
+        frame,
+        alpha_unpremultiply_get_image
+    );
+    return frame;
+}
+
+/*
+ * The filter is always attached to layer 2 but normally disabled. Auto and
+ * Straight therefore preserve MLT's native decode path exactly. Selecting
+ * Premultiplied enables the filter and unpremultiplies RGB before MLT's
+ * existing composite transition applies alpha.
+ */
+static mlt_filter attach_secondary_alpha_filter_locked(
+    mlt_producer target)
+{
+    if (target == NULL) {
+        return NULL;
+    }
+
+    mlt_filter filter =
+        mlt_filter_new();
+
+    if (filter == NULL) {
+        return NULL;
+    }
+
+    filter->process =
+        alpha_interpret_process;
+
+    mlt_properties_set_int(
+        MLT_FILTER_PROPERTIES(filter),
+        "mlt_player_alpha_mode",
+        0
+    );
+    mlt_properties_set_int(
+        MLT_FILTER_PROPERTIES(filter),
+        "disable",
+        1
+    );
+
+    if (mlt_producer_attach(
+            target,
+            filter) != 0) {
+        mlt_filter_close(filter);
+        return NULL;
+    }
+
+    mlt_filter_close(filter);
+    return filter;
+}
+
 MLT_BRIDGE_EXPORT
 int mlt_bridge_open(
     const char *path)
@@ -3983,6 +4413,10 @@ int mlt_bridge_open(
     track_count = 1;
     secondary_start_frame = -1;
     secondary_opacity = 1.0;
+    secondary_has_alpha = 0;
+    secondary_alpha_mode = 0;
+    secondary_is_still = 0;
+    secondary_alpha_filter = NULL;
 
     track_audio_gain[0] = 1.0;
     track_audio_gain[1] = 1.0;
@@ -4147,24 +4581,73 @@ int mlt_bridge_add_track(
     mlt_transition pending_composite = NULL;
     mlt_transition pending_mix = NULL;
     mlt_filter pending_secondary_audio_filter = NULL;
+    mlt_filter pending_secondary_alpha_filter = NULL;
 
     int secondary_has_audio = 0;
+    int secondary_has_alpha_value = 0;
+    int secondary_still = 0;
     int succeeded = 0;
     char failure[512] = "";
 
-    pending_secondary =
-        mlt_factory_producer(
-            profile,
-            NULL,
-            path
-        );
+    const int path_is_still =
+        path_has_still_image_extension(path);
+
+    /*
+     * POC 10.6.2: never let the generic loader choose Qt/QImage for a
+     * still-image layer on the helper isolate. MLT's pixbuf producer is a
+     * real looping still producer, preserves RGBA alpha, and serializes
+     * GdkPixbuf access internally. That makes it safe for the background
+     * layer-loading path used by Flutter.
+     *
+     * Some formats (notably EXR on installations without a matching
+     * GdkPixbuf loader) may not be available through pixbuf. Fall back to
+     * avformat rather than qimage so still import never initializes Qt from
+     * the helper isolate.
+     */
+    if (path_is_still) {
+        pending_secondary =
+            mlt_factory_producer(
+                profile,
+                "pixbuf",
+                path
+            );
+
+        if (pending_secondary == NULL) {
+            pending_secondary =
+                mlt_factory_producer(
+                    profile,
+                    "avformat",
+                    path
+                );
+        }
+    } else {
+        pending_secondary =
+            mlt_factory_producer(
+                profile,
+                NULL,
+                path
+            );
+    }
 
     if (pending_secondary == NULL) {
         snprintf(
             failure,
             sizeof(failure),
             "%s",
-            "MLT could not open the second movie."
+            "MLT could not open the added layer."
+        );
+        goto add_track_cleanup;
+    }
+
+    if (path_is_still &&
+        !attach_still_image_converter_locked(
+            pending_secondary
+        )) {
+        snprintf(
+            failure,
+            sizeof(failure),
+            "%s",
+            "Could not install still-image color conversion support."
         );
         goto add_track_cleanup;
     }
@@ -4178,7 +4661,8 @@ int mlt_bridge_add_track(
             pending_secondary
         );
 
-    if (secondary_kind != MEDIA_TIMED ||
+    if ((secondary_kind != MEDIA_TIMED &&
+         secondary_kind != MEDIA_STILL) ||
         !producer_has_stream_locked(
             pending_secondary,
             "video_index",
@@ -4187,22 +4671,49 @@ int mlt_bridge_add_track(
             failure,
             sizeof(failure),
             "%s",
-            "The second track must be timed video media."
+            "The added layer must be video or a still image."
+        );
+        goto add_track_cleanup;
+    }
+
+    secondary_still =
+        path_is_still ||
+        secondary_kind == MEDIA_STILL;
+
+    secondary_has_alpha_value =
+        producer_has_alpha_locked(
+            pending_secondary,
+            secondary_kind
+        );
+
+    if (secondary_still &&
+        !still_source_is_composite_ready_locked(
+            pending_secondary,
+            secondary_has_alpha_value
+        )) {
+        snprintf(
+            failure,
+            sizeof(failure),
+            "%s",
+            "The still-image layer could not provide composite-safe YUV422 with alpha."
         );
         goto add_track_cleanup;
     }
 
     const mlt_position secondary_length =
-        mlt_producer_get_length(
-            pending_secondary
-        );
+        secondary_still
+            ? 0
+            : mlt_producer_get_length(
+                  pending_secondary
+              );
 
-    if (secondary_length <= 0) {
+    if (!secondary_still &&
+        secondary_length <= 0) {
         snprintf(
             failure,
             sizeof(failure),
             "%s",
-            "The second movie reports no usable duration."
+            "The added video layer reports no usable duration."
         );
         goto add_track_cleanup;
     }
@@ -4226,22 +4737,39 @@ int mlt_bridge_add_track(
     const mlt_position available_length =
         primary_length - pending_start;
     const mlt_position secondary_playtime =
-        secondary_length < available_length
-            ? secondary_length
-            : available_length;
+        secondary_still
+            ? available_length
+            : (secondary_length < available_length
+                   ? secondary_length
+                   : available_length);
 
     if (secondary_playtime <= 0) {
         snprintf(
             failure,
             sizeof(failure),
             "%s",
-            "There is no room for the second movie at that playhead."
+            "There is no room for the added layer at that playhead."
         );
         goto add_track_cleanup;
     }
 
     const mlt_position secondary_out =
         secondary_playtime - 1;
+
+    if (secondary_still) {
+        /*
+         * Still-image producers have a synthetic default length. Make the
+         * layer explicitly last for every frame remaining in Movie A so a
+         * PNG logo/template behaves like a held Paint-style layer.
+         */
+        mlt_properties_set_position(
+            MLT_PRODUCER_PROPERTIES(
+                pending_secondary
+            ),
+            "length",
+            secondary_playtime
+        );
+    }
 
     mlt_producer_set_in_and_out(
         pending_secondary,
@@ -4258,11 +4786,13 @@ int mlt_bridge_add_track(
     );
 
     secondary_has_audio =
-        producer_has_stream_locked(
-            pending_secondary,
-            "audio_index",
-            "audio"
-        );
+        secondary_still
+            ? 0
+            : producer_has_stream_locked(
+                  pending_secondary,
+                  "audio_index",
+                  "audio"
+              );
 
     pending_secondary_playlist =
         mlt_playlist_new(
@@ -4274,7 +4804,7 @@ int mlt_bridge_add_track(
             failure,
             sizeof(failure),
             "%s",
-            "Could not create the offset playlist for track 2."
+            "Could not create the offset playlist for layer 2."
         );
         goto add_track_cleanup;
     }
@@ -4288,7 +4818,7 @@ int mlt_bridge_add_track(
             failure,
             sizeof(failure),
             "%s",
-            "Could not create the blank lead-in for track 2."
+            "Could not create the blank lead-in for layer 2."
         );
         goto add_track_cleanup;
     }
@@ -4303,7 +4833,7 @@ int mlt_bridge_add_track(
             failure,
             sizeof(failure),
             "%s",
-            "Could not place the second movie on its offset track."
+            "Could not place the added media on layer 2."
         );
         goto add_track_cleanup;
     }
@@ -4315,6 +4845,21 @@ int mlt_bridge_add_track(
                     pending_secondary_playlist
                 )
             );
+    }
+
+    pending_secondary_alpha_filter =
+        attach_secondary_alpha_filter_locked(
+            pending_secondary
+        );
+
+    if (pending_secondary_alpha_filter == NULL) {
+        snprintf(
+            failure,
+            sizeof(failure),
+            "%s",
+            "Could not create layer alpha interpretation support."
+        );
+        goto add_track_cleanup;
     }
 
     pending_tractor =
@@ -4419,10 +4964,23 @@ int mlt_bridge_add_track(
         "invert",
         0
     );
+    /*
+     * Timed video layers keep the existing fit-to-canvas behavior. Still
+     * images are different: preserve their intrinsic pixel size when they
+     * already fit, but allow MLT's aligned compositor to scale them down if
+     * they are larger than the base movie. This prevents a small corner bug
+     * from being enlarged while guaranteeing that an oversized PNG can never
+     * expand or escape the base canvas.
+     */
+    mlt_properties_set_int(
+        composite_properties,
+        "aligned",
+        1
+    );
     mlt_properties_set_int(
         composite_properties,
         "fill",
-        1
+        secondary_still ? 0 : 1
     );
     mlt_properties_set_int(
         composite_properties,
@@ -4606,6 +5164,10 @@ int mlt_bridge_add_track(
     track_count = 2;
     secondary_start_frame = (int64_t)pending_start;
     secondary_opacity = 1.0;
+    secondary_alpha_filter = pending_secondary_alpha_filter;
+    secondary_has_alpha = secondary_has_alpha_value ? 1 : 0;
+    secondary_alpha_mode = 0;
+    secondary_is_still = secondary_still ? 1 : 0;
 
     track_has_audio[1] = secondary_has_audio ? 1 : 0;
     track_audio_gain[1] = 1.0;
@@ -4618,6 +5180,7 @@ int mlt_bridge_add_track(
     pending_tractor = NULL;
     pending_composite = NULL;
     pending_mix = NULL;
+    pending_secondary_alpha_filter = NULL;
 
     set_error(NULL);
     succeeded = 1;
@@ -4744,7 +5307,7 @@ int mlt_bridge_set_secondary_opacity(
     if (track_count < 2 ||
         video_composite == NULL) {
         set_error(
-            "Track 2 opacity requires a two-track movie."
+            "Layer 2 opacity requires a two-layer composition."
         );
         g_mutex_unlock(&engine_mutex);
         return 0;
@@ -4861,6 +5424,134 @@ double mlt_bridge_secondary_opacity(void)
     return result;
 }
 
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_secondary_is_still(void)
+{
+    ensure_locks();
+
+    g_mutex_lock(&engine_mutex);
+    const int result =
+        track_count >= 2
+            ? secondary_is_still
+            : 0;
+    g_mutex_unlock(&engine_mutex);
+
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_secondary_has_alpha(void)
+{
+    ensure_locks();
+
+    g_mutex_lock(&engine_mutex);
+    const int result =
+        track_count >= 2
+            ? secondary_has_alpha
+            : 0;
+    g_mutex_unlock(&engine_mutex);
+
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_set_secondary_alpha_mode(
+    int mode)
+{
+    ensure_locks();
+
+    g_mutex_lock(&engine_mutex);
+
+    if (track_count < 2 ||
+        secondary_alpha_filter == NULL) {
+        set_error(
+            "Alpha interpretation requires a second layer."
+        );
+        g_mutex_unlock(&engine_mutex);
+        return 0;
+    }
+
+    if (mode < 0 || mode > 2) {
+        set_error(
+            "Alpha interpretation must be Auto, Straight, or Premultiplied."
+        );
+        g_mutex_unlock(&engine_mutex);
+        return 0;
+    }
+
+    mlt_service_lock(
+        MLT_FILTER_SERVICE(
+            secondary_alpha_filter
+        )
+    );
+
+    mlt_properties_set_int(
+        MLT_FILTER_PROPERTIES(
+            secondary_alpha_filter
+        ),
+        "mlt_player_alpha_mode",
+        mode
+    );
+    mlt_properties_set_int(
+        MLT_FILTER_PROPERTIES(
+            secondary_alpha_filter
+        ),
+        "disable",
+        mode == 2 ? 0 : 1
+    );
+
+    mlt_service_unlock(
+        MLT_FILTER_SERVICE(
+            secondary_alpha_filter
+        )
+    );
+
+    secondary_alpha_mode = mode;
+    set_error(NULL);
+
+    invalidate_frames();
+    refresh_locked();
+
+    g_mutex_unlock(&engine_mutex);
+    return 1;
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_secondary_alpha_mode(void)
+{
+    ensure_locks();
+
+    g_mutex_lock(&engine_mutex);
+
+    int result = 0;
+
+    if (track_count >= 2 &&
+        secondary_alpha_filter != NULL) {
+        mlt_service_lock(
+            MLT_FILTER_SERVICE(
+                secondary_alpha_filter
+            )
+        );
+
+        result =
+            mlt_properties_get_int(
+                MLT_FILTER_PROPERTIES(
+                    secondary_alpha_filter
+                ),
+                "mlt_player_alpha_mode"
+            );
+
+        mlt_service_unlock(
+            MLT_FILTER_SERVICE(
+                secondary_alpha_filter
+            )
+        );
+    }
+
+    g_mutex_unlock(&engine_mutex);
+    return result;
+}
 
 MLT_BRIDGE_EXPORT
 int mlt_bridge_track_has_audio(

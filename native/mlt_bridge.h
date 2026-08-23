@@ -166,12 +166,11 @@ mlt_bridge_open(
 );
 
 /*
- * POC 10.3 Add to Movie: place one additional timed video source at an exact
- * primary-timeline frame. Native builds track 2 as an MLT playlist containing
- * a blank lead-in followed by the second movie, then composites/mixes it over
- * track 0. POC 10.4 adds live track-2 video opacity. POC 10.5 adds
- * independent 0.0-1.0 audio gain per track before the tractor mix.
- * The primary movie remains the duration/profile/inspection authority.
+ * Layer 2 is placed at an exact primary-timeline frame. Timed video plays for
+ * its real duration; still images are held from their insertion frame through
+ * the end of Movie A. The primary movie remains the duration/profile/inspection
+ * authority. POC 10.6 adds alpha detection and explicit interpretation for
+ * transparent PNG/video overlays.
  */
 MLT_BRIDGE_EXPORT int
 mlt_bridge_add_track(
@@ -193,6 +192,25 @@ mlt_bridge_set_secondary_opacity(
 
 MLT_BRIDGE_EXPORT double
 mlt_bridge_secondary_opacity(void);
+
+/*
+ * POC 10.6 layer metadata / alpha interpretation.
+ * Alpha mode: 0 Auto/native, 1 Straight/native, 2 Premultiplied (unpremultiply
+ * RGB before MLT's existing composite transition applies alpha).
+ */
+MLT_BRIDGE_EXPORT int
+mlt_bridge_secondary_is_still(void);
+
+MLT_BRIDGE_EXPORT int
+mlt_bridge_secondary_has_alpha(void);
+
+MLT_BRIDGE_EXPORT int
+mlt_bridge_set_secondary_alpha_mode(
+    int mode
+);
+
+MLT_BRIDGE_EXPORT int
+mlt_bridge_secondary_alpha_mode(void);
 
 /*
  * POC 10.5: per-track audio gain before the tractor mix.

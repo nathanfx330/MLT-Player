@@ -14,7 +14,8 @@
  *     -Wl,-rpath,build/linux/x64/debug/bundle/lib
  *
  * Run:
- *   SDL_AUDIODRIVER=dummy ./native/mlt_smoke clip.mp4 [junk.txt] [still.png]
+ *   SDL_AUDIODRIVER=dummy ./native/mlt_smoke clip.mp4 \
+ *     [junk.txt] [alpha-still.png] [alpha-video.mov]
  *
  * tools/smoke.sh does all of this for you, fixtures included.
  */
@@ -28,6 +29,7 @@
 static const char *media_path = NULL;
 static const char *junk_path = NULL;
 static const char *still_path = NULL;
+static const char *alpha_video_path = NULL;
 
 static GMainLoop *loop = NULL;
 static MltBridgeEngine *engine = NULL;
@@ -569,6 +571,171 @@ static gboolean run_step(
         break;
 
     case 14:
+        if (still_path == NULL) {
+            break;
+        }
+
+        printf("alpha still layer\n");
+
+        {
+            const int base_width = mlt_bridge_width();
+            const int base_height = mlt_bridge_height();
+            const int64_t duration_frames =
+                mlt_bridge_duration_frames();
+            const int64_t start_frame =
+                duration_frames > 60 ? 40 : duration_frames / 4;
+
+            check(
+                mlt_bridge_seek_frame(start_frame),
+                "primary can park for a PNG layer"
+            );
+
+            check(
+                mlt_bridge_add_track(still_path, start_frame),
+                "transparent PNG can be added as layer 2"
+            );
+
+            check(
+                mlt_bridge_track_count() == 2,
+                "PNG promotes the viewer to two layers"
+            );
+
+            check(
+                mlt_bridge_width() == base_width &&
+                    mlt_bridge_height() == base_height,
+                "oversized PNG keeps the base movie canvas geometry"
+            );
+
+            check(
+                mlt_bridge_secondary_is_still(),
+                "PNG layer is classified as a held still"
+            );
+
+            check(
+                mlt_bridge_secondary_has_alpha(),
+                "PNG layer reports alpha"
+            );
+
+            check(
+                !mlt_bridge_track_has_audio(1),
+                "PNG layer reports no audio"
+            );
+
+            check(
+                mlt_bridge_secondary_alpha_mode() == 0,
+                "PNG alpha interpretation starts in Auto"
+            );
+
+            check(
+                mlt_bridge_set_secondary_alpha_mode(2),
+                "PNG alpha can be interpreted as premultiplied"
+            );
+
+            check(
+                mlt_bridge_secondary_alpha_mode() == 2,
+                "premultiplied alpha mode round trips"
+            );
+
+            check(
+                mlt_bridge_set_secondary_alpha_mode(1),
+                "PNG alpha can be forced straight"
+            );
+
+            check(
+                mlt_bridge_secondary_alpha_mode() == 1,
+                "straight alpha mode round trips"
+            );
+
+            check(
+                mlt_bridge_set_secondary_alpha_mode(0),
+                "PNG alpha can return to Auto"
+            );
+
+            if (duration_frames > 0) {
+                const int64_t final_frame =
+                    duration_frames - 1;
+
+                check(
+                    mlt_bridge_seek_frame(final_frame),
+                    "held PNG layer survives to Movie A's final frame"
+                );
+
+                check(
+                    mlt_bridge_position_frame() == final_frame,
+                    "final-frame seek with held PNG round trips exactly"
+                );
+            }
+
+            check(
+                mlt_bridge_open(media_path),
+                "reopen clears the PNG layer"
+            );
+        }
+
+        break;
+
+    case 15:
+        if (alpha_video_path == NULL) {
+            break;
+        }
+
+        printf("alpha video layer\n");
+
+        {
+            const int64_t duration_frames =
+                mlt_bridge_duration_frames();
+            const int64_t start_frame =
+                duration_frames > 50 ? 30 : duration_frames / 5;
+
+            check(
+                mlt_bridge_seek_frame(start_frame),
+                "primary can park for an alpha-video layer"
+            );
+
+            check(
+                mlt_bridge_add_track(alpha_video_path, start_frame),
+                "transparent video can be added as layer 2"
+            );
+
+            check(
+                !mlt_bridge_secondary_is_still(),
+                "transparent video remains timed media"
+            );
+
+            check(
+                mlt_bridge_secondary_has_alpha(),
+                "transparent video reports alpha"
+            );
+
+            check(
+                mlt_bridge_secondary_alpha_mode() == 0,
+                "transparent-video alpha starts in Auto"
+            );
+
+            check(
+                mlt_bridge_set_secondary_alpha_mode(2),
+                "transparent video accepts Premultiplied mode"
+            );
+
+            check(
+                mlt_bridge_secondary_alpha_mode() == 2,
+                "transparent-video alpha mode round trips"
+            );
+
+            check(
+                mlt_bridge_set_secondary_alpha_mode(0),
+                "transparent video returns to Auto"
+            );
+
+            check(
+                mlt_bridge_open(media_path),
+                "reopen clears the alpha-video layer"
+            );
+        }
+
+        break;
+
+    case 16:
         if (junk_path == NULL) {
             break;
         }
@@ -597,7 +764,7 @@ static gboolean run_step(
 
         break;
 
-    case 15:
+    case 17:
         if (still_path == NULL) {
             break;
         }
@@ -634,7 +801,7 @@ static gboolean run_step(
 
         break;
 
-    case 16:
+    case 18:
         printf("teardown\n");
 
         mlt_bridge_close_media();
@@ -679,7 +846,7 @@ int main(
     if (argc < 2) {
         fprintf(
             stderr,
-            "usage: %s <media> [non-media file] [still image]\n",
+            "usage: %s <media> [non-media] [alpha still] [alpha video]\n",
             argv[0]
         );
 
@@ -689,6 +856,7 @@ int main(
     media_path = argv[1];
     junk_path = argc > 2 ? argv[2] : NULL;
     still_path = argc > 3 ? argv[3] : NULL;
+    alpha_video_path = argc > 4 ? argv[4] : NULL;
 
     if (!mlt_bridge_init()) {
         char error[512];

@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-#
 # tools/smoke.sh
 #
 # Builds the native bridge and the headless test outside of Flutter's build,
@@ -8,8 +7,8 @@
 # This answers one question and only one: is the problem in MLT and the
 # bridge, or in the Flutter integration. Run it before debugging the UI.
 #
-#   tools/smoke.sh                  # generates a test clip with ffmpeg
-#   tools/smoke.sh /path/clip.mp4   # uses your own media
+#   tools/smoke.sh                  # generates test media with ffmpeg
+#   tools/smoke.sh /path/clip.mp4   # uses your own primary media
 #
 # Requires that Flutter has fetched its Linux artifacts at least once, which
 # any of `flutter build linux`, `flutter run -d linux`, or
@@ -110,11 +109,33 @@ fi
 JUNK="$WORK/not-media.txt"
 printf 'This is not a video.\n' > "$JUNK"
 
-STILL=""
+ALPHA_STILL=""
+ALPHA_VIDEO=""
+
 if command -v ffmpeg >/dev/null; then
-    STILL="$WORK/still.png"
+    ALPHA_STILL="$WORK/alpha-still.png"
+    ALPHA_VIDEO="$WORK/alpha-video.mov"
+
+    echo "smoke: generating alpha fixtures"
+
+    # Oversized semi-transparent RGBA PNG. It is intentionally larger than
+    # the generated 640x360 base movie so the smoke test proves that a still
+    # layer never expands the base canvas. colorchannelmixer forces a real
+    # 8-bit alpha channel instead of relying on a filename/container hint.
     ffmpeg -hide_banner -loglevel error -y \
-        -f lavfi -i "testsrc2=size=320x240" -frames:v 1 "$STILL"
+        -f lavfi -i \
+        "color=c=red:s=1280x720,format=rgba,colorchannelmixer=aa=0.5" \
+        -frames:v 1 \
+        "$ALPHA_STILL"
+
+    # QuickTime Animation is deliberately simple here: it is lossless, carries
+    # alpha, and decodes through avformat without requiring an editor-specific
+    # plugin. The fixture is short because we only need to prove alpha topology.
+    ffmpeg -hide_banner -loglevel error -y \
+        -f lavfi -i \
+        "testsrc2=size=320x180:rate=25:duration=1,format=rgba,colorchannelmixer=aa=0.5" \
+        -c:v qtrle -pix_fmt argb \
+        "$ALPHA_VIDEO"
 fi
 
 # --------------------------------------------------------------------------
@@ -124,6 +145,16 @@ fi
 echo "smoke: running against $(basename "$MEDIA")"
 echo
 
+ARGS=("$MEDIA" "$JUNK")
+
+if [ -n "$ALPHA_STILL" ]; then
+    ARGS+=("$ALPHA_STILL")
+
+    if [ -n "$ALPHA_VIDEO" ]; then
+        ARGS+=("$ALPHA_VIDEO")
+    fi
+fi
+
 LD_LIBRARY_PATH="$WORK" \
 SDL_AUDIODRIVER=dummy \
-    "$WORK/mlt_smoke" "$MEDIA" "$JUNK" $STILL
+    "$WORK/mlt_smoke" "${ARGS[@]}"

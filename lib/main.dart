@@ -313,15 +313,16 @@ class _PlayerPageState extends State<PlayerPage>
     _showOverlay();
 
     final typeGroup = XTypeGroup(
-      label: 'Video',
+      label: 'Layer media',
       extensions: <String>[
         'mp4', 'mov', 'mkv', 'avi', 'webm', 'm4v', 'mxf', 'mpg', 'mpeg',
         'wmv', 'ts', 'm2ts', 'dv', 'flv', 'ogv',
+        'png', 'jpg', 'jpeg', 'webp', 'bmp', 'tif', 'tiff', 'exr',
       ],
     );
 
     final file = await openFile(
-      confirmButtonText: 'Add to Movie',
+      confirmButtonText: 'Add Layer',
       acceptedTypeGroups: <XTypeGroup>[typeGroup],
     );
 
@@ -335,6 +336,88 @@ class _PlayerPageState extends State<PlayerPage>
       if (added) {
         setState(() => _tracksOpen = true);
       }
+      _showOverlay();
+    }
+  }
+
+  Future<void> _replacePrimaryLayerSource() async {
+    final media = _engine.media;
+    if (media == null ||
+        media.isStill ||
+        !media.hasVideo ||
+        _engine.opening ||
+        _engine.addingTrack ||
+        _engine.exporting) {
+      return;
+    }
+
+    _showOverlay();
+
+    final typeGroup = XTypeGroup(
+      label: 'Base video',
+      extensions: <String>[
+        'mp4', 'mov', 'mkv', 'avi', 'webm', 'm4v', 'mxf', 'mpg', 'mpeg',
+        'wmv', 'ts', 'm2ts', 'dv', 'flv', 'ogv',
+      ],
+    );
+
+    final file = await openFile(
+      confirmButtonText: 'Replace Base',
+      acceptedTypeGroups: <XTypeGroup>[typeGroup],
+    );
+
+    if (file == null) {
+      return;
+    }
+
+    await _engine.replacePrimaryLayerSource(file.path);
+
+    if (mounted) {
+      setState(() {
+        _tracksOpen = _engine.hasSecondaryTrack;
+      });
+      _showOverlay();
+    }
+  }
+
+  Future<void> _replaceSecondaryLayerSource() async {
+    final media = _engine.media;
+    if (media == null ||
+        media.isStill ||
+        !media.hasVideo ||
+        !_engine.hasSecondaryTrack ||
+        _engine.opening ||
+        _engine.addingTrack ||
+        _engine.exporting) {
+      return;
+    }
+
+    _showOverlay();
+
+    final typeGroup = XTypeGroup(
+      label: 'Overlay layer media',
+      extensions: <String>[
+        'mp4', 'mov', 'mkv', 'avi', 'webm', 'm4v', 'mxf', 'mpg', 'mpeg',
+        'wmv', 'ts', 'm2ts', 'dv', 'flv', 'ogv',
+        'png', 'jpg', 'jpeg', 'webp', 'bmp', 'tif', 'tiff', 'exr',
+      ],
+    );
+
+    final file = await openFile(
+      confirmButtonText: 'Replace Layer',
+      acceptedTypeGroups: <XTypeGroup>[typeGroup],
+    );
+
+    if (file == null) {
+      return;
+    }
+
+    await _engine.replaceSecondaryLayerSource(file.path);
+
+    if (mounted) {
+      setState(() {
+        _tracksOpen = _engine.hasSecondaryTrack;
+      });
       _showOverlay();
     }
   }
@@ -1122,6 +1205,9 @@ class _PlayerPageState extends State<PlayerPage>
                 _formatClipTimecode(media, secondaryStartFrame),
             primaryHasAudio: media.hasAudio,
             secondaryHasAudio: _engine.secondaryTrackHasAudio,
+            secondaryIsStill: _engine.secondaryTrackIsStill,
+            secondaryHasAlpha: _engine.secondaryTrackHasAlpha,
+            secondaryAlphaMode: _engine.secondaryTrackAlphaMode,
             primaryAudioGain: _engine.primaryTrackAudioGain,
             secondaryAudioGain: _engine.secondaryTrackAudioGain,
             secondaryOpacity: _engine.secondaryTrackOpacity,
@@ -1131,6 +1217,10 @@ class _PlayerPageState extends State<PlayerPage>
                 _engine.setTrackAudioGain(1, value),
             onSecondaryOpacityChanged:
                 _engine.setSecondaryTrackOpacity,
+            onSecondaryAlphaModeChanged:
+                _engine.setSecondaryTrackAlphaMode,
+            onReplacePrimarySource: _replacePrimaryLayerSource,
+            onReplaceSecondarySource: _replaceSecondaryLayerSource,
             onClose: _toggleTracksInspector,
           ),
         ),
@@ -1588,12 +1678,12 @@ class _PlayerPageState extends State<PlayerPage>
           _ModeButton(
             label: _engine.addingTrack
                 ? 'ADDING…'
-                : (_engine.hasSecondaryTrack ? '2 TRACKS' : 'ADD MOVIE'),
+                : (_engine.hasSecondaryTrack ? 'LAYERS' : 'ADD LAYER'),
             tooltip: _engine.hasSecondaryTrack
                 ? (_tracksOpen
-                    ? 'Hide Tracks Inspector'
-                    : 'Open Tracks Inspector')
-                : 'Add another video as track 2 at the current playhead',
+                    ? 'Hide Layers Inspector'
+                    : 'Open Layers Inspector')
+                : 'Add video or an image layer at the current playhead',
             active: _tracksOpen,
             onPressed: _engine.hasSecondaryTrack
                 ? _toggleTracksInspector

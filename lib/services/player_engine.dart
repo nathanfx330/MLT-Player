@@ -59,6 +59,9 @@ class PlayerEngine extends ChangeNotifier {
   String? _secondaryTrackPath;
   int? _secondaryTrackStartFrame;
   double _secondaryTrackOpacity = 1.0;
+  bool _secondaryTrackIsStill = false;
+  bool _secondaryTrackHasAlpha = false;
+  int _secondaryTrackAlphaMode = 0;
   double _primaryTrackAudioGain = 1.0;
   double _secondaryTrackAudioGain = 1.0;
   bool _secondaryTrackHasAudio = false;
@@ -106,6 +109,9 @@ class PlayerEngine extends ChangeNotifier {
   String? get secondaryTrackPath => _secondaryTrackPath;
   int? get secondaryTrackStartFrame => _secondaryTrackStartFrame;
   double get secondaryTrackOpacity => _secondaryTrackOpacity;
+  bool get secondaryTrackIsStill => _secondaryTrackIsStill;
+  bool get secondaryTrackHasAlpha => _secondaryTrackHasAlpha;
+  int get secondaryTrackAlphaMode => _secondaryTrackAlphaMode;
   double get primaryTrackAudioGain => _primaryTrackAudioGain;
   double get secondaryTrackAudioGain => _secondaryTrackAudioGain;
   bool get secondaryTrackHasAudio => _secondaryTrackHasAudio;
@@ -967,6 +973,9 @@ class PlayerEngine extends ChangeNotifier {
     _secondaryTrackPath = null;
     _secondaryTrackStartFrame = null;
     _secondaryTrackOpacity = 1.0;
+    _secondaryTrackIsStill = false;
+    _secondaryTrackHasAlpha = false;
+    _secondaryTrackAlphaMode = 0;
     _primaryTrackAudioGain = 1.0;
     _secondaryTrackAudioGain = 1.0;
     _secondaryTrackHasAudio = false;
@@ -1095,8 +1104,9 @@ class PlayerEngine extends ChangeNotifier {
     return true;
   }
 
-  /// POC 10.3: place one additional timed video source at the current exact
-  /// playhead frame and promote the native viewer graph to a two-track tractor.
+  /// Place one additional video or still-image layer at the current exact
+  /// playhead frame and promote the native viewer graph to a two-layer tractor.
+  /// Still images are held natively from their start frame through Movie A.
   Future<bool> addTrack(String path) async {
     final media = _media;
 
@@ -1111,19 +1121,8 @@ class PlayerEngine extends ChangeNotifier {
       return false;
     }
 
-    if (_playing) {
-      if (!bridge.pause()) {
-        _error = bridge.lastError.isEmpty
-            ? 'MLT could not pause before Add to Movie.'
-            : bridge.lastError;
-        notifyListeners();
-        return false;
-      }
-
-      _playing = false;
-      _playingSelection = false;
-      _speed = 0.0;
-      _positionMs = bridge.positionMs;
+    if (!await _parkPlaybackForLayerChange()) {
+      return false;
     }
 
     var startFrame = bridge.positionFrame;
@@ -1134,6 +1133,31 @@ class PlayerEngine extends ChangeNotifier {
       startFrame = media.frames - 1;
     }
 
+    return _addTrackAtFrame(path, startFrame);
+  }
+
+  Future<bool> _addTrackAtFrame(String path, int startFrame) async {
+    final media = _media;
+
+    if (!initialized ||
+        media == null ||
+        media.isStill ||
+        !media.hasVideo ||
+        _opening ||
+        _addingTrack ||
+        _exporting ||
+        hasSecondaryTrack) {
+      return false;
+    }
+
+    var clampedStart = startFrame;
+    if (clampedStart < 0) {
+      clampedStart = 0;
+    }
+    if (media.frames > 0 && clampedStart >= media.frames) {
+      clampedStart = media.frames - 1;
+    }
+
     _addingTrack = true;
     _error = null;
     notifyListeners();
@@ -1142,7 +1166,7 @@ class PlayerEngine extends ChangeNotifier {
     try {
       added = await addTrackOnHelperIsolate(
         path,
-        startFrame,
+        clampedStart,
         bridge.engineAddress,
       );
     } catch (error) {
@@ -1156,7 +1180,7 @@ class PlayerEngine extends ChangeNotifier {
 
     if (!added) {
       _error = bridge.lastError.isEmpty
-          ? 'MLT could not add that movie as a second track.'
+          ? 'MLT could not add that media as a second layer.'
           : bridge.lastError;
       notifyListeners();
       return false;
@@ -1165,9 +1189,13 @@ class PlayerEngine extends ChangeNotifier {
     _secondaryTrackPath = path;
     final nativeStartFrame = bridge.secondaryStartFrame;
     _secondaryTrackStartFrame =
-        nativeStartFrame >= 0 ? nativeStartFrame : startFrame;
+        nativeStartFrame >= 0 ? nativeStartFrame : clampedStart;
     _secondaryTrackOpacity =
         bridge.secondaryOpacity.clamp(0.0, 1.0).toDouble();
+    _secondaryTrackIsStill = bridge.secondaryIsStill;
+    _secondaryTrackHasAlpha = bridge.secondaryHasAlpha;
+    _secondaryTrackAlphaMode =
+        bridge.secondaryAlphaMode.clamp(0, 2).toInt();
     _primaryTrackAudioGain =
         bridge.trackAudioGain(0).clamp(0.0, 1.0).toDouble();
     _secondaryTrackHasAudio = bridge.trackHasAudio(1);
@@ -1187,6 +1215,313 @@ class PlayerEngine extends ChangeNotifier {
 
     notifyListeners();
     return true;
+  }
+
+  Future<bool> _parkPlaybackForLayerChange() async {
+    if (!_playing) {
+      return true;
+    }
+
+    if (!bridge.pause()) {
+      _error = bridge.lastError.isEmpty
+          ? 'MLT could not pause before changing a layer source.'
+          : bridge.lastError;
+      notifyListeners();
+      return false;
+    }
+
+    _playing = false;
+    _playingSelection = false;
+    _speed = 0.0;
+    _positionMs = bridge.positionMs;
+    _eof = false;
+    notifyListeners();
+    return true;
+  }
+
+  /// POC 10.6.1: replace Layer 2's media while preserving the layer's
+  /// placement and inspector controls. The graph is rebuilt from the same
+  /// base movie so this remains a layer-source swap, not a timeline edit.
+  Future<bool> replaceSecondaryLayerSource(String path) async {
+    final media = _media;
+    final oldSecondaryPath = _secondaryTrackPath;
+
+    if (!initialized ||
+        media == null ||
+        media.isStill ||
+        !media.hasVideo ||
+        oldSecondaryPath == null ||
+        _opening ||
+        _addingTrack ||
+        _exporting) {
+      return false;
+    }
+
+    if (!await _parkPlaybackForLayerChange()) {
+      return false;
+    }
+
+    final editState = _captureEditState();
+    final undoState = List<_ClipEditState>.from(_undoStack);
+    final redoState = List<_ClipEditState>.from(_redoStack);
+    final currentFrame = bridge.positionFrame;
+    final startFrame = _secondaryTrackStartFrame ?? 0;
+    final opacity = _secondaryTrackOpacity;
+    final alphaMode = _secondaryTrackAlphaMode;
+    final primaryGain = _primaryTrackAudioGain;
+    final secondaryGain = _secondaryTrackAudioGain;
+    final basePath = media.path;
+
+    final rebuilt = await _rebuildLayerPair(
+      primaryPath: basePath,
+      secondaryPath: path,
+      secondaryStartFrame: startFrame,
+      playheadFrame: currentFrame,
+      primaryGain: primaryGain,
+      secondaryGain: secondaryGain,
+      secondaryOpacity: opacity,
+      // Alpha interpretation belongs to the asset, not the layer slot. A new
+      // source therefore starts in Auto even though placement/opacity/gain
+      // remain layer properties.
+      secondaryAlphaMode: 0,
+      editState: editState,
+      undoState: undoState,
+      redoState: redoState,
+    );
+
+    if (rebuilt) {
+      return true;
+    }
+
+    final replaceError = _error;
+
+    final rolledBack = await _rebuildLayerPair(
+      primaryPath: basePath,
+      secondaryPath: oldSecondaryPath,
+      secondaryStartFrame: startFrame,
+      playheadFrame: currentFrame,
+      primaryGain: primaryGain,
+      secondaryGain: secondaryGain,
+      secondaryOpacity: opacity,
+      secondaryAlphaMode: alphaMode,
+      editState: editState,
+      undoState: undoState,
+      redoState: redoState,
+    );
+
+    _error = rolledBack
+        ? (replaceError ?? 'The replacement layer source could not be opened.')
+        : 'The replacement failed and the previous layer could not be restored.';
+    notifyListeners();
+    return false;
+  }
+
+  /// Replace the base layer with another timed video source. The caller keeps
+  /// still images out of this chooser; a defensive runtime check below also
+  /// rolls back if MLT classifies the replacement as a still or audio-only.
+  Future<bool> replacePrimaryLayerSource(String path) async {
+    final oldMedia = _media;
+    if (!initialized ||
+        oldMedia == null ||
+        oldMedia.isStill ||
+        !oldMedia.hasVideo ||
+        _opening ||
+        _addingTrack ||
+        _exporting) {
+      return false;
+    }
+
+    if (!await _parkPlaybackForLayerChange()) {
+      return false;
+    }
+
+    final oldBasePath = oldMedia.path;
+    final oldEditState = _captureEditState();
+    final oldUndoState = List<_ClipEditState>.from(_undoStack);
+    final oldRedoState = List<_ClipEditState>.from(_redoStack);
+    final oldSecondaryPath = _secondaryTrackPath;
+    final oldStartFrame = _secondaryTrackStartFrame;
+    final oldStartSeconds = oldSecondaryPath != null &&
+            oldStartFrame != null &&
+            oldMedia.fps > 0
+        ? oldStartFrame / oldMedia.fps
+        : 0.0;
+    final oldPlayheadFrame = bridge.positionFrame;
+    final oldPlayheadSeconds = oldMedia.fps > 0
+        ? oldPlayheadFrame / oldMedia.fps
+        : 0.0;
+    final opacity = _secondaryTrackOpacity;
+    final alphaMode = _secondaryTrackAlphaMode;
+    final primaryGain = _primaryTrackAudioGain;
+    final secondaryGain = _secondaryTrackAudioGain;
+
+    final opened = await open(path);
+    final replacementMedia = _media;
+
+    if (!opened ||
+        replacementMedia == null ||
+        replacementMedia.isStill ||
+        !replacementMedia.hasVideo) {
+      final replaceError = !opened
+          ? _error
+          : 'Layer 1 must be a timed video source; still images are overlay-only.';
+
+      await _rebuildLayerPair(
+        primaryPath: oldBasePath,
+        secondaryPath: oldSecondaryPath,
+        secondaryStartFrame: oldStartFrame,
+        playheadFrame: oldPlayheadFrame,
+        primaryGain: primaryGain,
+        secondaryGain: secondaryGain,
+        secondaryOpacity: opacity,
+        secondaryAlphaMode: alphaMode,
+        editState: oldEditState,
+        undoState: oldUndoState,
+        redoState: oldRedoState,
+      );
+
+      _error = replaceError ??
+          'Layer 1 must be a timed video source; still images are overlay-only.';
+      notifyListeners();
+      return false;
+    }
+
+    final newFps = replacementMedia.fps;
+    final newPlayheadFrame = newFps > 0
+        ? (oldPlayheadSeconds * newFps).round()
+        : 0;
+    final newStartFrame = oldSecondaryPath != null && newFps > 0
+        ? (oldStartSeconds * newFps).round()
+        : null;
+
+    if (oldSecondaryPath != null) {
+      final rebuilt = await _rebuildLayerPair(
+        primaryPath: path,
+        secondaryPath: oldSecondaryPath,
+        secondaryStartFrame: newStartFrame,
+        playheadFrame: newPlayheadFrame,
+        primaryGain: primaryGain,
+        secondaryGain: secondaryGain,
+        secondaryOpacity: opacity,
+        secondaryAlphaMode: alphaMode,
+      );
+
+      if (!rebuilt) {
+        final replaceError = _error;
+        await _rebuildLayerPair(
+          primaryPath: oldBasePath,
+          secondaryPath: oldSecondaryPath,
+          secondaryStartFrame: oldStartFrame,
+          playheadFrame: oldPlayheadFrame,
+          primaryGain: primaryGain,
+          secondaryGain: secondaryGain,
+          secondaryOpacity: opacity,
+          secondaryAlphaMode: alphaMode,
+          editState: oldEditState,
+          undoState: oldUndoState,
+          redoState: oldRedoState,
+        );
+        _error = replaceError ??
+            'The new base video could not preserve the overlay layer.';
+        notifyListeners();
+        return false;
+      }
+    } else {
+      _seekSourceFrameClamped(newPlayheadFrame);
+      if (trackHasAudio(0)) {
+        setTrackAudioGain(0, primaryGain);
+      }
+    }
+
+    _error = null;
+    notifyListeners();
+    return true;
+  }
+
+  Future<bool> _rebuildLayerPair({
+    required String primaryPath,
+    required String? secondaryPath,
+    required int? secondaryStartFrame,
+    required int playheadFrame,
+    required double primaryGain,
+    required double secondaryGain,
+    required double secondaryOpacity,
+    required int secondaryAlphaMode,
+    _ClipEditState? editState,
+    List<_ClipEditState>? undoState,
+    List<_ClipEditState>? redoState,
+  }) async {
+    if (!await open(primaryPath)) {
+      return false;
+    }
+
+    final media = _media;
+    if (media == null || media.isStill || !media.hasVideo) {
+      _error = 'Layer 1 must be a timed video source.';
+      notifyListeners();
+      return false;
+    }
+
+    _seekSourceFrameClamped(playheadFrame);
+
+    if (secondaryPath != null) {
+      final added = await _addTrackAtFrame(
+        secondaryPath,
+        secondaryStartFrame ?? 0,
+      );
+      if (!added) {
+        return false;
+      }
+    }
+
+    if (trackHasAudio(0)) {
+      setTrackAudioGain(0, primaryGain);
+    }
+
+    if (secondaryPath != null && hasSecondaryTrack) {
+      setSecondaryTrackOpacity(secondaryOpacity);
+      setSecondaryTrackAlphaMode(secondaryAlphaMode);
+      if (trackHasAudio(1)) {
+        setTrackAudioGain(1, secondaryGain);
+      }
+    }
+
+    if (editState != null &&
+        editState.trimInFrame >= 0 &&
+        editState.trimOutFrame < media.frames) {
+      _trimInFrame = editState.trimInFrame;
+      _trimOutFrame = editState.trimOutFrame;
+      _inFrame = editState.inFrame;
+      _outFrame = editState.outFrame;
+      _undoStack
+        ..clear()
+        ..addAll(undoState ?? const <_ClipEditState>[]);
+      _redoStack
+        ..clear()
+        ..addAll(redoState ?? const <_ClipEditState>[]);
+      _constrainSourcePositionToTrim();
+    }
+
+    _seekSourceFrameClamped(playheadFrame);
+    _error = null;
+    notifyListeners();
+    return true;
+  }
+
+  void _seekSourceFrameClamped(int frame) {
+    final media = _media;
+    if (media == null || media.frames <= 0) {
+      return;
+    }
+
+    final target = frame.clamp(0, media.frames - 1);
+    if (bridge.seekFrame(target)) {
+      _positionMs = bridge.positionMs;
+      _playing = false;
+      _playingSelection = false;
+      _speed = 0.0;
+      _eof = false;
+    }
   }
 
   /// POC 10.4: update track 2's video opacity in place without rebuilding
@@ -1211,6 +1546,33 @@ class PlayerEngine extends ChangeNotifier {
 
     _secondaryTrackOpacity =
         bridge.secondaryOpacity.clamp(0.0, 1.0).toDouble();
+    _error = null;
+    notifyListeners();
+  }
+
+  /// POC 10.6: interpret layer 2 alpha without rebuilding the tractor.
+  ///
+  /// 0 = Auto/native decode, 1 = Straight/native decode,
+  /// 2 = Premultiplied (native bridge unpremultiplies RGB before composite).
+  void setSecondaryTrackAlphaMode(int mode) {
+    if (!hasSecondaryTrack) {
+      return;
+    }
+
+    final requested = mode.clamp(0, 2).toInt();
+
+    if (!bridge.setSecondaryAlphaMode(requested)) {
+      _error = bridge.lastError.isEmpty
+          ? 'MLT could not change layer 2 alpha interpretation.'
+          : bridge.lastError;
+      _secondaryTrackAlphaMode =
+          bridge.secondaryAlphaMode.clamp(0, 2).toInt();
+      notifyListeners();
+      return;
+    }
+
+    _secondaryTrackAlphaMode =
+        bridge.secondaryAlphaMode.clamp(0, 2).toInt();
     _error = null;
     notifyListeners();
   }
