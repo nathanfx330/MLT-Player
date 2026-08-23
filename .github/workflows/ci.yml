@@ -1,0 +1,75 @@
+# .github/workflows/ci.yml
+
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke-and-parity:
+    name: MLT 7.22 smoke + parity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: '3.47.0'
+          cache: true
+
+      - name: Install Linux and MLT dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ffmpeg \
+            libepoxy-dev \
+            libgtk-3-dev \
+            libmlt-data \
+            libmlt-dev \
+            pkg-config
+
+      - name: Verify MLT version
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected='7.22.0'
+          actual="$(pkg-config --modversion mlt-framework-7)"
+
+          echo "Expected MLT: $expected"
+          echo "Installed MLT: $actual"
+
+          if [[ "$actual" != "$expected" ]]; then
+            echo "::error::CI requires MLT $expected, but the runner provides $actual."
+            exit 1
+          fi
+
+      - name: Prepare Flutter Linux artifacts
+        run: |
+          flutter config --enable-linux-desktop
+          flutter precache --linux
+          flutter pub get
+
+      - name: Analyze Dart
+        run: flutter analyze
+
+      - name: Run native smoke and preview/export parity
+        shell: bash
+        run: bash tools/smoke.sh
