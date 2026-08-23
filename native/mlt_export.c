@@ -34,22 +34,33 @@ static char export_error[512] = "";
 typedef struct _ExportJob {
     char *export_source_path;
     char *export_secondary_path;
+    char *export_tertiary_path;
     char *export_output_path;
     int64_t export_in_frame;
     int64_t export_out_frame;
     int64_t export_secondary_start_frame;
+    int64_t export_tertiary_start_frame;
     int export_has_secondary;
+    int export_has_tertiary;
     int export_snapshot_valid;
     int export_primary_has_audio;
     int export_secondary_has_audio;
     int export_secondary_is_still;
     int export_secondary_alpha_mode;
+    int export_tertiary_has_audio;
+    int export_tertiary_is_still;
+    int export_tertiary_alpha_mode;
     double export_primary_audio_gain;
     double export_secondary_audio_gain;
     double export_secondary_opacity;
     double export_secondary_x;
     double export_secondary_y;
     double export_secondary_scale;
+    double export_tertiary_audio_gain;
+    double export_tertiary_opacity;
+    double export_tertiary_x;
+    double export_tertiary_y;
+    double export_tertiary_scale;
     MltExportKind export_kind;
 } ExportJob;
 
@@ -58,11 +69,78 @@ typedef struct _ExportGraph {
     mlt_producer export_primary;
     mlt_producer export_secondary;
     mlt_playlist export_secondary_playlist;
+    mlt_producer export_tertiary;
+    mlt_playlist export_tertiary_playlist;
     mlt_tractor export_tractor;
     mlt_transition export_composite;
     mlt_transition export_mix;
+    mlt_transition export_tertiary_composite;
+    mlt_transition export_tertiary_mix;
     mlt_producer export_top;
+    MltCompositionDerivedState derived;
 } ExportGraph;
+
+
+static void export_sync_indexed_derived_state(
+    MltCompositionDerivedState *state)
+{
+    if (state == NULL) {
+        return;
+    }
+
+    MltCompositionLayerDerivedState layer3 = {0};
+    if (state->layer_count >= 3) {
+        layer3 = state->layers[MLT_COMPOSITION_SECOND_OVERLAY];
+    }
+
+    memset(state->layers, 0, sizeof(state->layers));
+
+    if (state->layer_count < 1) {
+        return;
+    }
+
+    MltCompositionLayerDerivedState *base =
+        &state->layers[MLT_COMPOSITION_BASE_LAYER];
+
+    base->present = 1;
+    base->start_frame = 0;
+    base->timeline_length = state->composition_length;
+    base->base_width = state->profile_width;
+    base->base_height = state->profile_height;
+    base->x = 0.0;
+    base->y = 0.0;
+    base->width = state->profile_width;
+    base->height = state->profile_height;
+    base->opacity = 1.0;
+    base->has_audio = state->base_has_audio;
+    base->audio_gain = state->base_audio_gain;
+
+    if (state->layer_count < 2) {
+        return;
+    }
+
+    MltCompositionLayerDerivedState *layer2 =
+        &state->layers[MLT_COMPOSITION_FIRST_OVERLAY];
+
+    layer2->present = 1;
+    layer2->start_frame = state->layer2_start_frame;
+    layer2->timeline_length = state->layer2_timeline_length;
+    layer2->is_still = state->layer2_is_still;
+    layer2->alpha_mode = state->layer2_alpha_mode;
+    layer2->base_width = state->layer2_base_width;
+    layer2->base_height = state->layer2_base_height;
+    layer2->x = state->layer2_x;
+    layer2->y = state->layer2_y;
+    layer2->width = state->layer2_width;
+    layer2->height = state->layer2_height;
+    layer2->opacity = state->layer2_opacity;
+    layer2->has_audio = state->layer2_has_audio;
+    layer2->audio_gain = state->layer2_audio_gain;
+
+    if (state->layer_count >= 3) {
+        state->layers[MLT_COMPOSITION_SECOND_OVERLAY] = layer3;
+    }
+}
 
 typedef struct _ExportTelemetry {
     gint64 worker_started_us;
@@ -484,13 +562,23 @@ static int export_write_report(
     );
     fprintf(
         file,
-        "  \"composition\": {\"layers\": %d, \"layer2_start_frame\": %lld, \"layer2_is_still\": %s, \"layer2_alpha_mode\": %d, \"layer2_opacity\": %.6f, \"layer2_scale\": %.6f},\n",
-        job->export_has_secondary ? 2 : 1,
+        "  \"composition\": {\"layers\": %d, "
+        "\"layer2_start_frame\": %lld, \"layer2_is_still\": %s, "
+        "\"layer2_alpha_mode\": %d, \"layer2_opacity\": %.6f, "
+        "\"layer2_scale\": %.6f, \"layer3_start_frame\": %lld, "
+        "\"layer3_is_still\": %s, \"layer3_alpha_mode\": %d, "
+        "\"layer3_opacity\": %.6f, \"layer3_scale\": %.6f},\n",
+        job->export_has_tertiary ? 3 : (job->export_has_secondary ? 2 : 1),
         (long long)job->export_secondary_start_frame,
         job->export_secondary_is_still ? "true" : "false",
         job->export_secondary_alpha_mode,
         job->export_secondary_opacity,
-        job->export_secondary_scale
+        job->export_secondary_scale,
+        (long long)job->export_tertiary_start_frame,
+        job->export_tertiary_is_still ? "true" : "false",
+        job->export_tertiary_alpha_mode,
+        job->export_tertiary_opacity,
+        job->export_tertiary_scale
     );
     fprintf(
         file,
@@ -755,6 +843,7 @@ static void export_job_free(ExportJob *job)
 
     g_free(job->export_source_path);
     g_free(job->export_secondary_path);
+    g_free(job->export_tertiary_path);
     g_free(job->export_output_path);
     g_free(job);
 }
@@ -849,6 +938,26 @@ static void export_graph_close(ExportGraph *graph)
     if (graph->export_mix != NULL) {
         mlt_transition_close(graph->export_mix);
         graph->export_mix = NULL;
+    }
+
+    if (graph->export_tertiary_composite != NULL) {
+        mlt_transition_close(graph->export_tertiary_composite);
+        graph->export_tertiary_composite = NULL;
+    }
+
+    if (graph->export_tertiary_mix != NULL) {
+        mlt_transition_close(graph->export_tertiary_mix);
+        graph->export_tertiary_mix = NULL;
+    }
+
+    if (graph->export_tertiary_playlist != NULL) {
+        mlt_playlist_close(graph->export_tertiary_playlist);
+        graph->export_tertiary_playlist = NULL;
+    }
+
+    if (graph->export_tertiary != NULL) {
+        mlt_producer_close(graph->export_tertiary);
+        graph->export_tertiary = NULL;
     }
 
     if (graph->export_secondary_playlist != NULL) {
@@ -958,7 +1067,7 @@ static int export_attach_alpha_interpretation(
 
 /*
  * Build an export-only graph from a snapshot of the open movie. With one
- * layer this remains the original source-only path. With two layers it
+ * layer this remains the original source-only path. With overlay layers it
  * recreates the preview tractor using fresh producers so the export worker
  * never shares live MLT objects with preview playback.
  */
@@ -982,6 +1091,7 @@ static int export_prepare_source_graph(
     }
 
     memset(graph, 0, sizeof(*graph));
+    graph->derived.layer2_start_frame = -1;
 
     graph->export_profile = mlt_profile_init(NULL);
 
@@ -1055,6 +1165,20 @@ static int export_prepare_source_graph(
         goto fail;
     }
 
+    graph->derived.layer_count = job->export_has_tertiary ? 3 : (job->export_has_secondary ? 2 : 1);
+    graph->derived.profile_width = graph->export_profile->width;
+    graph->derived.profile_height = graph->export_profile->height;
+    graph->derived.profile_fps = mlt_profile_fps(graph->export_profile);
+    graph->derived.composition_length = source_length;
+    graph->derived.range_in_frame = in_frame;
+    graph->derived.range_out_frame = out_frame;
+    graph->derived.base_has_audio = job->export_primary_has_audio ? 1 : 0;
+    graph->derived.base_audio_gain = job->export_primary_audio_gain;
+    graph->derived.layer2_has_audio = job->export_secondary_has_audio ? 1 : 0;
+    graph->derived.layer2_audio_gain = job->export_secondary_audio_gain;
+    graph->derived.layer2_is_still = job->export_secondary_is_still ? 1 : 0;
+    graph->derived.layer2_alpha_mode = job->export_secondary_alpha_mode;
+
     if (job->export_snapshot_valid &&
         job->export_primary_has_audio &&
         !export_attach_audio_gain(
@@ -1085,6 +1209,8 @@ static int export_prepare_source_graph(
         }
 
         graph->export_top = graph->export_primary;
+        export_sync_indexed_derived_state(&graph->derived);
+        graph->derived.valid = 1;
         *in_frame_out = in_frame;
         *out_frame_out = out_frame;
         return 1;
@@ -1148,6 +1274,8 @@ static int export_prepare_source_graph(
 
     mlt_producer_probe(graph->export_secondary);
 
+    mlt_position normalized_secondary_start = 0;
+
     const MltSecondaryPlacementResult placement_result =
         mlt_composition_build_secondary_playlist(
             graph->export_profile,
@@ -1156,7 +1284,7 @@ static int export_prepare_source_graph(
             (mlt_position)source_length,
             job->export_secondary_is_still,
             &graph->export_secondary_playlist,
-            NULL
+            &normalized_secondary_start
         );
 
     if (placement_result != MLT_SECONDARY_PLACEMENT_OK) {
@@ -1208,6 +1336,13 @@ static int export_prepare_source_graph(
         goto fail;
     }
 
+    graph->derived.layer2_start_frame =
+        (int64_t)normalized_secondary_start;
+    graph->derived.layer2_timeline_length =
+        (int64_t)mlt_producer_get_length(
+            mlt_playlist_producer(graph->export_secondary_playlist)
+        );
+
     if (job->export_secondary_has_audio &&
         !export_attach_audio_gain(
             graph->export_profile,
@@ -1230,6 +1365,90 @@ static int export_prepare_source_graph(
             "Could not apply Layer 2 alpha interpretation to export."
         );
         goto fail;
+    }
+
+    if (job->export_has_tertiary) {
+        if (job->export_tertiary_path == NULL || job->export_tertiary_path[0] == '\0') {
+            export_set_failure(failure, failure_size, "Layer 3 has no exportable source path.");
+            goto fail;
+        }
+
+        if (job->export_tertiary_is_still) {
+            graph->export_tertiary = mlt_factory_producer(
+                graph->export_profile,
+                "pixbuf",
+                job->export_tertiary_path
+            );
+            if (graph->export_tertiary == NULL) {
+                graph->export_tertiary = mlt_factory_producer(
+                    graph->export_profile,
+                    "avformat",
+                    job->export_tertiary_path
+                );
+            }
+        } else {
+            graph->export_tertiary = mlt_factory_producer(
+                graph->export_profile,
+                NULL,
+                job->export_tertiary_path
+            );
+        }
+
+        if (graph->export_tertiary == NULL) {
+            export_set_failure(failure, failure_size, "MLT could not open Layer 3 for export.");
+            goto fail;
+        }
+
+        if (job->export_tertiary_is_still &&
+            !export_attach_still_converter(graph->export_profile, graph->export_tertiary)) {
+            export_set_failure(failure, failure_size, "Could not install Layer 3 still-image conversion for export.");
+            goto fail;
+        }
+
+        mlt_producer_probe(graph->export_tertiary);
+        mlt_position normalized_tertiary_start = 0;
+        const MltSecondaryPlacementResult tertiary_placement =
+            mlt_composition_build_secondary_playlist(
+                graph->export_profile,
+                graph->export_tertiary,
+                (mlt_position)job->export_tertiary_start_frame,
+                (mlt_position)source_length,
+                job->export_tertiary_is_still,
+                &graph->export_tertiary_playlist,
+                &normalized_tertiary_start
+            );
+        if (tertiary_placement != MLT_SECONDARY_PLACEMENT_OK) {
+            export_set_failure(failure, failure_size, "Could not configure Layer 3 placement for export.");
+            goto fail;
+        }
+
+        if (job->export_tertiary_has_audio &&
+            !export_attach_audio_gain(
+                graph->export_profile,
+                mlt_playlist_producer(graph->export_tertiary_playlist),
+                job->export_tertiary_audio_gain)) {
+            export_set_failure(failure, failure_size, "Could not apply Layer 3 audio level to export.");
+            goto fail;
+        }
+
+        if (!export_attach_alpha_interpretation(
+                graph->export_tertiary,
+                job->export_tertiary_alpha_mode)) {
+            export_set_failure(failure, failure_size, "Could not apply Layer 3 alpha interpretation to export.");
+            goto fail;
+        }
+
+        MltCompositionLayerDerivedState *layer3 =
+            &graph->derived.layers[MLT_COMPOSITION_SECOND_OVERLAY];
+        layer3->present = 1;
+        layer3->start_frame = (int64_t)normalized_tertiary_start;
+        layer3->timeline_length = (int64_t)mlt_producer_get_length(
+            mlt_playlist_producer(graph->export_tertiary_playlist)
+        );
+        layer3->is_still = job->export_tertiary_is_still ? 1 : 0;
+        layer3->alpha_mode = job->export_tertiary_alpha_mode;
+        layer3->has_audio = job->export_tertiary_has_audio ? 1 : 0;
+        layer3->audio_gain = job->export_tertiary_audio_gain;
     }
 
     graph->export_tractor = mlt_tractor_new();
@@ -1255,11 +1474,16 @@ static int export_prepare_source_graph(
         mlt_tractor_set_track(
             graph->export_tractor,
             mlt_playlist_producer(graph->export_secondary_playlist),
-            1) != 0) {
+            1) != 0 ||
+        (job->export_has_tertiary &&
+         mlt_tractor_set_track(
+             graph->export_tractor,
+             mlt_playlist_producer(graph->export_tertiary_playlist),
+             2) != 0)) {
         export_set_failure(
             failure,
             failure_size,
-            "Could not connect both layers to the export tractor."
+            "Could not connect the composition layers to the export tractor."
         );
         goto fail;
     }
@@ -1308,6 +1532,9 @@ static int export_prepare_source_graph(
         goto fail;
     }
 
+    graph->derived.layer2_base_width = base_width;
+    graph->derived.layer2_base_height = base_height;
+
     const double scale =
         isfinite(job->export_secondary_scale)
             ? CLAMP(job->export_secondary_scale, 0.10, 3.0)
@@ -1327,7 +1554,14 @@ static int export_prepare_source_graph(
             y,
             base_width * scale,
             base_height * scale,
-            opacity)) {
+            opacity) ||
+        !mlt_composition_get_geometry(
+            graph->export_composite,
+            &graph->derived.layer2_x,
+            &graph->derived.layer2_y,
+            &graph->derived.layer2_width,
+            &graph->derived.layer2_height,
+            &graph->derived.layer2_opacity)) {
         export_set_failure(
             failure,
             failure_size,
@@ -1388,6 +1622,100 @@ static int export_prepare_source_graph(
         }
     }
 
+    if (job->export_has_tertiary) {
+        double tertiary_base_width = 0.0;
+        double tertiary_base_height = 0.0;
+
+        if (!mlt_composition_secondary_base_size(
+                graph->export_profile,
+                graph->export_tertiary,
+                job->export_tertiary_is_still,
+                &tertiary_base_width,
+                &tertiary_base_height)) {
+            export_set_failure(failure, failure_size, "Layer 3 has invalid export geometry.");
+            goto fail;
+        }
+
+        graph->export_tertiary_composite =
+            mlt_factory_transition(graph->export_profile, "composite", NULL);
+        if (graph->export_tertiary_composite == NULL) {
+            export_set_failure(failure, failure_size, "MLT's Layer 3 composite transition is unavailable for export.");
+            goto fail;
+        }
+
+        const double tertiary_scale =
+            isfinite(job->export_tertiary_scale)
+                ? CLAMP(job->export_tertiary_scale, 0.10, 3.0)
+                : 1.0;
+        const double tertiary_x =
+            isfinite(job->export_tertiary_x) ? job->export_tertiary_x : 0.0;
+        const double tertiary_y =
+            isfinite(job->export_tertiary_y) ? job->export_tertiary_y : 0.0;
+        const double tertiary_opacity =
+            isfinite(job->export_tertiary_opacity)
+                ? CLAMP(job->export_tertiary_opacity, 0.0, 1.0)
+                : 1.0;
+
+        MltCompositionLayerDerivedState *layer3 =
+            &graph->derived.layers[MLT_COMPOSITION_SECOND_OVERLAY];
+        layer3->base_width = tertiary_base_width;
+        layer3->base_height = tertiary_base_height;
+
+        if (!mlt_composition_configure_transition(
+                graph->export_tertiary_composite,
+                tertiary_x,
+                tertiary_y,
+                tertiary_base_width * tertiary_scale,
+                tertiary_base_height * tertiary_scale,
+                tertiary_opacity) ||
+            !mlt_composition_get_geometry(
+                graph->export_tertiary_composite,
+                &layer3->x,
+                &layer3->y,
+                &layer3->width,
+                &layer3->height,
+                &layer3->opacity)) {
+            export_set_failure(failure, failure_size, "Could not configure the Layer 3 export video composite.");
+            goto fail;
+        }
+
+        if (mlt_field_plant_transition(
+                field,
+                graph->export_tertiary_composite,
+                0,
+                2) != 0) {
+            export_set_failure(failure, failure_size, "Could not plant the Layer 3 export video composite.");
+            goto fail;
+        }
+
+        if (job->export_tertiary_has_audio) {
+            graph->export_tertiary_mix =
+                mlt_factory_transition(graph->export_profile, "mix", NULL);
+            if (graph->export_tertiary_mix == NULL) {
+                export_set_failure(
+                    failure,
+                    failure_size,
+                    "MLT's Layer 3 audio mix transition is unavailable for export."
+                );
+                goto fail;
+            }
+            mlt_properties mix_properties =
+                MLT_TRANSITION_PROPERTIES(graph->export_tertiary_mix);
+            mlt_properties_set_int(mix_properties, "always_active", 1);
+            mlt_properties_set_double(mix_properties, "start", 1.0);
+            mlt_properties_set_double(mix_properties, "end", 1.0);
+            mlt_properties_set_int(mix_properties, "sum", 1);
+            if (mlt_field_plant_transition(
+                    field,
+                    graph->export_tertiary_mix,
+                    0,
+                    2) != 0) {
+                export_set_failure(failure, failure_size, "Could not plant the Layer 3 export audio mix.");
+                goto fail;
+            }
+        }
+    }
+
     mlt_tractor_refresh(graph->export_tractor);
     graph->export_top = mlt_tractor_producer(graph->export_tractor);
 
@@ -1420,6 +1748,8 @@ static int export_prepare_source_graph(
         goto fail;
     }
 
+    export_sync_indexed_derived_state(&graph->derived);
+    graph->derived.valid = 1;
     *in_frame_out = in_frame;
     *out_frame_out = out_frame;
     return 1;
@@ -1808,7 +2138,7 @@ static int export_configure_consumer(
     const MltExportKind kind = job->export_kind;
     const int composition_has_audio =
         job->export_snapshot_valid
-            ? (job->export_primary_has_audio || job->export_secondary_has_audio)
+            ? (job->export_primary_has_audio || job->export_secondary_has_audio || job->export_tertiary_has_audio)
             : export_source_has_audio(source_producer);
 
     switch (kind) {
@@ -2101,10 +2431,12 @@ static gpointer export_worker(gpointer data)
 
     mlt_producer metadata_source = graph.export_primary;
     if (job->export_snapshot_valid &&
-        !job->export_primary_has_audio &&
-        job->export_secondary_has_audio &&
-        graph.export_secondary != NULL) {
-        metadata_source = graph.export_secondary;
+        !job->export_primary_has_audio) {
+        if (job->export_secondary_has_audio && graph.export_secondary != NULL) {
+            metadata_source = graph.export_secondary;
+        } else if (job->export_tertiary_has_audio && graph.export_tertiary != NULL) {
+            metadata_source = graph.export_tertiary;
+        }
     }
 
     if (!export_configure_consumer(
@@ -2382,6 +2714,69 @@ static void cancel_export_and_join(void)
     }
 }
 
+static void export_job_apply_composition_snapshot(
+    ExportJob *job,
+    const MltExportCompositionSnapshot *snapshot)
+{
+    if (job == NULL ||
+        snapshot == NULL ||
+        snapshot->layer_count < 1) {
+        return;
+    }
+
+    const MltExportLayerSnapshot *base =
+        &snapshot->layers[MLT_COMPOSITION_BASE_LAYER];
+
+    job->export_snapshot_valid = 1;
+    job->export_primary_has_audio = base->has_audio ? 1 : 0;
+    job->export_primary_audio_gain =
+        CLAMP(base->audio_gain, 0.0, 1.0);
+    job->export_secondary_audio_gain = 1.0;
+    job->export_secondary_opacity = 1.0;
+    job->export_secondary_scale = 1.0;
+    job->export_tertiary_audio_gain = 1.0;
+    job->export_tertiary_opacity = 1.0;
+    job->export_tertiary_scale = 1.0;
+
+    if (snapshot->layer_count < 2) {
+        return;
+    }
+
+    const MltExportLayerSnapshot *layer2 =
+        &snapshot->layers[MLT_COMPOSITION_FIRST_OVERLAY];
+
+    job->export_has_secondary = 1;
+    job->export_secondary_start_frame = layer2->start_frame;
+    job->export_secondary_has_audio = layer2->has_audio ? 1 : 0;
+    job->export_secondary_is_still = layer2->is_still ? 1 : 0;
+    job->export_secondary_alpha_mode = layer2->alpha_mode;
+    job->export_secondary_audio_gain =
+        CLAMP(layer2->audio_gain, 0.0, 1.0);
+    job->export_secondary_opacity =
+        CLAMP(layer2->opacity, 0.0, 1.0);
+    job->export_secondary_x = layer2->x;
+    job->export_secondary_y = layer2->y;
+    job->export_secondary_scale =
+        CLAMP(layer2->scale, 0.10, 3.0);
+
+    if (snapshot->layer_count < 3) {
+        return;
+    }
+
+    const MltExportLayerSnapshot *layer3 =
+        &snapshot->layers[MLT_COMPOSITION_SECOND_OVERLAY];
+    job->export_has_tertiary = 1;
+    job->export_tertiary_start_frame = layer3->start_frame;
+    job->export_tertiary_has_audio = layer3->has_audio ? 1 : 0;
+    job->export_tertiary_is_still = layer3->is_still ? 1 : 0;
+    job->export_tertiary_alpha_mode = layer3->alpha_mode;
+    job->export_tertiary_audio_gain = CLAMP(layer3->audio_gain, 0.0, 1.0);
+    job->export_tertiary_opacity = CLAMP(layer3->opacity, 0.0, 1.0);
+    job->export_tertiary_x = layer3->x;
+    job->export_tertiary_y = layer3->y;
+    job->export_tertiary_scale = CLAMP(layer3->scale, 0.10, 3.0);
+}
+
 static int launch_export_job(ExportJob *job)
 {
     ensure_export_lock();
@@ -2461,6 +2856,9 @@ static int start_export_job(
     job->export_secondary_audio_gain = 1.0;
     job->export_secondary_opacity = 1.0;
     job->export_secondary_scale = 1.0;
+    job->export_tertiary_audio_gain = 1.0;
+    job->export_tertiary_opacity = 1.0;
+    job->export_tertiary_scale = 1.0;
     job->export_kind = kind;
 
     return launch_export_job(job);
@@ -2510,8 +2908,11 @@ int mlt_export_start_composition(
     MltExportKind kind)
 {
     if (snapshot == NULL ||
-        snapshot->base_path == NULL ||
-        snapshot->base_path[0] == '\0' ||
+        snapshot->layer_count < 1 ||
+        snapshot->layer_count > MLT_COMPOSITION_MAX_LAYERS ||
+        !snapshot->layers[MLT_COMPOSITION_BASE_LAYER].present ||
+        snapshot->layers[MLT_COMPOSITION_BASE_LAYER].path == NULL ||
+        snapshot->layers[MLT_COMPOSITION_BASE_LAYER].path[0] == '\0' ||
         output_path == NULL ||
         output_path[0] == '\0' ||
         out_frame < in_frame ||
@@ -2521,11 +2922,14 @@ int mlt_export_start_composition(
         return 0;
     }
 
-    if (snapshot->has_layer2 &&
-        (snapshot->layer2_path == NULL ||
-         snapshot->layer2_path[0] == '\0')) {
-        mlt_export_set_error("Layer 2 has no exportable source path.");
-        return 0;
+    for (int index = 1; index < snapshot->layer_count; index++) {
+        const MltExportLayerSnapshot *layer = &snapshot->layers[index];
+        if (!layer->present ||
+            layer->path == NULL ||
+            layer->path[0] == '\0') {
+            mlt_export_set_error("An overlay layer has no exportable source path.");
+            return 0;
+        }
     }
 
     ExportJob *job = g_new0(ExportJob, 1);
@@ -2535,45 +2939,149 @@ int mlt_export_start_composition(
         return 0;
     }
 
-    job->export_source_path = g_strdup(snapshot->base_path);
+    const MltExportLayerSnapshot *base =
+        &snapshot->layers[MLT_COMPOSITION_BASE_LAYER];
+
+    job->export_source_path = g_strdup(base->path);
     job->export_output_path = g_strdup(output_path);
     job->export_in_frame = in_frame;
     job->export_out_frame = out_frame;
     job->export_kind = kind;
-    job->export_snapshot_valid = 1;
-    job->export_primary_has_audio = snapshot->base_has_audio ? 1 : 0;
-    job->export_primary_audio_gain =
-        CLAMP(snapshot->base_audio_gain, 0.0, 1.0);
-    job->export_secondary_audio_gain = 1.0;
-    job->export_secondary_opacity = 1.0;
-    job->export_secondary_scale = 1.0;
+    export_job_apply_composition_snapshot(job, snapshot);
 
-    if (snapshot->has_layer2) {
-        job->export_secondary_path = g_strdup(snapshot->layer2_path);
-        job->export_has_secondary = 1;
-        job->export_secondary_start_frame = snapshot->layer2_start_frame;
-        job->export_secondary_has_audio = snapshot->layer2_has_audio ? 1 : 0;
-        job->export_secondary_is_still = snapshot->layer2_is_still ? 1 : 0;
-        job->export_secondary_alpha_mode = snapshot->layer2_alpha_mode;
-        job->export_secondary_audio_gain =
-            CLAMP(snapshot->layer2_audio_gain, 0.0, 1.0);
-        job->export_secondary_opacity =
-            CLAMP(snapshot->layer2_opacity, 0.0, 1.0);
-        job->export_secondary_x = snapshot->layer2_x;
-        job->export_secondary_y = snapshot->layer2_y;
-        job->export_secondary_scale =
-            CLAMP(snapshot->layer2_scale, 0.10, 3.0);
+    if (snapshot->layer_count >= 2) {
+        job->export_secondary_path =
+            g_strdup(snapshot->layers[MLT_COMPOSITION_FIRST_OVERLAY].path);
+    }
+    if (snapshot->layer_count >= 3) {
+        job->export_tertiary_path =
+            g_strdup(snapshot->layers[MLT_COMPOSITION_SECOND_OVERLAY].path);
     }
 
     if (job->export_source_path == NULL ||
         job->export_output_path == NULL ||
-        (job->export_has_secondary && job->export_secondary_path == NULL)) {
+        (job->export_has_secondary && job->export_secondary_path == NULL) ||
+        (job->export_has_tertiary && job->export_tertiary_path == NULL)) {
         export_job_free(job);
         mlt_export_set_error("Could not copy the composition export snapshot.");
         return 0;
     }
 
     return launch_export_job(job);
+}
+
+int mlt_export_derive_composition(
+    const MltExportCompositionSnapshot *snapshot,
+    int64_t in_frame,
+    int64_t out_frame,
+    MltCompositionDerivedState *state_out,
+    char *error_buffer,
+    int error_capacity)
+{
+    if (state_out != NULL) {
+        memset(state_out, 0, sizeof(*state_out));
+        state_out->layer2_start_frame = -1;
+    }
+
+    if (error_buffer != NULL && error_capacity > 0) {
+        error_buffer[0] = '\0';
+    }
+
+    if (snapshot == NULL ||
+        snapshot->layer_count < 1 ||
+        snapshot->layer_count > MLT_COMPOSITION_MAX_LAYERS ||
+        !snapshot->layers[MLT_COMPOSITION_BASE_LAYER].present ||
+        snapshot->layers[MLT_COMPOSITION_BASE_LAYER].path == NULL ||
+        snapshot->layers[MLT_COMPOSITION_BASE_LAYER].path[0] == '\0' ||
+        state_out == NULL ||
+        out_frame < in_frame ||
+        (snapshot->layer_count >= 2 &&
+         (!snapshot->layers[MLT_COMPOSITION_FIRST_OVERLAY].present ||
+          snapshot->layers[MLT_COMPOSITION_FIRST_OVERLAY].path == NULL ||
+          snapshot->layers[MLT_COMPOSITION_FIRST_OVERLAY].path[0] == '\0')) ||
+        (snapshot->layer_count >= 3 &&
+         (!snapshot->layers[MLT_COMPOSITION_SECOND_OVERLAY].present ||
+          snapshot->layers[MLT_COMPOSITION_SECOND_OVERLAY].path == NULL ||
+          snapshot->layers[MLT_COMPOSITION_SECOND_OVERLAY].path[0] == '\0'))) {
+        if (error_buffer != NULL && error_capacity > 0) {
+            snprintf(
+                error_buffer,
+                (size_t)error_capacity,
+                "%s",
+                "Invalid composition parity request."
+            );
+        }
+        return 0;
+    }
+
+    ensure_export_lock();
+    g_mutex_lock(&export_mutex);
+    const int busy = export_running || export_thread != NULL;
+    g_mutex_unlock(&export_mutex);
+
+    if (busy) {
+        if (error_buffer != NULL && error_capacity > 0) {
+            snprintf(
+                error_buffer,
+                (size_t)error_capacity,
+                "%s",
+                "Composition parity cannot run while an export is active."
+            );
+        }
+        return 0;
+    }
+
+    ExportJob job = {0};
+    job.export_source_path =
+        (char *)snapshot->layers[MLT_COMPOSITION_BASE_LAYER].path;
+    job.export_secondary_path =
+        snapshot->layer_count >= 2
+            ? (char *)snapshot->layers[MLT_COMPOSITION_FIRST_OVERLAY].path
+            : NULL;
+    job.export_tertiary_path =
+        snapshot->layer_count >= 3
+            ? (char *)snapshot->layers[MLT_COMPOSITION_SECOND_OVERLAY].path
+            : NULL;
+    job.export_in_frame = in_frame;
+    job.export_out_frame = out_frame;
+    job.export_kind = MLT_EXPORT_KIND_MP4;
+    export_job_apply_composition_snapshot(&job, snapshot);
+
+    ExportGraph graph = {0};
+    int64_t normalized_in = 0;
+    int64_t normalized_out = -1;
+    char failure[512] = "";
+
+    const int prepared =
+        export_prepare_source_graph(
+            &job,
+            &graph,
+            &normalized_in,
+            &normalized_out,
+            failure,
+            sizeof(failure)
+        );
+
+    if (!prepared) {
+        if (error_buffer != NULL && error_capacity > 0) {
+            snprintf(
+                error_buffer,
+                (size_t)error_capacity,
+                "%s",
+                failure[0] != '\0'
+                    ? failure
+                    : "Could not derive the export composition state."
+            );
+        }
+        return 0;
+    }
+
+    graph.derived.range_in_frame = normalized_in;
+    graph.derived.range_out_frame = normalized_out;
+    *state_out = graph.derived;
+
+    export_graph_close(&graph);
+    return 1;
 }
 
 void mlt_export_cancel(void)

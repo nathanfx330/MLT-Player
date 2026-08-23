@@ -308,6 +308,67 @@ int mlt_composition_configure_transition(
     );
 }
 
+int mlt_composition_get_geometry(
+    mlt_transition transition,
+    double *x_out,
+    double *y_out,
+    double *width_out,
+    double *height_out,
+    double *opacity_out)
+{
+    if (transition == NULL ||
+        x_out == NULL ||
+        y_out == NULL ||
+        width_out == NULL ||
+        height_out == NULL ||
+        opacity_out == NULL) {
+        return 0;
+    }
+
+    const char *geometry =
+        mlt_properties_get(
+            MLT_TRANSITION_PROPERTIES(transition),
+            "geometry"
+        );
+
+    if (geometry == NULL || geometry[0] == '\0') {
+        return 0;
+    }
+
+    double x = 0.0;
+    double y = 0.0;
+    double width = 0.0;
+    double height = 0.0;
+    double opacity = 0.0;
+
+    if (sscanf(
+            geometry,
+            "%lf/%lf:%lfx%lf:%lf",
+            &x,
+            &y,
+            &width,
+            &height,
+            &opacity) != 5 ||
+        !isfinite(x) ||
+        !isfinite(y) ||
+        !isfinite(width) ||
+        !isfinite(height) ||
+        !isfinite(opacity) ||
+        width <= 0.0 ||
+        height <= 0.0 ||
+        opacity < 0.0 ||
+        opacity > 1.0) {
+        return 0;
+    }
+
+    *x_out = x;
+    *y_out = y;
+    *width_out = width;
+    *height_out = height;
+    *opacity_out = opacity;
+    return 1;
+}
+
 static int alpha_unpremultiply_get_image(
     mlt_frame frame,
     uint8_t **image,

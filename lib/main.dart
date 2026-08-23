@@ -13,7 +13,7 @@ import 'services/host_channel.dart';
 import 'services/mlt_bridge.dart';
 import 'services/player_engine.dart';
 import 'ui/widgets/media_inspector.dart';
-import 'ui/widgets/tracks_inspector.dart';
+import 'ui/widgets/layers_inspector.dart';
 
 // ---------------------------------------------------------------------------
 // Application
@@ -297,20 +297,18 @@ class _PlayerPageState extends State<PlayerPage>
     await _openPath(file.path);
   }
 
-  Future<void> _pickSecondTrack() async {
+  Future<void> _pickNextTrack() async {
     final media = _engine.media;
     if (media == null ||
         media.isStill ||
         !media.hasVideo ||
         _engine.addingTrack ||
         _engine.exporting ||
-        _engine.hasSecondaryTrack) {
+        _engine.trackCount >= 3) {
       return;
     }
 
-    // POC 10.3 treats the playhead as the insertion point. Park it before
-    // opening the file chooser so the chosen frame cannot drift while the
-    // user is browsing for track 2.
+    // Additions use the exact parked playhead as their insertion frame.
     if (_engine.playing) {
       _engine.togglePlayback();
       if (_engine.playing) {
@@ -329,8 +327,9 @@ class _PlayerPageState extends State<PlayerPage>
       ],
     );
 
+    final nextLayerNumber = _engine.trackCount + 1;
     final file = await openFile(
-      confirmButtonText: 'Add Layer',
+      confirmButtonText: 'Add Layer $nextLayerNumber',
       acceptedTypeGroups: <XTypeGroup>[typeGroup],
     );
 
@@ -343,6 +342,28 @@ class _PlayerPageState extends State<PlayerPage>
     if (mounted) {
       if (added) {
         setState(() => _tracksOpen = true);
+      }
+      _showOverlay();
+    }
+  }
+
+  Future<void> _removeTopLayer() async {
+    if (!_engine.hasSecondaryTrack ||
+        _engine.opening ||
+        _engine.addingTrack ||
+        _engine.exporting) {
+      return;
+    }
+
+    final removed = _engine.hasTertiaryTrack
+        ? await _engine.removeTertiaryLayer()
+        : await _engine.removeSecondaryLayer();
+
+    if (mounted) {
+      if (removed) {
+        setState(() {
+          _tracksOpen = _engine.hasSecondaryTrack;
+        });
       }
       _showOverlay();
     }
@@ -430,8 +451,51 @@ class _PlayerPageState extends State<PlayerPage>
     }
   }
 
+  Future<void> _replaceTertiaryLayerSource() async {
+    final media = _engine.media;
+    if (media == null ||
+        media.isStill ||
+        !media.hasVideo ||
+        !_engine.hasTertiaryTrack ||
+        _engine.opening ||
+        _engine.addingTrack ||
+        _engine.exporting) {
+      return;
+    }
+
+    _showOverlay();
+
+    const typeGroup = XTypeGroup(
+      label: 'Layer 3 media',
+      extensions: <String>[
+        'mp4', 'mov', 'mkv', 'avi', 'webm', 'm4v', 'mxf', 'mpg', 'mpeg',
+        'wmv', 'ts', 'm2ts', 'dv', 'flv', 'ogv',
+        'png', 'jpg', 'jpeg', 'webp', 'bmp', 'tif', 'tiff', 'exr',
+      ],
+    );
+
+    final file = await openFile(
+      confirmButtonText: 'Replace Layer 3',
+      acceptedTypeGroups: <XTypeGroup>[typeGroup],
+    );
+
+    if (file == null) {
+      return;
+    }
+
+    await _engine.replaceTertiaryLayerSource(file.path);
+
+    if (mounted) {
+      setState(() {
+        _tracksOpen = _engine.hasSecondaryTrack;
+      });
+      _showOverlay();
+    }
+  }
+
   Future<void> _swapLayerOrder() async {
     if (!_engine.hasSecondaryTrack ||
+        _engine.trackCount != 2 ||
         _engine.secondaryTrackIsStill ||
         _engine.opening ||
         _engine.addingTrack ||
@@ -1210,10 +1274,12 @@ class _PlayerPageState extends State<PlayerPage>
       return const SizedBox.shrink();
     }
 
-    final secondaryPath = _engine.secondaryTrackPath ?? 'Movie B';
+    final secondaryPath = _engine.secondaryTrackPath ?? 'Layer 2';
     final secondaryName = _basename(secondaryPath);
-    final secondaryStartFrame =
-        _engine.secondaryTrackStartFrame ?? 0;
+    final secondaryStartFrame = _engine.secondaryTrackStartFrame ?? 0;
+    final tertiaryPath = _engine.tertiaryTrackPath;
+    final tertiaryName = tertiaryPath == null ? null : _basename(tertiaryPath);
+    final tertiaryStartFrame = _engine.tertiaryTrackStartFrame ?? 0;
 
     return Positioned(
       top: 58,
@@ -1224,42 +1290,70 @@ class _PlayerPageState extends State<PlayerPage>
         onDoubleTap: () {},
         onSecondaryTap: () {},
         child: ExcludeFocus(
-          child: TracksInspector(
+          child: LayersInspector(
+            layerCount: _engine.trackCount,
             primaryName: media.name,
             secondaryName: secondaryName,
             secondaryStart:
                 _formatClipTimecode(media, secondaryStartFrame),
+            tertiaryName: tertiaryName,
+            tertiaryStart: tertiaryName == null
+                ? null
+                : _formatClipTimecode(media, tertiaryStartFrame),
             primaryHasAudio: media.hasAudio,
             secondaryHasAudio: _engine.secondaryTrackHasAudio,
+            tertiaryHasAudio: _engine.tertiaryTrackHasAudio,
             secondaryIsStill: _engine.secondaryTrackIsStill,
+            tertiaryIsStill: _engine.tertiaryTrackIsStill,
             secondaryHasAlpha: _engine.secondaryTrackHasAlpha,
+            tertiaryHasAlpha: _engine.tertiaryTrackHasAlpha,
             secondaryAlphaMode: _engine.secondaryTrackAlphaMode,
+            tertiaryAlphaMode: _engine.tertiaryTrackAlphaMode,
             primaryAudioGain: _engine.primaryTrackAudioGain,
             secondaryAudioGain: _engine.secondaryTrackAudioGain,
+            tertiaryAudioGain: _engine.tertiaryTrackAudioGain,
             secondaryOpacity: _engine.secondaryTrackOpacity,
+            tertiaryOpacity: _engine.tertiaryTrackOpacity,
             secondaryVisible: _engine.secondaryTrackVisible,
+            tertiaryVisible: _engine.tertiaryTrackVisible,
             secondaryX: _engine.secondaryTrackX,
             secondaryY: _engine.secondaryTrackY,
             secondaryScale: _engine.secondaryTrackScale,
+            tertiaryX: _engine.tertiaryTrackX,
+            tertiaryY: _engine.tertiaryTrackY,
+            tertiaryScale: _engine.tertiaryTrackScale,
             baseWidth: media.width,
             baseHeight: media.height,
-            canSwapLayers: !_engine.secondaryTrackIsStill,
+            canAddLayer: _engine.trackCount < 3,
+            canSwapLayers:
+                _engine.trackCount == 2 && !_engine.secondaryTrackIsStill,
             onPrimaryAudioChanged: (value) =>
                 _engine.setTrackAudioGain(0, value),
             onSecondaryAudioChanged: (value) =>
                 _engine.setTrackAudioGain(1, value),
-            onSecondaryOpacityChanged:
-                _engine.setSecondaryTrackOpacity,
+            onTertiaryAudioChanged: (value) =>
+                _engine.setTrackAudioGain(2, value),
+            onSecondaryOpacityChanged: _engine.setSecondaryTrackOpacity,
+            onTertiaryOpacityChanged: _engine.setTertiaryTrackOpacity,
             onSecondaryAlphaModeChanged:
                 _engine.setSecondaryTrackAlphaMode,
+            onTertiaryAlphaModeChanged:
+                _engine.setTertiaryTrackAlphaMode,
             onSecondaryXChanged: _engine.setSecondaryTrackX,
             onSecondaryYChanged: _engine.setSecondaryTrackY,
             onSecondaryScaleChanged: _engine.setSecondaryTrackScale,
             onSecondaryAnchorChanged: _engine.setSecondaryTrackAnchor,
+            onTertiaryXChanged: _engine.setTertiaryTrackX,
+            onTertiaryYChanged: _engine.setTertiaryTrackY,
+            onTertiaryScaleChanged: _engine.setTertiaryTrackScale,
+            onTertiaryAnchorChanged: _engine.setTertiaryTrackAnchor,
             onReplacePrimarySource: _replacePrimaryLayerSource,
             onReplaceSecondarySource: _replaceSecondaryLayerSource,
-            onToggleSecondaryVisible:
-                _engine.toggleSecondaryTrackVisible,
+            onReplaceTertiarySource: _replaceTertiaryLayerSource,
+            onToggleSecondaryVisible: _engine.toggleSecondaryTrackVisible,
+            onToggleTertiaryVisible: _engine.toggleTertiaryTrackVisible,
+            onAddLayer: _pickNextTrack,
+            onRemoveTopLayer: _removeTopLayer,
             onSwapLayers: _swapLayerOrder,
             onClose: _toggleTracksInspector,
           ),
@@ -1728,9 +1822,23 @@ class _PlayerPageState extends State<PlayerPage>
             onPressed: _engine.hasSecondaryTrack
                 ? _toggleTracksInspector
                 : (!_engine.addingTrack && !_engine.exporting
-                    ? _pickSecondTrack
+                    ? _pickNextTrack
                     : null),
           ),
+          if (_engine.hasSecondaryTrack) ...[
+            const SizedBox(width: 2),
+            _OverlayButton(
+              icon: Icons.remove_circle_outline,
+              tooltip: _engine.hasTertiaryTrack
+                  ? 'Remove Layer 3 — Undo restores it'
+                  : 'Remove Layer 2 — Undo restores it',
+              onPressed: !_engine.opening &&
+                      !_engine.addingTrack &&
+                      !_engine.exporting
+                  ? _removeTopLayer
+                  : null,
+            ),
+          ],
           const SizedBox(width: 2),
           _ExportSplitButton(
             mode: _exportMode,

@@ -3,6 +3,8 @@
 #include "mlt_bridge.h"
 #include "mlt_composition.h"
 #include "mlt_export.h"
+#include "mlt_parity.h"
+#include "mlt_layer_api.h"
 
 #include <flutter_linux/flutter_linux.h>
 #include <epoxy/gl.h>
@@ -77,23 +79,32 @@ struct _MltBridgeEngine {
     mlt_producer e_primary_producer;
     mlt_producer e_secondary_producer;
     mlt_playlist e_secondary_playlist;
+    mlt_producer e_tertiary_producer;
+    mlt_playlist e_tertiary_playlist;
     mlt_tractor e_tractor;
     mlt_transition e_video_composite;
     mlt_transition e_audio_mix;
+    mlt_transition e_tertiary_video_composite;
+    mlt_transition e_tertiary_audio_mix;
 
     /*
      * Track-local audio gain is applied before the tractor's A+B mix.
      * The filter pointers are borrowed references owned by their producers.
      */
-    mlt_filter e_track_audio_filters[2];
-    double e_track_audio_gain[2];
-    int e_track_has_audio[2];
+    mlt_filter e_track_audio_filters[MLT_COMPOSITION_MAX_LAYERS];
+    double e_track_audio_gain[MLT_COMPOSITION_MAX_LAYERS];
+    int e_track_has_audio[MLT_COMPOSITION_MAX_LAYERS];
 
     /* POC 10.6: layer-2 alpha interpretation and still-overlay state. */
     mlt_filter e_secondary_alpha_filter;
     int e_secondary_has_alpha;
     int e_secondary_alpha_mode;
     int e_secondary_is_still;
+
+    mlt_filter e_tertiary_alpha_filter;
+    int e_tertiary_has_alpha;
+    int e_tertiary_alpha_mode;
+    int e_tertiary_is_still;
 
     int e_track_count;
     int64_t e_secondary_start_frame;
@@ -106,6 +117,14 @@ struct _MltBridgeEngine {
     double e_secondary_base_width;
     double e_secondary_base_height;
 
+    int64_t e_tertiary_start_frame;
+    double e_tertiary_opacity;
+    double e_tertiary_x;
+    double e_tertiary_y;
+    double e_tertiary_scale;
+    double e_tertiary_base_width;
+    double e_tertiary_base_height;
+
     int e_has_video;
     int e_has_audio;
     int e_is_still;
@@ -113,6 +132,14 @@ struct _MltBridgeEngine {
     double e_requested_volume;
     int e_requested_play_all_frames;
     gint e_preview_enabled;
+
+    /*
+     * UI composition restores can rebuild a tractor in several native steps.
+     * While this depth is non-zero, keep the last uploaded Flutter texture
+     * visible and discard intermediate consumer frames. The final end call
+     * requests one refresh from the fully configured graph.
+     */
+    gint e_preview_update_depth;
 
     int e_stream_count;
     int e_selected_video_stream_index;
@@ -169,63 +196,11 @@ static void activate_engine_local(MltBridgeEngine *engine)
     g_private_set(&current_engine_key, engine);
 }
 
-/* Engine-local aliases used by the existing playback implementation. */
-#define engine_mutex (current_engine()->e_mutex)
-#define profile (current_engine()->e_profile)
-#define producer (current_engine()->e_producer)
-#define consumer (current_engine()->e_consumer)
-#define primary_producer (current_engine()->e_primary_producer)
-#define secondary_producer (current_engine()->e_secondary_producer)
-#define secondary_playlist (current_engine()->e_secondary_playlist)
-#define tractor (current_engine()->e_tractor)
-#define video_composite (current_engine()->e_video_composite)
-#define audio_mix (current_engine()->e_audio_mix)
-#define track_audio_filters (current_engine()->e_track_audio_filters)
-#define track_audio_gain (current_engine()->e_track_audio_gain)
-#define track_has_audio (current_engine()->e_track_has_audio)
-#define secondary_alpha_filter (current_engine()->e_secondary_alpha_filter)
-#define secondary_has_alpha (current_engine()->e_secondary_has_alpha)
-#define secondary_alpha_mode (current_engine()->e_secondary_alpha_mode)
-#define secondary_is_still (current_engine()->e_secondary_is_still)
-#define track_count (current_engine()->e_track_count)
-#define secondary_start_frame (current_engine()->e_secondary_start_frame)
-#define secondary_opacity (current_engine()->e_secondary_opacity)
-#define secondary_x (current_engine()->e_secondary_x)
-#define secondary_y (current_engine()->e_secondary_y)
-#define secondary_scale (current_engine()->e_secondary_scale)
-#define secondary_base_width (current_engine()->e_secondary_base_width)
-#define secondary_base_height (current_engine()->e_secondary_base_height)
-#define has_video (current_engine()->e_has_video)
-#define has_audio (current_engine()->e_has_audio)
-#define is_still (current_engine()->e_is_still)
-#define requested_volume (current_engine()->e_requested_volume)
-#define requested_play_all_frames (current_engine()->e_requested_play_all_frames)
-#define stream_count (current_engine()->e_stream_count)
-#define selected_video_stream_index (current_engine()->e_selected_video_stream_index)
-#define selected_audio_stream_index (current_engine()->e_selected_audio_stream_index)
-#define video_codec_name (current_engine()->e_video_codec_name)
-#define video_codec_long_name (current_engine()->e_video_codec_long_name)
-#define audio_codec_name (current_engine()->e_audio_codec_name)
-#define audio_codec_long_name (current_engine()->e_audio_codec_long_name)
-#define video_pixel_format (current_engine()->e_video_pixel_format)
-#define video_colorspace (current_engine()->e_video_colorspace)
-#define video_color_trc (current_engine()->e_video_color_trc)
-#define video_color_range (current_engine()->e_video_color_range)
-#define stream_inspection (current_engine()->e_stream_inspection)
-#define stream_inspection_count (current_engine()->e_stream_inspection_count)
-#define last_error (current_engine()->e_last_error)
-#define source_timecode (current_engine()->e_source_timecode)
-#define target_width (current_engine()->e_target_width)
-#define target_height (current_engine()->e_target_height)
-#define frame_mutex (current_engine()->e_frame_mutex)
-#define frame_idle_cond (current_engine()->e_frame_idle_cond)
-#define active_frame_readers (current_engine()->e_active_frame_readers)
-#define slots (current_engine()->e_slots)
-#define slot_write (current_engine()->e_slot_write)
-#define slot_ready (current_engine()->e_slot_ready)
-#define slot_display (current_engine()->e_slot_display)
-#define slot_ready_valid (current_engine()->e_slot_ready_valid)
-#define last_frame_position (current_engine()->e_last_frame_position)
+/*
+ * Playback state is accessed explicitly through the thread-local active
+ * engine. Keeping the field names visible avoids the old macro alias layer,
+ * which obscured ownership and could collide with unrelated identifiers.
+ */
 
 /* ------------------------------------------------------------------------- */
 /* Process-wide state                                                        */
@@ -250,6 +225,7 @@ static char init_error[512] = "";
 static GMutex texture_mutex;
 static FlTextureRegistrar *texture_registrar = NULL;
 static MltBridgeEngine *texture_engine = NULL;
+static GArray *retired_gl_textures = NULL;
 static gint frame_notification_pending = 0;
 
 typedef struct _MltVideoTexture {
@@ -284,9 +260,43 @@ static void ensure_locks(void)
     if (g_once_init_enter(&locks_initialized)) {
         g_mutex_init(&factory_mutex);
         g_mutex_init(&texture_mutex);
+        retired_gl_textures =
+            g_array_new(FALSE, FALSE, sizeof(GLuint));
 
         g_once_init_leave(&locks_initialized, 1);
     }
+}
+
+/*
+ * Public playback/media operations require a thread-local active engine.
+ * Returning a neutral value is safer than dereferencing NULL when a caller
+ * races teardown, uses a stale Dart wrapper, or invokes an operation after
+ * destroying its engine. last_error_copy() intentionally remains usable with
+ * no active engine and reports this process-level error.
+ */
+static MltBridgeEngine *require_current_engine(void)
+{
+    ensure_locks();
+
+    MltBridgeEngine *engine =
+        current_engine();
+
+    if (engine != NULL) {
+        return engine;
+    }
+
+    g_mutex_lock(&factory_mutex);
+
+    snprintf(
+        init_error,
+        sizeof(init_error),
+        "%s",
+        "No active MLT engine."
+    );
+
+    g_mutex_unlock(&factory_mutex);
+
+    return NULL;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -298,13 +308,13 @@ static void set_error(
     const char *message)
 {
     if (message == NULL) {
-        last_error[0] = '\0';
+        current_engine()->e_last_error[0] = '\0';
         return;
     }
 
     snprintf(
-        last_error,
-        sizeof(last_error),
+        current_engine()->e_last_error,
+        sizeof(current_engine()->e_last_error),
         "%s",
         message
     );
@@ -361,35 +371,35 @@ static void release_slots(void)
 {
     ensure_locks();
 
-    g_mutex_lock(&frame_mutex);
+    g_mutex_lock(&current_engine()->e_frame_mutex);
 
-    while (active_frame_readers > 0) {
+    while (current_engine()->e_active_frame_readers > 0) {
         g_cond_wait(
-            &frame_idle_cond,
-            &frame_mutex
+            &current_engine()->e_frame_idle_cond,
+            &current_engine()->e_frame_mutex
         );
     }
 
     for (int index = 0;
          index < MLT_BRIDGE_SLOT_COUNT;
          index++) {
-        free(slots[index].data);
+        free(current_engine()->e_slots[index].data);
 
-        slots[index].data = NULL;
-        slots[index].capacity = 0;
-        slots[index].width = 0;
-        slots[index].height = 0;
+        current_engine()->e_slots[index].data = NULL;
+        current_engine()->e_slots[index].capacity = 0;
+        current_engine()->e_slots[index].width = 0;
+        current_engine()->e_slots[index].height = 0;
     }
 
-    slot_write = 0;
-    slot_ready = 1;
-    slot_display = 2;
+    current_engine()->e_slot_write = 0;
+    current_engine()->e_slot_ready = 1;
+    current_engine()->e_slot_display = 2;
 
-    slot_ready_valid = 0;
+    current_engine()->e_slot_ready_valid = 0;
 
-    last_frame_position = -1;
+    current_engine()->e_last_frame_position = -1;
 
-    g_mutex_unlock(&frame_mutex);
+    g_mutex_unlock(&current_engine()->e_frame_mutex);
 }
 
 /*
@@ -401,11 +411,11 @@ static void invalidate_frames(void)
 {
     ensure_locks();
 
-    g_mutex_lock(&frame_mutex);
+    g_mutex_lock(&current_engine()->e_frame_mutex);
 
-    last_frame_position = -1;
+    current_engine()->e_last_frame_position = -1;
 
-    g_mutex_unlock(&frame_mutex);
+    g_mutex_unlock(&current_engine()->e_frame_mutex);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -435,6 +445,23 @@ static gboolean mlt_video_texture_populate(
      */
     g_mutex_lock(&texture_mutex);
 
+    /*
+     * FlTextureGL guarantees that Flutter's GL context is current only while
+     * populate() is running. Texture IDs retired by an earlier unregister are
+     * therefore deleted here instead of making an unsafe GL call from the GTK
+     * teardown thread. This closes the leak across texture re-registration and
+     * hot-restart cycles; process exit still lets the driver reclaim the final
+     * context-owned resources naturally.
+     */
+    if (retired_gl_textures != NULL &&
+        retired_gl_textures->len > 0) {
+        glDeleteTextures(
+            (GLsizei)retired_gl_textures->len,
+            (const GLuint *)retired_gl_textures->data
+        );
+        g_array_set_size(retired_gl_textures, 0);
+    }
+
     MltBridgeEngine *engine = texture_engine;
 
     if (engine == NULL) {
@@ -444,41 +471,41 @@ static gboolean mlt_video_texture_populate(
 
     activate_engine_local(engine);
 
-    g_mutex_lock(&frame_mutex);
+    g_mutex_lock(&current_engine()->e_frame_mutex);
 
-    if (slot_ready_valid) {
+    if (current_engine()->e_slot_ready_valid) {
         const int previous_display =
-            slot_display;
+            current_engine()->e_slot_display;
 
-        slot_display = slot_ready;
-        slot_ready = previous_display;
+        current_engine()->e_slot_display = current_engine()->e_slot_ready;
+        current_engine()->e_slot_ready = previous_display;
 
-        slot_ready_valid = 0;
+        current_engine()->e_slot_ready_valid = 0;
     }
 
     const int display_index =
-        slot_display;
+        current_engine()->e_slot_display;
 
-    active_frame_readers += 1;
+    current_engine()->e_active_frame_readers += 1;
 
-    g_mutex_unlock(&frame_mutex);
+    g_mutex_unlock(&current_engine()->e_frame_mutex);
     g_mutex_unlock(&texture_mutex);
 
     FrameSlot *slot =
-        &slots[display_index];
+        &current_engine()->e_slots[display_index];
 
     if (slot->data == NULL ||
         slot->width <= 0 ||
         slot->height <= 0) {
-        g_mutex_lock(&frame_mutex);
+        g_mutex_lock(&current_engine()->e_frame_mutex);
 
-        active_frame_readers -= 1;
+        current_engine()->e_active_frame_readers -= 1;
 
-        if (active_frame_readers == 0) {
-            g_cond_broadcast(&frame_idle_cond);
+        if (current_engine()->e_active_frame_readers == 0) {
+            g_cond_broadcast(&current_engine()->e_frame_idle_cond);
         }
 
-        g_mutex_unlock(&frame_mutex);
+        g_mutex_unlock(&current_engine()->e_frame_mutex);
 
         return FALSE;
     }
@@ -567,15 +594,15 @@ static gboolean mlt_video_texture_populate(
     *width = (uint32_t)slot->width;
     *height = (uint32_t)slot->height;
 
-    g_mutex_lock(&frame_mutex);
+    g_mutex_lock(&current_engine()->e_frame_mutex);
 
-    active_frame_readers -= 1;
+    current_engine()->e_active_frame_readers -= 1;
 
-    if (active_frame_readers == 0) {
-        g_cond_broadcast(&frame_idle_cond);
+    if (current_engine()->e_active_frame_readers == 0) {
+        g_cond_broadcast(&current_engine()->e_frame_idle_cond);
     }
 
-    g_mutex_unlock(&frame_mutex);
+    g_mutex_unlock(&current_engine()->e_frame_mutex);
 
     return TRUE;
 }
@@ -699,6 +726,10 @@ static void on_consumer_frame_show(
         return;
     }
 
+    if (g_atomic_int_get(&engine->e_preview_update_depth) > 0) {
+        return;
+    }
+
     const int64_t position =
         (int64_t)mlt_frame_get_position(
             frame
@@ -706,12 +737,12 @@ static void on_consumer_frame_show(
 
     ensure_locks();
 
-    g_mutex_lock(&frame_mutex);
+    g_mutex_lock(&current_engine()->e_frame_mutex);
 
     const int already_have_frame =
-        position == last_frame_position;
+        position == current_engine()->e_last_frame_position;
 
-    g_mutex_unlock(&frame_mutex);
+    g_mutex_unlock(&current_engine()->e_frame_mutex);
 
     if (already_have_frame) {
         return;
@@ -723,10 +754,10 @@ static void on_consumer_frame_show(
     uint8_t *image = NULL;
 
     int width =
-        g_atomic_int_get(&target_width);
+        g_atomic_int_get(&current_engine()->e_target_width);
 
     int height =
-        g_atomic_int_get(&target_height);
+        g_atomic_int_get(&current_engine()->e_target_height);
 
     const int image_error =
         mlt_frame_get_image(
@@ -770,7 +801,7 @@ static void on_consumer_frame_show(
      * slot_write belongs to this thread, so the copy needs no lock.
      */
     FrameSlot *slot =
-        &slots[slot_write];
+        &current_engine()->e_slots[current_engine()->e_slot_write];
 
     if (required_size > slot->capacity) {
         uint8_t *new_buffer =
@@ -797,19 +828,19 @@ static void on_consumer_frame_show(
     slot->height = height;
 
     /* Publish. */
-    g_mutex_lock(&frame_mutex);
+    g_mutex_lock(&current_engine()->e_frame_mutex);
 
     const int previous_ready =
-        slot_ready;
+        current_engine()->e_slot_ready;
 
-    slot_ready = slot_write;
-    slot_write = previous_ready;
+    current_engine()->e_slot_ready = current_engine()->e_slot_write;
+    current_engine()->e_slot_write = previous_ready;
 
-    slot_ready_valid = 1;
+    current_engine()->e_slot_ready_valid = 1;
 
-    last_frame_position = position;
+    current_engine()->e_last_frame_position = position;
 
-    g_mutex_unlock(&frame_mutex);
+    g_mutex_unlock(&current_engine()->e_frame_mutex);
 
     notify_flutter_frame_available();
 }
@@ -927,9 +958,9 @@ void mlt_bridge_unregister_flutter_texture(void)
     if (engine != NULL) {
         activate_engine_local(engine);
 
-        g_mutex_lock(&engine_mutex);
+        g_mutex_lock(&current_engine()->e_mutex);
         close_consumer_locked();
-        g_mutex_unlock(&engine_mutex);
+        g_mutex_unlock(&current_engine()->e_mutex);
 
         release_slots();
     }
@@ -942,13 +973,106 @@ void mlt_bridge_unregister_flutter_texture(void)
         );
     }
 
+    /*
+     * No Flutter raster callback can still be using local_texture here:
+     * texture_engine was detached before release_slots() waited out existing
+     * readers, and the registrar has now removed the external texture. Move
+     * the GL name to the deferred-delete queue before releasing the object.
+     */
     if (local_texture != NULL) {
+        g_mutex_lock(&texture_mutex);
+
+        if (local_texture->gl_texture_id != 0 &&
+            retired_gl_textures != NULL) {
+            const GLuint retired_id =
+                local_texture->gl_texture_id;
+
+            g_array_append_val(
+                retired_gl_textures,
+                retired_id
+            );
+
+            local_texture->gl_texture_id = 0;
+            local_texture->uploaded_width = 0;
+            local_texture->uploaded_height = 0;
+        }
+
+        g_mutex_unlock(&texture_mutex);
+
         g_object_unref(local_texture);
     }
 
     if (local_registrar != NULL) {
         g_object_unref(local_registrar);
     }
+}
+
+MLT_LAYER_API_EXPORT
+int mlt_bridge_preview_update_begin(
+    MltBridgeEngine *engine)
+{
+    if (engine == NULL) {
+        return 0;
+    }
+
+    int depth = 0;
+
+    do {
+        depth = g_atomic_int_get(&engine->e_preview_update_depth);
+
+        if (depth == INT_MAX) {
+            return 0;
+        }
+    } while (!g_atomic_int_compare_and_exchange(
+        &engine->e_preview_update_depth,
+        depth,
+        depth + 1
+    ));
+
+    return 1;
+}
+
+MLT_LAYER_API_EXPORT
+int mlt_bridge_preview_update_end(
+    MltBridgeEngine *engine)
+{
+    if (engine == NULL) {
+        return 0;
+    }
+
+    activate_engine_local(engine);
+
+    int previous_depth = 0;
+
+    do {
+        previous_depth =
+            g_atomic_int_get(&engine->e_preview_update_depth);
+
+        if (previous_depth <= 0) {
+            return 0;
+        }
+    } while (!g_atomic_int_compare_and_exchange(
+        &engine->e_preview_update_depth,
+        previous_depth,
+        previous_depth - 1
+    ));
+
+    if (previous_depth == 1) {
+        ensure_locks();
+
+        g_mutex_lock(&engine->e_mutex);
+
+        invalidate_frames();
+
+        if (g_atomic_int_get(&engine->e_preview_enabled) &&
+            engine->e_consumer != NULL) {
+            refresh_locked();
+        }
+
+        g_mutex_unlock(&engine->e_mutex);
+    }
+
+    return 1;
 }
 
 MLT_BRIDGE_EXPORT
@@ -1109,11 +1233,11 @@ int64_t mlt_bridge_texture_id(void)
 
 static void close_consumer_locked(void)
 {
-    if (consumer != NULL) {
-        mlt_consumer_stop(consumer);
-        mlt_consumer_close(consumer);
+    if (current_engine()->e_consumer != NULL) {
+        mlt_consumer_stop(current_engine()->e_consumer);
+        mlt_consumer_close(current_engine()->e_consumer);
 
-        consumer = NULL;
+        current_engine()->e_consumer = NULL;
     }
 }
 
@@ -1126,11 +1250,11 @@ static void close_producer_locked(void)
      * tractor's embedded producer. Source and graph objects are closed
      * explicitly below so no object is released twice.
      */
-    producer = NULL;
+    current_engine()->e_producer = NULL;
 
-    if (tractor != NULL) {
-        mlt_tractor_close(tractor);
-        tractor = NULL;
+    if (current_engine()->e_tractor != NULL) {
+        mlt_tractor_close(current_engine()->e_tractor);
+        current_engine()->e_tractor = NULL;
     }
 
     /*
@@ -1138,82 +1262,114 @@ static void close_producer_locked(void)
      * transitions. Our engine retains the factory references so later POC 10
      * slices can mutate opacity/blend properties without searching the graph.
      */
-    if (video_composite != NULL) {
-        mlt_transition_close(video_composite);
-        video_composite = NULL;
+    if (current_engine()->e_video_composite != NULL) {
+        mlt_transition_close(current_engine()->e_video_composite);
+        current_engine()->e_video_composite = NULL;
     }
 
-    if (audio_mix != NULL) {
-        mlt_transition_close(audio_mix);
-        audio_mix = NULL;
+    if (current_engine()->e_audio_mix != NULL) {
+        mlt_transition_close(current_engine()->e_audio_mix);
+        current_engine()->e_audio_mix = NULL;
+    }
+
+    if (current_engine()->e_tertiary_video_composite != NULL) {
+        mlt_transition_close(current_engine()->e_tertiary_video_composite);
+        current_engine()->e_tertiary_video_composite = NULL;
+    }
+
+    if (current_engine()->e_tertiary_audio_mix != NULL) {
+        mlt_transition_close(current_engine()->e_tertiary_audio_mix);
+        current_engine()->e_tertiary_audio_mix = NULL;
     }
 
     /*
-     * These filters are attached to primary_producer and secondary_playlist.
+     * These filters are attached to primary_producer and overlay playlists.
      * Drop the borrowed pointers before those producers release the filters.
      */
-    track_audio_filters[0] = NULL;
-    track_audio_filters[1] = NULL;
-    secondary_alpha_filter = NULL;
+    current_engine()->e_track_audio_filters[0] = NULL;
+    current_engine()->e_track_audio_filters[1] = NULL;
+    current_engine()->e_track_audio_filters[2] = NULL;
+    current_engine()->e_secondary_alpha_filter = NULL;
+    current_engine()->e_tertiary_alpha_filter = NULL;
 
-    if (secondary_playlist != NULL) {
-        mlt_playlist_close(secondary_playlist);
-        secondary_playlist = NULL;
+    if (current_engine()->e_tertiary_playlist != NULL) {
+        mlt_playlist_close(current_engine()->e_tertiary_playlist);
+        current_engine()->e_tertiary_playlist = NULL;
     }
 
-    if (secondary_producer != NULL) {
-        mlt_producer_close(secondary_producer);
-        secondary_producer = NULL;
+    if (current_engine()->e_tertiary_producer != NULL) {
+        mlt_producer_close(current_engine()->e_tertiary_producer);
+        current_engine()->e_tertiary_producer = NULL;
     }
 
-    if (primary_producer != NULL) {
-        mlt_producer_close(primary_producer);
-        primary_producer = NULL;
+    if (current_engine()->e_secondary_playlist != NULL) {
+        mlt_playlist_close(current_engine()->e_secondary_playlist);
+        current_engine()->e_secondary_playlist = NULL;
     }
 
-    track_count = 0;
-    secondary_start_frame = -1;
-    secondary_opacity = 1.0;
-    secondary_x = 0.0;
-    secondary_y = 0.0;
-    secondary_scale = 1.0;
-    secondary_base_width = 0.0;
-    secondary_base_height = 0.0;
-    secondary_has_alpha = 0;
-    secondary_alpha_mode = 0;
-    secondary_is_still = 0;
+    if (current_engine()->e_secondary_producer != NULL) {
+        mlt_producer_close(current_engine()->e_secondary_producer);
+        current_engine()->e_secondary_producer = NULL;
+    }
 
-    track_audio_gain[0] = 1.0;
-    track_audio_gain[1] = 1.0;
-    track_has_audio[0] = 0;
-    track_has_audio[1] = 0;
+    if (current_engine()->e_primary_producer != NULL) {
+        mlt_producer_close(current_engine()->e_primary_producer);
+        current_engine()->e_primary_producer = NULL;
+    }
 
-    has_video = 0;
-    has_audio = 0;
-    is_still = 0;
+    current_engine()->e_track_count = 0;
+    current_engine()->e_secondary_start_frame = -1;
+    current_engine()->e_secondary_opacity = 1.0;
+    current_engine()->e_secondary_x = 0.0;
+    current_engine()->e_secondary_y = 0.0;
+    current_engine()->e_secondary_scale = 1.0;
+    current_engine()->e_secondary_base_width = 0.0;
+    current_engine()->e_secondary_base_height = 0.0;
+    current_engine()->e_secondary_has_alpha = 0;
+    current_engine()->e_secondary_alpha_mode = 0;
+    current_engine()->e_secondary_is_still = 0;
+    current_engine()->e_tertiary_start_frame = -1;
+    current_engine()->e_tertiary_opacity = 1.0;
+    current_engine()->e_tertiary_x = 0.0;
+    current_engine()->e_tertiary_y = 0.0;
+    current_engine()->e_tertiary_scale = 1.0;
+    current_engine()->e_tertiary_base_width = 0.0;
+    current_engine()->e_tertiary_base_height = 0.0;
+    current_engine()->e_tertiary_has_alpha = 0;
+    current_engine()->e_tertiary_alpha_mode = 0;
+    current_engine()->e_tertiary_is_still = 0;
 
-    stream_count = 0;
-    selected_video_stream_index = -1;
-    selected_audio_stream_index = -1;
+    for (int index = 0; index < MLT_COMPOSITION_MAX_LAYERS; index++) {
+        current_engine()->e_track_audio_gain[index] = 1.0;
+        current_engine()->e_track_has_audio[index] = 0;
+    }
 
-    video_codec_name[0] = '\0';
-    video_codec_long_name[0] = '\0';
-    audio_codec_name[0] = '\0';
-    audio_codec_long_name[0] = '\0';
+    current_engine()->e_has_video = 0;
+    current_engine()->e_has_audio = 0;
+    current_engine()->e_is_still = 0;
 
-    video_pixel_format[0] = '\0';
-    video_colorspace = -1;
-    video_color_trc = -1;
-    video_color_range[0] = '\0';
+    current_engine()->e_stream_count = 0;
+    current_engine()->e_selected_video_stream_index = -1;
+    current_engine()->e_selected_audio_stream_index = -1;
 
-    free(stream_inspection);
-    stream_inspection = NULL;
-    stream_inspection_count = 0;
+    current_engine()->e_video_codec_name[0] = '\0';
+    current_engine()->e_video_codec_long_name[0] = '\0';
+    current_engine()->e_audio_codec_name[0] = '\0';
+    current_engine()->e_audio_codec_long_name[0] = '\0';
 
-    source_timecode[0] = '\0';
+    current_engine()->e_video_pixel_format[0] = '\0';
+    current_engine()->e_video_colorspace = -1;
+    current_engine()->e_video_color_trc = -1;
+    current_engine()->e_video_color_range[0] = '\0';
 
-    g_atomic_int_set(&target_width, 0);
-    g_atomic_int_set(&target_height, 0);
+    free(current_engine()->e_stream_inspection);
+    current_engine()->e_stream_inspection = NULL;
+    current_engine()->e_stream_inspection_count = 0;
+
+    current_engine()->e_source_timecode[0] = '\0';
+
+    g_atomic_int_set(&current_engine()->e_target_width, 0);
+    g_atomic_int_set(&current_engine()->e_target_height, 0);
 }
 
 /*
@@ -1472,10 +1628,10 @@ static void read_video_color_metadata_locked(
     mlt_properties properties,
     int stream_index)
 {
-    video_pixel_format[0] = '\0';
-    video_colorspace = -1;
-    video_color_trc = -1;
-    video_color_range[0] = '\0';
+    current_engine()->e_video_pixel_format[0] = '\0';
+    current_engine()->e_video_colorspace = -1;
+    current_engine()->e_video_color_trc = -1;
+    current_engine()->e_video_color_range[0] = '\0';
 
     if (properties == NULL || stream_index < 0) {
         return;
@@ -1495,8 +1651,8 @@ static void read_video_color_metadata_locked(
 
     if (value != NULL && value[0] != '\0') {
         snprintf(
-            video_pixel_format,
-            sizeof(video_pixel_format),
+            current_engine()->e_video_pixel_format,
+            sizeof(current_engine()->e_video_pixel_format),
             "%s",
             value
         );
@@ -1510,7 +1666,7 @@ static void read_video_color_metadata_locked(
     );
 
     if (mlt_properties_get(properties, key) != NULL) {
-        video_colorspace =
+        current_engine()->e_video_colorspace =
             mlt_properties_get_int(properties, key);
     }
 
@@ -1522,7 +1678,7 @@ static void read_video_color_metadata_locked(
     );
 
     if (mlt_properties_get(properties, key) != NULL) {
-        video_color_trc =
+        current_engine()->e_video_color_trc =
             mlt_properties_get_int(properties, key);
     }
 
@@ -1536,34 +1692,34 @@ static void read_video_color_metadata_locked(
         if (strcmp(value, "full") == 0 ||
             strcmp(value, "jpeg") == 0) {
             snprintf(
-                video_color_range,
-                sizeof(video_color_range),
+                current_engine()->e_video_color_range,
+                sizeof(current_engine()->e_video_color_range),
                 "%s",
                 "Full"
             );
         } else if (strcmp(value, "limited") == 0 ||
                    strcmp(value, "mpeg") == 0) {
             snprintf(
-                video_color_range,
-                sizeof(video_color_range),
+                current_engine()->e_video_color_range,
+                sizeof(current_engine()->e_video_color_range),
                 "%s",
                 "Limited"
             );
         } else {
             snprintf(
-                video_color_range,
-                sizeof(video_color_range),
+                current_engine()->e_video_color_range,
+                sizeof(current_engine()->e_video_color_range),
                 "%s",
                 value
             );
         }
-    } else if (video_pixel_format[0] != '\0' &&
-               (strncmp(video_pixel_format, "yuvj", 4) == 0 ||
-                strstr(video_pixel_format, "rgb") != NULL ||
-                strstr(video_pixel_format, "gbr") != NULL)) {
+    } else if (current_engine()->e_video_pixel_format[0] != '\0' &&
+               (strncmp(current_engine()->e_video_pixel_format, "yuvj", 4) == 0 ||
+                strstr(current_engine()->e_video_pixel_format, "rgb") != NULL ||
+                strstr(current_engine()->e_video_pixel_format, "gbr") != NULL)) {
         snprintf(
-            video_color_range,
-            sizeof(video_color_range),
+            current_engine()->e_video_color_range,
+            sizeof(current_engine()->e_video_color_range),
             "%s",
             "Full"
         );
@@ -1578,27 +1734,27 @@ static void read_video_color_metadata_locked(
 static void read_stream_inspection_locked(
     mlt_properties properties)
 {
-    free(stream_inspection);
-    stream_inspection = NULL;
-    stream_inspection_count = 0;
+    free(current_engine()->e_stream_inspection);
+    current_engine()->e_stream_inspection = NULL;
+    current_engine()->e_stream_inspection_count = 0;
 
-    if (properties == NULL || stream_count <= 0) {
+    if (properties == NULL || current_engine()->e_stream_count <= 0) {
         return;
     }
 
-    stream_inspection =
-        calloc((size_t)stream_count, sizeof(StreamInspection));
+    current_engine()->e_stream_inspection =
+        calloc((size_t)current_engine()->e_stream_count, sizeof(StreamInspection));
 
-    if (stream_inspection == NULL) {
+    if (current_engine()->e_stream_inspection == NULL) {
         return;
     }
 
-    stream_inspection_count = stream_count;
+    current_engine()->e_stream_inspection_count = current_engine()->e_stream_count;
 
     for (int inspection_index = 0;
-         inspection_index < stream_inspection_count;
+         inspection_index < current_engine()->e_stream_inspection_count;
          inspection_index++) {
-        StreamInspection *info = &stream_inspection[inspection_index];
+        StreamInspection *info = &current_engine()->e_stream_inspection[inspection_index];
         char key[160];
         const char *value = NULL;
 
@@ -1708,14 +1864,14 @@ static void read_stream_inspection_locked(
 
 static const StreamInspection *stream_inspection_at_locked(int index)
 {
-    if (producer == NULL ||
-        stream_inspection == NULL ||
+    if (current_engine()->e_producer == NULL ||
+        current_engine()->e_stream_inspection == NULL ||
         index < 0 ||
-        index >= stream_inspection_count) {
+        index >= current_engine()->e_stream_inspection_count) {
         return NULL;
     }
 
-    return &stream_inspection[index];
+    return &current_engine()->e_stream_inspection[index];
 }
 
 static int create_consumer_locked(void)
@@ -1729,25 +1885,25 @@ static int create_consumer_locked(void)
         return 0;
     }
 
-    if (producer == NULL ||
-        profile == NULL) {
+    if (current_engine()->e_producer == NULL ||
+        current_engine()->e_profile == NULL) {
         set_error("No producer is loaded.");
 
         return 0;
     }
 
-    if (consumer != NULL) {
+    if (current_engine()->e_consumer != NULL) {
         return 1;
     }
 
-    consumer =
+    current_engine()->e_consumer =
         mlt_factory_consumer(
-            profile,
+            current_engine()->e_profile,
             "sdl2_audio",
             NULL
         );
 
-    if (consumer == NULL) {
+    if (current_engine()->e_consumer == NULL) {
         set_error(
             "Could not create the MLT "
             "sdl2_audio consumer."
@@ -1757,7 +1913,7 @@ static int create_consumer_locked(void)
     }
 
     mlt_properties properties =
-        MLT_CONSUMER_PROPERTIES(consumer);
+        MLT_CONSUMER_PROPERTIES(current_engine()->e_consumer);
 
     /*
      * Normal playback is asynchronous and may drop video frames to keep
@@ -1768,7 +1924,7 @@ static int create_consumer_locked(void)
     mlt_properties_set_int(
         properties,
         "real_time",
-        requested_play_all_frames ? -1 : 1
+        current_engine()->e_requested_play_all_frames ? -1 : 1
     );
 
     /*
@@ -1790,7 +1946,7 @@ static int create_consumer_locked(void)
     mlt_properties_set_double(
         properties,
         "volume",
-        requested_volume
+        current_engine()->e_requested_volume
     );
 
     /*
@@ -1854,14 +2010,14 @@ static int create_consumer_locked(void)
 
     const int connect_result =
         mlt_consumer_connect(
-            consumer,
-            MLT_PRODUCER_SERVICE(producer)
+            current_engine()->e_consumer,
+            MLT_PRODUCER_SERVICE(current_engine()->e_producer)
         );
 
     if (connect_result != 0) {
-        mlt_consumer_close(consumer);
+        mlt_consumer_close(current_engine()->e_consumer);
 
-        consumer = NULL;
+        current_engine()->e_consumer = NULL;
 
         set_error(
             "MLT could not connect the "
@@ -1877,11 +2033,11 @@ static int create_consumer_locked(void)
 /* Restarts the consumer only when it has actually stopped. */
 static int ensure_consumer_running_locked(void)
 {
-    if (consumer == NULL) {
+    if (current_engine()->e_consumer == NULL) {
         return 0;
     }
 
-    if (!mlt_consumer_is_stopped(consumer)) {
+    if (!mlt_consumer_is_stopped(current_engine()->e_consumer)) {
         return 1;
     }
 
@@ -1890,9 +2046,9 @@ static int ensure_consumer_running_locked(void)
      * what joins its threads, and skipping it leaks one thread per
      * replay.
      */
-    mlt_consumer_stop(consumer);
+    mlt_consumer_stop(current_engine()->e_consumer);
 
-    if (mlt_consumer_start(consumer) != 0) {
+    if (mlt_consumer_start(current_engine()->e_consumer) != 0) {
         set_error("MLT could not start playback.");
 
         return 0;
@@ -1903,12 +2059,12 @@ static int ensure_consumer_running_locked(void)
 
 static void refresh_locked(void)
 {
-    if (consumer == NULL) {
+    if (current_engine()->e_consumer == NULL) {
         return;
     }
 
     mlt_properties_set_int(
-        MLT_CONSUMER_PROPERTIES(consumer),
+        MLT_CONSUMER_PROPERTIES(current_engine()->e_consumer),
         "refresh",
         1
     );
@@ -2001,8 +2157,19 @@ MltBridgeEngine *mlt_bridge_engine_create(void)
     engine->e_secondary_has_alpha = 0;
     engine->e_secondary_alpha_mode = 0;
     engine->e_secondary_is_still = 0;
-    engine->e_track_audio_gain[0] = 1.0;
-    engine->e_track_audio_gain[1] = 1.0;
+    engine->e_tertiary_opacity = 1.0;
+    engine->e_tertiary_x = 0.0;
+    engine->e_tertiary_y = 0.0;
+    engine->e_tertiary_scale = 1.0;
+    engine->e_tertiary_base_width = 0.0;
+    engine->e_tertiary_base_height = 0.0;
+    engine->e_tertiary_start_frame = -1;
+    engine->e_tertiary_has_alpha = 0;
+    engine->e_tertiary_alpha_mode = 0;
+    engine->e_tertiary_is_still = 0;
+    for (int index = 0; index < MLT_COMPOSITION_MAX_LAYERS; index++) {
+        engine->e_track_audio_gain[index] = 1.0;
+    }
     engine->e_selected_video_stream_index = -1;
     engine->e_selected_audio_stream_index = -1;
     engine->e_video_colorspace = -1;
@@ -2071,16 +2238,16 @@ void mlt_bridge_engine_destroy(
 
     activate_engine_local(engine);
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
 
     close_producer_locked();
 
-    if (profile != NULL) {
-        mlt_profile_close(profile);
-        profile = NULL;
+    if (current_engine()->e_profile != NULL) {
+        mlt_profile_close(current_engine()->e_profile);
+        current_engine()->e_profile = NULL;
     }
 
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     /* Wait for a raster upload that claimed the engine before detachment. */
     release_slots();
@@ -2188,6 +2355,369 @@ static int export_factory_is_ready(void)
     return ready;
 }
 
+static double preview_track_gain_locked(int track_index)
+{
+    if (track_index < 0 || track_index >= MLT_COMPOSITION_MAX_LAYERS) {
+        return 0.0;
+    }
+
+    mlt_filter filter = current_engine()->e_track_audio_filters[track_index];
+
+    if (filter != NULL) {
+        const double gain =
+            mlt_properties_get_double(
+                MLT_FILTER_PROPERTIES(filter),
+                "gain"
+            );
+
+        if (isfinite(gain)) {
+            return CLAMP(gain, 0.0, 1.0);
+        }
+    }
+
+    return CLAMP(current_engine()->e_track_audio_gain[track_index], 0.0, 1.0);
+}
+
+
+static void preview_sync_indexed_derived_state(
+    MltCompositionDerivedState *state)
+{
+    if (state == NULL) {
+        return;
+    }
+
+    memset(state->layers, 0, sizeof(state->layers));
+
+    if (state->layer_count < 1) {
+        return;
+    }
+
+    MltCompositionLayerDerivedState *base =
+        &state->layers[MLT_COMPOSITION_BASE_LAYER];
+
+    base->present = 1;
+    base->start_frame = 0;
+    base->timeline_length = state->composition_length;
+    base->base_width = state->profile_width;
+    base->base_height = state->profile_height;
+    base->x = 0.0;
+    base->y = 0.0;
+    base->width = state->profile_width;
+    base->height = state->profile_height;
+    base->opacity = 1.0;
+    base->has_audio = state->base_has_audio;
+    base->audio_gain = state->base_audio_gain;
+
+    if (state->layer_count < 2) {
+        return;
+    }
+
+    MltCompositionLayerDerivedState *layer2 =
+        &state->layers[MLT_COMPOSITION_FIRST_OVERLAY];
+
+    layer2->present = 1;
+    layer2->start_frame = state->layer2_start_frame;
+    layer2->timeline_length = state->layer2_timeline_length;
+    layer2->is_still = state->layer2_is_still;
+    layer2->alpha_mode = state->layer2_alpha_mode;
+    layer2->base_width = state->layer2_base_width;
+    layer2->base_height = state->layer2_base_height;
+    layer2->x = state->layer2_x;
+    layer2->y = state->layer2_y;
+    layer2->width = state->layer2_width;
+    layer2->height = state->layer2_height;
+    layer2->opacity = state->layer2_opacity;
+    layer2->has_audio = state->layer2_has_audio;
+    layer2->audio_gain = state->layer2_audio_gain;
+}
+
+static int snapshot_export_composition_locked(
+    MltExportCompositionSnapshot *snapshot,
+    char *failure,
+    size_t failure_size)
+{
+    if (snapshot == NULL) {
+        if (failure != NULL && failure_size > 0) {
+            snprintf(failure, failure_size, "%s", "Invalid composition snapshot request.");
+        }
+        return 0;
+    }
+
+    memset(snapshot, 0, sizeof(*snapshot));
+
+    for (int index = 0; index < MLT_COMPOSITION_MAX_LAYERS; index++) {
+        snapshot->layers[index].opacity = 1.0;
+        snapshot->layers[index].scale = 1.0;
+        snapshot->layers[index].audio_gain = 1.0;
+        snapshot->layers[index].start_frame = index == 0 ? 0 : -1;
+    }
+
+    if (current_engine()->e_primary_producer == NULL ||
+        current_engine()->e_producer == NULL ||
+        current_engine()->e_track_count < 1 ||
+        current_engine()->e_is_still ||
+        !current_engine()->e_has_video) {
+        if (failure != NULL && failure_size > 0) {
+            snprintf(failure, failure_size, "%s", "The open movie cannot be exported.");
+        }
+        return 0;
+    }
+
+    const char *primary_resource =
+        mlt_properties_get(
+            MLT_PRODUCER_PROPERTIES(current_engine()->e_primary_producer),
+            "resource"
+        );
+
+    if (primary_resource == NULL || primary_resource[0] == '\0') {
+        if (failure != NULL && failure_size > 0) {
+            snprintf(failure, failure_size, "%s", "The base layer has no exportable source path.");
+        }
+        return 0;
+    }
+
+    MltExportLayerSnapshot *base =
+        &snapshot->layers[MLT_COMPOSITION_BASE_LAYER];
+
+    snapshot->layer_count = 1;
+    base->path = primary_resource;
+    base->present = 1;
+    base->start_frame = 0;
+    base->has_audio = current_engine()->e_track_has_audio[0] ? 1 : 0;
+    base->audio_gain =
+        CLAMP(current_engine()->e_track_audio_gain[0], 0.0, 1.0);
+
+    if (current_engine()->e_track_count < 2 ||
+        current_engine()->e_secondary_producer == NULL ||
+        current_engine()->e_secondary_playlist == NULL ||
+        current_engine()->e_video_composite == NULL) {
+        return 1;
+    }
+
+    const char *secondary_resource =
+        mlt_properties_get(
+            MLT_PRODUCER_PROPERTIES(current_engine()->e_secondary_producer),
+            "resource"
+        );
+
+    if (secondary_resource == NULL || secondary_resource[0] == '\0') {
+        if (failure != NULL && failure_size > 0) {
+            snprintf(failure, failure_size, "%s", "Layer 2 has no exportable source path.");
+        }
+        return 0;
+    }
+
+    MltExportLayerSnapshot *layer2 =
+        &snapshot->layers[MLT_COMPOSITION_FIRST_OVERLAY];
+
+    snapshot->layer_count = 2;
+    layer2->path = secondary_resource;
+    layer2->present = 1;
+    layer2->start_frame = current_engine()->e_secondary_start_frame;
+    layer2->has_audio = current_engine()->e_track_has_audio[1] ? 1 : 0;
+    layer2->is_still = current_engine()->e_secondary_is_still ? 1 : 0;
+    layer2->alpha_mode = current_engine()->e_secondary_alpha_mode;
+    layer2->audio_gain =
+        CLAMP(current_engine()->e_track_audio_gain[1], 0.0, 1.0);
+    layer2->opacity =
+        CLAMP(current_engine()->e_secondary_opacity, 0.0, 1.0);
+    layer2->x = current_engine()->e_secondary_x;
+    layer2->y = current_engine()->e_secondary_y;
+    layer2->scale =
+        CLAMP(current_engine()->e_secondary_scale, 0.10, 3.0);
+
+    if (current_engine()->e_track_count < 3 ||
+        current_engine()->e_tertiary_producer == NULL ||
+        current_engine()->e_tertiary_playlist == NULL ||
+        current_engine()->e_tertiary_video_composite == NULL) {
+        return 1;
+    }
+
+    const char *tertiary_resource =
+        mlt_properties_get(
+            MLT_PRODUCER_PROPERTIES(current_engine()->e_tertiary_producer),
+            "resource"
+        );
+
+    if (tertiary_resource == NULL || tertiary_resource[0] == '\0') {
+        if (failure != NULL && failure_size > 0) {
+            snprintf(failure, failure_size, "%s", "Layer 3 has no exportable source path.");
+        }
+        return 0;
+    }
+
+    MltExportLayerSnapshot *layer3 =
+        &snapshot->layers[MLT_COMPOSITION_SECOND_OVERLAY];
+
+    snapshot->layer_count = 3;
+    layer3->path = tertiary_resource;
+    layer3->present = 1;
+    layer3->start_frame = current_engine()->e_tertiary_start_frame;
+    layer3->has_audio = current_engine()->e_track_has_audio[2] ? 1 : 0;
+    layer3->is_still = current_engine()->e_tertiary_is_still ? 1 : 0;
+    layer3->alpha_mode = current_engine()->e_tertiary_alpha_mode;
+    layer3->audio_gain = CLAMP(current_engine()->e_track_audio_gain[2], 0.0, 1.0);
+    layer3->opacity = CLAMP(current_engine()->e_tertiary_opacity, 0.0, 1.0);
+    layer3->x = current_engine()->e_tertiary_x;
+    layer3->y = current_engine()->e_tertiary_y;
+    layer3->scale = CLAMP(current_engine()->e_tertiary_scale, 0.10, 3.0);
+
+    return 1;
+}
+
+static int derive_preview_composition_locked(
+    int64_t in_frame,
+    int64_t out_frame,
+    MltCompositionDerivedState *state,
+    char *failure,
+    size_t failure_size)
+{
+    if (state == NULL ||
+        current_engine()->e_profile == NULL ||
+        current_engine()->e_primary_producer == NULL ||
+        current_engine()->e_producer == NULL ||
+        current_engine()->e_track_count < 1) {
+        if (failure != NULL && failure_size > 0) {
+            snprintf(failure, failure_size, "%s", "The preview composition is unavailable.");
+        }
+        return 0;
+    }
+
+    memset(state, 0, sizeof(*state));
+    state->layer2_start_frame = -1;
+
+    const int64_t composition_length =
+        (int64_t)mlt_producer_get_length(current_engine()->e_primary_producer);
+
+    int64_t normalized_in = in_frame;
+    int64_t normalized_out = out_frame;
+
+    if (normalized_in < 0) {
+        normalized_in = 0;
+    }
+    if (normalized_out >= composition_length) {
+        normalized_out = composition_length - 1;
+    }
+
+    if (composition_length <= 0 || normalized_out < normalized_in) {
+        if (failure != NULL && failure_size > 0) {
+            snprintf(failure, failure_size, "%s", "The preview parity range is invalid.");
+        }
+        return 0;
+    }
+
+    state->layer_count = current_engine()->e_track_count >= 3 ? 3 : (current_engine()->e_track_count >= 2 ? 2 : 1);
+    state->profile_width = current_engine()->e_profile->width;
+    state->profile_height = current_engine()->e_profile->height;
+    state->profile_fps = mlt_profile_fps(current_engine()->e_profile);
+    state->composition_length = composition_length;
+    state->range_in_frame = normalized_in;
+    state->range_out_frame = normalized_out;
+    state->base_has_audio = current_engine()->e_track_has_audio[0] ? 1 : 0;
+    state->base_audio_gain = preview_track_gain_locked(0);
+
+    if (state->layer_count == 1) {
+        preview_sync_indexed_derived_state(state);
+        state->valid = 1;
+        return 1;
+    }
+
+    if (current_engine()->e_secondary_producer == NULL ||
+        current_engine()->e_secondary_playlist == NULL ||
+        current_engine()->e_video_composite == NULL) {
+        if (failure != NULL && failure_size > 0) {
+            snprintf(failure, failure_size, "%s", "The preview Layer 2 graph is incomplete.");
+        }
+        return 0;
+    }
+
+    state->layer2_start_frame = current_engine()->e_secondary_start_frame;
+    state->layer2_timeline_length =
+        (int64_t)mlt_producer_get_length(
+            mlt_playlist_producer(current_engine()->e_secondary_playlist)
+        );
+    state->layer2_is_still = current_engine()->e_secondary_is_still ? 1 : 0;
+    state->layer2_alpha_mode = current_engine()->e_secondary_alpha_mode;
+    state->layer2_has_audio = current_engine()->e_track_has_audio[1] ? 1 : 0;
+    state->layer2_audio_gain = preview_track_gain_locked(1);
+
+    if (current_engine()->e_secondary_alpha_filter != NULL) {
+        state->layer2_alpha_mode =
+            mlt_properties_get_int(
+                MLT_FILTER_PROPERTIES(current_engine()->e_secondary_alpha_filter),
+                "mlt_player_alpha_mode"
+            );
+    }
+
+    if (!mlt_composition_secondary_base_size(
+            current_engine()->e_profile,
+            current_engine()->e_secondary_producer,
+            state->layer2_is_still,
+            &state->layer2_base_width,
+            &state->layer2_base_height) ||
+        !mlt_composition_get_geometry(
+            current_engine()->e_video_composite,
+            &state->layer2_x,
+            &state->layer2_y,
+            &state->layer2_width,
+            &state->layer2_height,
+            &state->layer2_opacity)) {
+        if (failure != NULL && failure_size > 0) {
+            snprintf(failure, failure_size, "%s", "Could not derive the preview Layer 2 geometry.");
+        }
+        return 0;
+    }
+
+    preview_sync_indexed_derived_state(state);
+
+    if (state->layer_count >= 3) {
+        if (current_engine()->e_tertiary_producer == NULL ||
+            current_engine()->e_tertiary_playlist == NULL ||
+            current_engine()->e_tertiary_video_composite == NULL) {
+            if (failure != NULL && failure_size > 0) {
+                snprintf(failure, failure_size, "%s", "The preview Layer 3 graph is incomplete.");
+            }
+            return 0;
+        }
+
+        MltCompositionLayerDerivedState *layer3 =
+            &state->layers[MLT_COMPOSITION_SECOND_OVERLAY];
+        layer3->present = 1;
+        layer3->start_frame = current_engine()->e_tertiary_start_frame;
+        layer3->timeline_length =
+            (int64_t)mlt_producer_get_length(
+                mlt_playlist_producer(current_engine()->e_tertiary_playlist)
+            );
+        layer3->is_still = current_engine()->e_tertiary_is_still ? 1 : 0;
+        layer3->alpha_mode = current_engine()->e_tertiary_alpha_mode;
+        if (current_engine()->e_tertiary_alpha_filter != NULL) {
+            layer3->alpha_mode = mlt_properties_get_int(
+                MLT_FILTER_PROPERTIES(current_engine()->e_tertiary_alpha_filter),
+                "mlt_player_alpha_mode"
+            );
+        }
+        layer3->base_width = current_engine()->e_tertiary_base_width;
+        layer3->base_height = current_engine()->e_tertiary_base_height;
+        layer3->has_audio = current_engine()->e_track_has_audio[2] ? 1 : 0;
+        layer3->audio_gain = preview_track_gain_locked(2);
+        if (!mlt_composition_get_geometry(
+                current_engine()->e_tertiary_video_composite,
+                &layer3->x,
+                &layer3->y,
+                &layer3->width,
+                &layer3->height,
+                &layer3->opacity)) {
+            if (failure != NULL && failure_size > 0) {
+                snprintf(failure, failure_size, "%s", "Could not derive the preview Layer 3 geometry.");
+            }
+            return 0;
+        }
+    }
+
+    state->valid = 1;
+    return 1;
+}
+
 /*
  * POC 10.9 snapshots the open layered movie and hands only scalar/path state
  * to the export module. The worker still builds a completely independent MLT
@@ -2216,69 +2746,22 @@ int mlt_bridge_export_composition_start(
         return 0;
     }
 
-    g_mutex_lock(&engine_mutex);
-
-    if (primary_producer == NULL ||
-        producer == NULL ||
-        track_count < 1 ||
-        is_still ||
-        !has_video) {
-        g_mutex_unlock(&engine_mutex);
-        mlt_export_set_error("The open movie cannot be exported.");
-        return 0;
-    }
-
-    const char *primary_resource =
-        mlt_properties_get(
-            MLT_PRODUCER_PROPERTIES(primary_producer),
-            "resource"
-        );
-
-    if (primary_resource == NULL || primary_resource[0] == '\0') {
-        g_mutex_unlock(&engine_mutex);
-        mlt_export_set_error("The base layer has no exportable source path.");
-        return 0;
-    }
+    g_mutex_lock(&current_engine()->e_mutex);
 
     MltExportCompositionSnapshot snapshot = {0};
-    snapshot.base_path = primary_resource;
-    snapshot.base_has_audio = track_has_audio[0] ? 1 : 0;
-    snapshot.base_audio_gain =
-        CLAMP(track_audio_gain[0], 0.0, 1.0);
-    snapshot.layer2_audio_gain = 1.0;
-    snapshot.layer2_opacity = 1.0;
-    snapshot.layer2_scale = 1.0;
+    char snapshot_failure[512] = "";
 
-    if (track_count >= 2 &&
-        secondary_producer != NULL &&
-        secondary_playlist != NULL &&
-        video_composite != NULL) {
-        const char *secondary_resource =
-            mlt_properties_get(
-                MLT_PRODUCER_PROPERTIES(secondary_producer),
-                "resource"
-            );
-
-        if (secondary_resource == NULL || secondary_resource[0] == '\0') {
-            g_mutex_unlock(&engine_mutex);
-            mlt_export_set_error("Layer 2 has no exportable source path.");
-            return 0;
-        }
-
-        snapshot.layer2_path = secondary_resource;
-        snapshot.has_layer2 = 1;
-        snapshot.layer2_start_frame = secondary_start_frame;
-        snapshot.layer2_has_audio = track_has_audio[1] ? 1 : 0;
-        snapshot.layer2_is_still = secondary_is_still ? 1 : 0;
-        snapshot.layer2_alpha_mode = secondary_alpha_mode;
-        snapshot.layer2_audio_gain =
-            CLAMP(track_audio_gain[1], 0.0, 1.0);
-        snapshot.layer2_opacity =
-            CLAMP(secondary_opacity, 0.0, 1.0);
-        snapshot.layer2_x = secondary_x;
-        snapshot.layer2_y = secondary_y;
-        snapshot.layer2_scale =
-            CLAMP(secondary_scale, 0.10, 3.0);
+    if (!snapshot_export_composition_locked(
+            &snapshot,
+            snapshot_failure,
+            sizeof(snapshot_failure))) {
+        g_mutex_unlock(&current_engine()->e_mutex);
+        mlt_export_set_error(
+            snapshot_failure[0] != '\0'
+                ? snapshot_failure
+                : "The open movie cannot be exported."
+        );
+        return 0;
     }
 
     const int result =
@@ -2290,8 +2773,89 @@ int mlt_bridge_export_composition_start(
             (MltExportKind)kind
         );
 
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
     return result;
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_debug_composition_parity(
+    int64_t in_frame,
+    int64_t out_frame,
+    MltCompositionDerivedState *preview_state,
+    MltCompositionDerivedState *export_state,
+    char *error_buffer,
+    int error_capacity)
+{
+    ensure_locks();
+
+    if (preview_state != NULL) {
+        memset(preview_state, 0, sizeof(*preview_state));
+        preview_state->layer2_start_frame = -1;
+    }
+    if (export_state != NULL) {
+        memset(export_state, 0, sizeof(*export_state));
+        export_state->layer2_start_frame = -1;
+    }
+    if (error_buffer != NULL && error_capacity > 0) {
+        error_buffer[0] = '\0';
+    }
+
+    if (preview_state == NULL ||
+        export_state == NULL ||
+        out_frame < in_frame ||
+        current_engine() == NULL) {
+        copy_string_value(
+            "Invalid composition parity request.",
+            error_buffer,
+            error_capacity
+        );
+        return 0;
+    }
+
+    if (!export_factory_is_ready()) {
+        copy_string_value(
+            "MLT is not initialized.",
+            error_buffer,
+            error_capacity
+        );
+        return 0;
+    }
+
+    g_mutex_lock(&current_engine()->e_mutex);
+
+    char failure[512] = "";
+    MltExportCompositionSnapshot snapshot = {0};
+
+    if (!snapshot_export_composition_locked(
+            &snapshot,
+            failure,
+            sizeof(failure)) ||
+        !derive_preview_composition_locked(
+            in_frame,
+            out_frame,
+            preview_state,
+            failure,
+            sizeof(failure)) ||
+        !mlt_export_derive_composition(
+            &snapshot,
+            in_frame,
+            out_frame,
+            export_state,
+            failure,
+            (int)sizeof(failure))) {
+        g_mutex_unlock(&current_engine()->e_mutex);
+        copy_string_value(
+            failure[0] != '\0'
+                ? failure
+                : "Could not derive composition parity state.",
+            error_buffer,
+            error_capacity
+        );
+        return 0;
+    }
+
+    g_mutex_unlock(&current_engine()->e_mutex);
+    return 1;
 }
 
 MLT_BRIDGE_EXPORT
@@ -2424,7 +2988,7 @@ static mlt_filter attach_track_audio_filter_locked(
 
     mlt_filter filter =
         mlt_factory_filter(
-            profile,
+            current_engine()->e_profile,
             "volume",
             NULL
         );
@@ -2478,7 +3042,7 @@ static int attach_still_image_converter_locked(
 
     mlt_filter filter =
         mlt_factory_filter(
-            profile,
+            current_engine()->e_profile,
             "avcolor_space",
             NULL
         );
@@ -2486,7 +3050,7 @@ static int attach_still_image_converter_locked(
     if (filter == NULL) {
         filter =
             mlt_factory_filter(
-                profile,
+                current_engine()->e_profile,
                 "imageconvert",
                 NULL
             );
@@ -2521,7 +3085,7 @@ static int still_source_is_composite_ready_locked(
     mlt_producer candidate,
     int require_alpha)
 {
-    if (candidate == NULL || profile == NULL) {
+    if (candidate == NULL || current_engine()->e_profile == NULL) {
         return 0;
     }
 
@@ -2543,8 +3107,8 @@ static int still_source_is_composite_ready_locked(
         frame != NULL) {
         uint8_t *image = NULL;
         mlt_image_format format = mlt_image_yuv422;
-        int width = profile->width;
-        int height = profile->height;
+        int width = current_engine()->e_profile->width;
+        int height = current_engine()->e_profile->height;
 
         if (mlt_frame_get_image(
                 frame,
@@ -2575,23 +3139,23 @@ static int still_source_is_composite_ready_locked(
 /* Call with engine_mutex held. */
 static int apply_secondary_geometry_locked(void)
 {
-    if (track_count < 2 ||
-        video_composite == NULL ||
-        secondary_base_width <= 0.0 ||
-        secondary_base_height <= 0.0 ||
-        !isfinite(secondary_x) ||
-        !isfinite(secondary_y) ||
-        !isfinite(secondary_scale) ||
-        secondary_scale <= 0.0) {
+    if (current_engine()->e_track_count < 2 ||
+        current_engine()->e_video_composite == NULL ||
+        current_engine()->e_secondary_base_width <= 0.0 ||
+        current_engine()->e_secondary_base_height <= 0.0 ||
+        !isfinite(current_engine()->e_secondary_x) ||
+        !isfinite(current_engine()->e_secondary_y) ||
+        !isfinite(current_engine()->e_secondary_scale) ||
+        current_engine()->e_secondary_scale <= 0.0) {
         return 0;
     }
 
     const double width =
-        secondary_base_width *
-        secondary_scale;
+        current_engine()->e_secondary_base_width *
+        current_engine()->e_secondary_scale;
     const double height =
-        secondary_base_height *
-        secondary_scale;
+        current_engine()->e_secondary_base_height *
+        current_engine()->e_secondary_scale;
 
     if (!isfinite(width) ||
         !isfinite(height) ||
@@ -2602,23 +3166,23 @@ static int apply_secondary_geometry_locked(void)
 
     mlt_service_lock(
         MLT_TRANSITION_SERVICE(
-            video_composite
+            current_engine()->e_video_composite
         )
     );
 
     const int applied =
         mlt_composition_set_geometry(
-            video_composite,
-            secondary_x,
-            secondary_y,
+            current_engine()->e_video_composite,
+            current_engine()->e_secondary_x,
+            current_engine()->e_secondary_y,
             width,
             height,
-            secondary_opacity
+            current_engine()->e_secondary_opacity
         );
 
     mlt_service_unlock(
         MLT_TRANSITION_SERVICE(
-            video_composite
+            current_engine()->e_video_composite
         )
     );
 
@@ -2635,21 +3199,21 @@ static int read_secondary_rect_locked(
     mlt_rect *out_rect)
 {
     if (out_rect == NULL ||
-        track_count < 2 ||
-        video_composite == NULL) {
+        current_engine()->e_track_count < 2 ||
+        current_engine()->e_video_composite == NULL) {
         return 0;
     }
 
     mlt_service_lock(
         MLT_TRANSITION_SERVICE(
-            video_composite
+            current_engine()->e_video_composite
         )
     );
 
     const mlt_rect rect =
         mlt_properties_anim_get_rect(
             MLT_TRANSITION_PROPERTIES(
-                video_composite
+                current_engine()->e_video_composite
             ),
             "geometry",
             0,
@@ -2658,7 +3222,7 @@ static int read_secondary_rect_locked(
 
     mlt_service_unlock(
         MLT_TRANSITION_SERVICE(
-            video_composite
+            current_engine()->e_video_composite
         )
     );
 
@@ -2668,6 +3232,103 @@ static int read_secondary_rect_locked(
         !isfinite(rect.h) ||
         rect.w <= 0.0 ||
         rect.h <= 0.0) {
+        return 0;
+    }
+
+    *out_rect = rect;
+    return 1;
+}
+
+/* Call with engine mutex held. */
+static int apply_tertiary_geometry_locked(void)
+{
+    if (current_engine()->e_track_count < 3 ||
+        current_engine()->e_tertiary_video_composite == NULL ||
+        current_engine()->e_tertiary_base_width <= 0.0 ||
+        current_engine()->e_tertiary_base_height <= 0.0 ||
+        !isfinite(current_engine()->e_tertiary_x) ||
+        !isfinite(current_engine()->e_tertiary_y) ||
+        !isfinite(current_engine()->e_tertiary_scale) ||
+        current_engine()->e_tertiary_scale <= 0.0) {
+        return 0;
+    }
+
+    const double width =
+        current_engine()->e_tertiary_base_width *
+        current_engine()->e_tertiary_scale;
+    const double height =
+        current_engine()->e_tertiary_base_height *
+        current_engine()->e_tertiary_scale;
+
+    if (!isfinite(width) || !isfinite(height) ||
+        width <= 0.0 || height <= 0.0) {
+        return 0;
+    }
+
+    mlt_service_lock(
+        MLT_TRANSITION_SERVICE(
+            current_engine()->e_tertiary_video_composite
+        )
+    );
+
+    const int applied =
+        mlt_composition_set_geometry(
+            current_engine()->e_tertiary_video_composite,
+            current_engine()->e_tertiary_x,
+            current_engine()->e_tertiary_y,
+            width,
+            height,
+            current_engine()->e_tertiary_opacity
+        );
+
+    mlt_service_unlock(
+        MLT_TRANSITION_SERVICE(
+            current_engine()->e_tertiary_video_composite
+        )
+    );
+
+    if (!applied) {
+        return 0;
+    }
+
+    invalidate_frames();
+    refresh_locked();
+    return 1;
+}
+
+static int read_tertiary_rect_locked(mlt_rect *out_rect)
+{
+    if (out_rect == NULL ||
+        current_engine()->e_track_count < 3 ||
+        current_engine()->e_tertiary_video_composite == NULL) {
+        return 0;
+    }
+
+    mlt_service_lock(
+        MLT_TRANSITION_SERVICE(
+            current_engine()->e_tertiary_video_composite
+        )
+    );
+
+    const mlt_rect rect =
+        mlt_properties_anim_get_rect(
+            MLT_TRANSITION_PROPERTIES(
+                current_engine()->e_tertiary_video_composite
+            ),
+            "geometry",
+            0,
+            0
+        );
+
+    mlt_service_unlock(
+        MLT_TRANSITION_SERVICE(
+            current_engine()->e_tertiary_video_composite
+        )
+    );
+
+    if (!isfinite(rect.x) || !isfinite(rect.y) ||
+        !isfinite(rect.w) || !isfinite(rect.h) ||
+        rect.w <= 0.0 || rect.h <= 0.0) {
         return 0;
     }
 
@@ -2727,8 +3388,8 @@ static int producer_frame_reports_alpha_locked(
         frame != NULL) {
         uint8_t *image = NULL;
         mlt_image_format format = mlt_image_none;
-        int width = profile != NULL ? profile->width : 0;
-        int height = profile != NULL ? profile->height : 0;
+        int width = current_engine()->e_profile != NULL ? current_engine()->e_profile->width : 0;
+        int height = current_engine()->e_profile != NULL ? current_engine()->e_profile->height : 0;
 
         if (mlt_frame_get_image(
                 frame,
@@ -2805,9 +3466,13 @@ MLT_BRIDGE_EXPORT
 int mlt_bridge_open(
     const char *path)
 {
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
 
     if (repository == NULL ||
         path == NULL ||
@@ -2817,27 +3482,27 @@ int mlt_bridge_open(
             "or the path is invalid."
         );
 
-        g_mutex_unlock(&engine_mutex);
+        g_mutex_unlock(&current_engine()->e_mutex);
 
         return 0;
     }
 
     close_producer_locked();
 
-    if (profile != NULL) {
-        mlt_profile_close(profile);
+    if (current_engine()->e_profile != NULL) {
+        mlt_profile_close(current_engine()->e_profile);
 
-        profile = NULL;
+        current_engine()->e_profile = NULL;
     }
 
-    profile = mlt_profile_init(NULL);
+    current_engine()->e_profile = mlt_profile_init(NULL);
 
-    if (profile == NULL) {
+    if (current_engine()->e_profile == NULL) {
         set_error(
             "Could not create an MLT profile."
         );
 
-        g_mutex_unlock(&engine_mutex);
+        g_mutex_unlock(&current_engine()->e_mutex);
 
         return 0;
     }
@@ -2849,7 +3514,7 @@ int mlt_bridge_open(
      */
     mlt_producer probe_producer =
         mlt_factory_producer(
-            profile,
+            current_engine()->e_profile,
             NULL,
             path
         );
@@ -2859,42 +3524,42 @@ int mlt_bridge_open(
             "MLT could not open the selected media."
         );
 
-        g_mutex_unlock(&engine_mutex);
+        g_mutex_unlock(&current_engine()->e_mutex);
 
         return 0;
     }
 
     mlt_producer_probe(probe_producer);
-    mlt_profile_from_producer(profile, probe_producer);
+    mlt_profile_from_producer(current_engine()->e_profile, probe_producer);
     mlt_producer_close(probe_producer);
 
-    primary_producer =
+    current_engine()->e_primary_producer =
         mlt_factory_producer(
-            profile,
+            current_engine()->e_profile,
             NULL,
             path
         );
 
-    producer = primary_producer;
+    current_engine()->e_producer = current_engine()->e_primary_producer;
 
-    if (producer == NULL) {
+    if (current_engine()->e_producer == NULL) {
         set_error(
             "MLT could not reopen the media "
             "with the detected profile."
         );
 
-        g_mutex_unlock(&engine_mutex);
+        g_mutex_unlock(&current_engine()->e_mutex);
 
         return 0;
     }
 
-    mlt_producer_probe(producer);
+    mlt_producer_probe(current_engine()->e_producer);
 
     mlt_properties producer_properties =
-        MLT_PRODUCER_PROPERTIES(producer);
+        MLT_PRODUCER_PROPERTIES(current_engine()->e_producer);
 
     const MediaKind kind =
-        classify_producer_locked(producer);
+        classify_producer_locked(current_engine()->e_producer);
 
     if (kind == MEDIA_UNSUPPORTED) {
         char message[512];
@@ -2917,16 +3582,16 @@ int mlt_bridge_open(
 
         close_producer_locked();
 
-        g_mutex_unlock(&engine_mutex);
+        g_mutex_unlock(&current_engine()->e_mutex);
 
         return 0;
     }
 
-    is_still = (kind == MEDIA_STILL);
+    current_engine()->e_is_still = (kind == MEDIA_STILL);
 
-    if (is_still) {
-        has_video = 1;
-        has_audio = 0;
+    if (current_engine()->e_is_still) {
+        current_engine()->e_has_video = 1;
+        current_engine()->e_has_audio = 0;
     } else {
         /*
          * avformat sets these indices to -1 when the corresponding
@@ -2934,7 +3599,7 @@ int mlt_bridge_open(
          * have no evidence either way, so assume the stream exists
          * and let the consumer produce silence or a test card.
          */
-        has_video =
+        current_engine()->e_has_video =
             mlt_properties_get(
                 producer_properties,
                 "video_index") == NULL ||
@@ -2942,7 +3607,7 @@ int mlt_bridge_open(
                 producer_properties,
                 "video_index") >= 0;
 
-        has_audio =
+        current_engine()->e_has_audio =
             mlt_properties_get(
                 producer_properties,
                 "audio_index") == NULL ||
@@ -2956,25 +3621,25 @@ int mlt_bridge_open(
      * avformat. video_index and audio_index are absolute container stream
      * indices, which is exactly what the inspector should report.
      */
-    stream_count = 0;
-    selected_video_stream_index = -1;
-    selected_audio_stream_index = -1;
+    current_engine()->e_stream_count = 0;
+    current_engine()->e_selected_video_stream_index = -1;
+    current_engine()->e_selected_audio_stream_index = -1;
 
-    video_codec_name[0] = '\0';
-    video_codec_long_name[0] = '\0';
-    audio_codec_name[0] = '\0';
-    audio_codec_long_name[0] = '\0';
+    current_engine()->e_video_codec_name[0] = '\0';
+    current_engine()->e_video_codec_long_name[0] = '\0';
+    current_engine()->e_audio_codec_name[0] = '\0';
+    current_engine()->e_audio_codec_long_name[0] = '\0';
 
-    video_pixel_format[0] = '\0';
-    video_colorspace = -1;
-    video_color_trc = -1;
-    video_color_range[0] = '\0';
+    current_engine()->e_video_pixel_format[0] = '\0';
+    current_engine()->e_video_colorspace = -1;
+    current_engine()->e_video_color_trc = -1;
+    current_engine()->e_video_color_range[0] = '\0';
 
-    if (!is_still) {
+    if (!current_engine()->e_is_still) {
         if (mlt_properties_get(
                 producer_properties,
                 "meta.media.nb_streams") != NULL) {
-            stream_count =
+            current_engine()->e_stream_count =
                 mlt_properties_get_int(
                     producer_properties,
                     "meta.media.nb_streams"
@@ -2984,7 +3649,7 @@ int mlt_bridge_open(
         if (mlt_properties_get(
                 producer_properties,
                 "video_index") != NULL) {
-            selected_video_stream_index =
+            current_engine()->e_selected_video_stream_index =
                 mlt_properties_get_int(
                     producer_properties,
                     "video_index"
@@ -2994,7 +3659,7 @@ int mlt_bridge_open(
         if (mlt_properties_get(
                 producer_properties,
                 "audio_index") != NULL) {
-            selected_audio_stream_index =
+            current_engine()->e_selected_audio_stream_index =
                 mlt_properties_get_int(
                     producer_properties,
                     "audio_index"
@@ -3003,25 +3668,25 @@ int mlt_bridge_open(
 
         read_codec_metadata_locked(
             producer_properties,
-            selected_video_stream_index,
-            video_codec_name,
-            sizeof(video_codec_name),
-            video_codec_long_name,
-            sizeof(video_codec_long_name)
+            current_engine()->e_selected_video_stream_index,
+            current_engine()->e_video_codec_name,
+            sizeof(current_engine()->e_video_codec_name),
+            current_engine()->e_video_codec_long_name,
+            sizeof(current_engine()->e_video_codec_long_name)
         );
 
         read_video_color_metadata_locked(
             producer_properties,
-            selected_video_stream_index
+            current_engine()->e_selected_video_stream_index
         );
 
         read_codec_metadata_locked(
             producer_properties,
-            selected_audio_stream_index,
-            audio_codec_name,
-            sizeof(audio_codec_name),
-            audio_codec_long_name,
-            sizeof(audio_codec_long_name)
+            current_engine()->e_selected_audio_stream_index,
+            current_engine()->e_audio_codec_name,
+            sizeof(current_engine()->e_audio_codec_name),
+            current_engine()->e_audio_codec_long_name,
+            sizeof(current_engine()->e_audio_codec_long_name)
         );
 
         read_stream_inspection_locked(producer_properties);
@@ -3032,11 +3697,11 @@ int mlt_bridge_open(
      * Prefer the selected video stream's timecode, then the container tag,
      * then any stream-level timecode if the selected stream has none.
      */
-    source_timecode[0] = '\0';
+    current_engine()->e_source_timecode[0] = '\0';
 
     const char *timecode = NULL;
 
-    if (!is_still) {
+    if (!current_engine()->e_is_still) {
         const int video_index =
             mlt_properties_get_int(
                 producer_properties,
@@ -3107,74 +3772,85 @@ int mlt_bridge_open(
     if (timecode != NULL &&
         timecode[0] != '\0') {
         snprintf(
-            source_timecode,
-            sizeof(source_timecode),
+            current_engine()->e_source_timecode,
+            sizeof(current_engine()->e_source_timecode),
             "%s",
             timecode
         );
     }
 
-    if (mlt_producer_get_length(producer) <= 0) {
+    if (mlt_producer_get_length(current_engine()->e_producer) <= 0) {
         set_error("The media reports no duration.");
 
         close_producer_locked();
 
-        g_mutex_unlock(&engine_mutex);
+        g_mutex_unlock(&current_engine()->e_mutex);
 
         return 0;
     }
 
-    track_count = 1;
-    secondary_start_frame = -1;
-    secondary_opacity = 1.0;
-    secondary_x = 0.0;
-    secondary_y = 0.0;
-    secondary_scale = 1.0;
-    secondary_base_width = 0.0;
-    secondary_base_height = 0.0;
-    secondary_has_alpha = 0;
-    secondary_alpha_mode = 0;
-    secondary_is_still = 0;
-    secondary_alpha_filter = NULL;
+    current_engine()->e_track_count = 1;
+    current_engine()->e_secondary_start_frame = -1;
+    current_engine()->e_secondary_opacity = 1.0;
+    current_engine()->e_secondary_x = 0.0;
+    current_engine()->e_secondary_y = 0.0;
+    current_engine()->e_secondary_scale = 1.0;
+    current_engine()->e_secondary_base_width = 0.0;
+    current_engine()->e_secondary_base_height = 0.0;
+    current_engine()->e_secondary_has_alpha = 0;
+    current_engine()->e_secondary_alpha_mode = 0;
+    current_engine()->e_secondary_is_still = 0;
+    current_engine()->e_secondary_alpha_filter = NULL;
+    current_engine()->e_tertiary_start_frame = -1;
+    current_engine()->e_tertiary_opacity = 1.0;
+    current_engine()->e_tertiary_x = 0.0;
+    current_engine()->e_tertiary_y = 0.0;
+    current_engine()->e_tertiary_scale = 1.0;
+    current_engine()->e_tertiary_base_width = 0.0;
+    current_engine()->e_tertiary_base_height = 0.0;
+    current_engine()->e_tertiary_has_alpha = 0;
+    current_engine()->e_tertiary_alpha_mode = 0;
+    current_engine()->e_tertiary_is_still = 0;
+    current_engine()->e_tertiary_alpha_filter = NULL;
 
-    track_audio_gain[0] = 1.0;
-    track_audio_gain[1] = 1.0;
-    track_has_audio[0] = has_audio ? 1 : 0;
-    track_has_audio[1] = 0;
-    track_audio_filters[0] = NULL;
-    track_audio_filters[1] = NULL;
+    for (int index = 0; index < MLT_COMPOSITION_MAX_LAYERS; index++) {
+        current_engine()->e_track_audio_gain[index] = 1.0;
+        current_engine()->e_track_has_audio[index] = 0;
+        current_engine()->e_track_audio_filters[index] = NULL;
+    }
+    current_engine()->e_track_has_audio[0] = current_engine()->e_has_audio ? 1 : 0;
 
-    if (track_has_audio[0]) {
-        track_audio_filters[0] =
+    if (current_engine()->e_track_has_audio[0]) {
+        current_engine()->e_track_audio_filters[0] =
             attach_track_audio_filter_locked(
-                primary_producer
+                current_engine()->e_primary_producer
             );
     }
 
     g_atomic_int_set(
-        &target_width,
-        profile->width
+        &current_engine()->e_target_width,
+        current_engine()->e_profile->width
     );
 
     g_atomic_int_set(
-        &target_height,
-        profile->height
+        &current_engine()->e_target_height,
+        current_engine()->e_profile->height
     );
 
-    mlt_producer_set_speed(producer, 0.0);
-    mlt_producer_seek(producer, 0);
+    mlt_producer_set_speed(current_engine()->e_producer, 0.0);
+    mlt_producer_seek(current_engine()->e_producer, 0);
 
     if (g_atomic_int_get(
             &current_engine()->e_preview_enabled)) {
         if (!create_consumer_locked()) {
             close_producer_locked();
 
-            g_mutex_unlock(&engine_mutex);
+            g_mutex_unlock(&current_engine()->e_mutex);
 
             return 0;
         }
 
-        if (mlt_consumer_start(consumer) != 0) {
+        if (mlt_consumer_start(current_engine()->e_consumer) != 0) {
             set_error(
                 "MLT could not start the "
                 "audio and preview consumer."
@@ -3182,7 +3858,7 @@ int mlt_bridge_open(
 
             close_producer_locked();
 
-            g_mutex_unlock(&engine_mutex);
+            g_mutex_unlock(&current_engine()->e_mutex);
 
             return 0;
         }
@@ -3192,7 +3868,7 @@ int mlt_bridge_open(
 
     set_error(NULL);
 
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     /*
      * Drop any frame left over from the previous file so the first
@@ -3203,14 +3879,563 @@ int mlt_bridge_open(
     return 1;
 }
 
+typedef struct _TertiaryInitialState {
+    double x;
+    double y;
+    double scale;
+    double opacity;
+    int alpha_mode;
+    double audio_gain;
+} TertiaryInitialState;
+
+/* Call with engine mutex held. */
+static int add_tertiary_track_locked(
+    const char *path,
+    int64_t start_frame,
+    const TertiaryInitialState *initial_state)
+{
+    const mlt_position primary_length =
+        mlt_producer_get_length(current_engine()->e_primary_producer);
+
+    if (primary_length <= 0 ||
+        current_engine()->e_secondary_playlist == NULL ||
+        current_engine()->e_tractor == NULL ||
+        current_engine()->e_video_composite == NULL) {
+        set_error("Layer 3 requires a complete two-layer composition.");
+        return 0;
+    }
+
+    const int prior_has_audio = current_engine()->e_has_audio;
+    mlt_producer old_top = current_engine()->e_producer;
+
+    mlt_position saved_position =
+        mlt_producer_position(old_top);
+
+    if (current_engine()->e_consumer != NULL &&
+        !mlt_consumer_is_stopped(current_engine()->e_consumer) &&
+        mlt_producer_get_speed(old_top) != 0.0) {
+        const double speed = mlt_producer_get_speed(old_top);
+        saved_position = mlt_consumer_position(current_engine()->e_consumer);
+        if (speed > 0.0) {
+            saved_position += 1;
+        } else if (speed < 0.0) {
+            saved_position -= 1;
+        }
+    }
+
+    if (saved_position < 0) {
+        saved_position = 0;
+    }
+    if (saved_position >= primary_length) {
+        saved_position = primary_length - 1;
+    }
+
+    mlt_producer_set_speed(old_top, 0.0);
+    close_consumer_locked();
+
+    mlt_producer pending_tertiary = NULL;
+    mlt_playlist pending_tertiary_playlist = NULL;
+    mlt_tractor pending_tractor = NULL;
+    mlt_transition pending_layer2_composite = NULL;
+    mlt_transition pending_layer2_mix = NULL;
+    mlt_transition pending_layer3_composite = NULL;
+    mlt_transition pending_layer3_mix = NULL;
+    mlt_filter pending_tertiary_audio_filter = NULL;
+    mlt_filter pending_tertiary_alpha_filter = NULL;
+
+    int tertiary_has_audio = 0;
+    int tertiary_has_alpha_value = 0;
+    int tertiary_still = 0;
+    double pending_base_width = 0.0;
+    double pending_base_height = 0.0;
+    double pending_x = 0.0;
+    double pending_y = 0.0;
+    double pending_scale = 1.0;
+    double pending_opacity = 1.0;
+    int pending_alpha_mode = 0;
+    double pending_audio_gain = 1.0;
+    int succeeded = 0;
+    char failure[512] = "";
+
+    const int path_is_still = path_has_still_image_extension(path);
+
+    if (path_is_still) {
+        pending_tertiary =
+            mlt_factory_producer(current_engine()->e_profile, "pixbuf", path);
+        if (pending_tertiary == NULL) {
+            pending_tertiary =
+                mlt_factory_producer(current_engine()->e_profile, "avformat", path);
+        }
+    } else {
+        pending_tertiary =
+            mlt_factory_producer(current_engine()->e_profile, NULL, path);
+    }
+
+    if (pending_tertiary == NULL) {
+        snprintf(failure, sizeof(failure), "%s", "MLT could not open Layer 3.");
+        goto add_tertiary_cleanup;
+    }
+
+    if (path_is_still &&
+        !attach_still_image_converter_locked(pending_tertiary)) {
+        snprintf(
+            failure,
+            sizeof(failure),
+            "%s",
+            "Could not install Layer 3 still-image color conversion support."
+        );
+        goto add_tertiary_cleanup;
+    }
+
+    mlt_producer_probe(pending_tertiary);
+
+    const MediaKind tertiary_kind =
+        classify_producer_locked(pending_tertiary);
+
+    if ((tertiary_kind != MEDIA_TIMED && tertiary_kind != MEDIA_STILL) ||
+        !producer_has_stream_locked(pending_tertiary, "video_index", "video")) {
+        snprintf(
+            failure,
+            sizeof(failure),
+            "%s",
+            "Layer 3 must be video or a still image."
+        );
+        goto add_tertiary_cleanup;
+    }
+
+    tertiary_still = path_is_still || tertiary_kind == MEDIA_STILL;
+    tertiary_has_alpha_value =
+        producer_has_alpha_locked(pending_tertiary, tertiary_kind);
+
+    if (tertiary_still &&
+        !still_source_is_composite_ready_locked(
+            pending_tertiary,
+            tertiary_has_alpha_value)) {
+        snprintf(
+            failure,
+            sizeof(failure),
+            "%s",
+            "Layer 3 could not provide composite-safe YUV422 with alpha."
+        );
+        goto add_tertiary_cleanup;
+    }
+
+    if (!mlt_composition_secondary_base_size(
+            current_engine()->e_profile,
+            pending_tertiary,
+            tertiary_still,
+            &pending_base_width,
+            &pending_base_height)) {
+        snprintf(failure, sizeof(failure), "%s", "Layer 3 has invalid presentation geometry.");
+        goto add_tertiary_cleanup;
+    }
+
+    pending_x =
+        ((double)current_engine()->e_profile->width - pending_base_width) / 2.0;
+    pending_y =
+        ((double)current_engine()->e_profile->height - pending_base_height) / 2.0;
+
+    if (initial_state != NULL) {
+        if (!isfinite(initial_state->x) ||
+            !isfinite(initial_state->y) ||
+            !isfinite(initial_state->scale) ||
+            !isfinite(initial_state->opacity) ||
+            !isfinite(initial_state->audio_gain) ||
+            initial_state->alpha_mode < 0 ||
+            initial_state->alpha_mode > 2) {
+            snprintf(
+                failure,
+                sizeof(failure),
+                "%s",
+                "Layer 3 restore state is invalid."
+            );
+            goto add_tertiary_cleanup;
+        }
+
+        pending_x = initial_state->x;
+        pending_y = initial_state->y;
+        pending_scale = CLAMP(initial_state->scale, 0.10, 3.0);
+        pending_opacity = CLAMP(initial_state->opacity, 0.0, 1.0);
+        pending_alpha_mode = initial_state->alpha_mode;
+        pending_audio_gain = CLAMP(initial_state->audio_gain, 0.0, 1.0);
+    }
+
+    mlt_position pending_start = 0;
+    const MltSecondaryPlacementResult placement_result =
+        mlt_composition_build_secondary_playlist(
+            current_engine()->e_profile,
+            pending_tertiary,
+            (mlt_position)start_frame,
+            primary_length,
+            tertiary_still,
+            &pending_tertiary_playlist,
+            &pending_start
+        );
+
+    if (placement_result != MLT_SECONDARY_PLACEMENT_OK) {
+        const char *placement_error = "Could not configure Layer 3 timing and placement.";
+        switch (placement_result) {
+            case MLT_SECONDARY_PLACEMENT_NO_DURATION:
+                placement_error = "Layer 3 reports no usable duration.";
+                break;
+            case MLT_SECONDARY_PLACEMENT_NO_ROOM:
+                placement_error = "There is no room for Layer 3 at that playhead.";
+                break;
+            case MLT_SECONDARY_PLACEMENT_SOURCE_INIT_FAILED:
+                placement_error = "MLT could not initialize Layer 3.";
+                break;
+            case MLT_SECONDARY_PLACEMENT_PLAYLIST_CREATE_FAILED:
+                placement_error = "Could not create the offset playlist for Layer 3.";
+                break;
+            case MLT_SECONDARY_PLACEMENT_LEAD_IN_FAILED:
+                placement_error = "Could not create the blank lead-in for Layer 3.";
+                break;
+            case MLT_SECONDARY_PLACEMENT_APPEND_FAILED:
+                placement_error = "Could not place the added media on Layer 3.";
+                break;
+            case MLT_SECONDARY_PLACEMENT_INVALID_ARGUMENT:
+            case MLT_SECONDARY_PLACEMENT_OK:
+            default:
+                break;
+        }
+        snprintf(failure, sizeof(failure), "%s", placement_error);
+        goto add_tertiary_cleanup;
+    }
+
+    tertiary_has_audio =
+        tertiary_still
+            ? 0
+            : producer_has_stream_locked(pending_tertiary, "audio_index", "audio");
+
+    if (tertiary_has_audio) {
+        pending_tertiary_audio_filter =
+            attach_track_audio_filter_locked(
+                mlt_playlist_producer(pending_tertiary_playlist)
+            );
+        if (pending_tertiary_audio_filter == NULL) {
+            snprintf(failure, sizeof(failure), "%s", "Could not create Layer 3 audio level support.");
+            goto add_tertiary_cleanup;
+        }
+
+        mlt_service_lock(MLT_FILTER_SERVICE(pending_tertiary_audio_filter));
+        mlt_properties_set_double(
+            MLT_FILTER_PROPERTIES(pending_tertiary_audio_filter),
+            "gain",
+            pending_audio_gain
+        );
+        mlt_service_unlock(MLT_FILTER_SERVICE(pending_tertiary_audio_filter));
+    }
+
+    pending_tertiary_alpha_filter =
+        attach_secondary_alpha_filter_locked(pending_tertiary);
+    if (pending_tertiary_alpha_filter == NULL) {
+        snprintf(failure, sizeof(failure), "%s", "Could not create Layer 3 alpha interpretation support.");
+        goto add_tertiary_cleanup;
+    }
+
+    if (!mlt_composition_apply_alpha_mode(
+            pending_tertiary_alpha_filter,
+            pending_alpha_mode)) {
+        snprintf(
+            failure,
+            sizeof(failure),
+            "%s",
+            "Could not apply the restored Layer 3 alpha interpretation."
+        );
+        goto add_tertiary_cleanup;
+    }
+
+    pending_tractor = mlt_tractor_new();
+    if (pending_tractor == NULL) {
+        snprintf(failure, sizeof(failure), "%s", "Could not create the three-layer MLT tractor.");
+        goto add_tertiary_cleanup;
+    }
+
+    mlt_service_set_profile(
+        MLT_TRACTOR_SERVICE(pending_tractor),
+        current_engine()->e_profile
+    );
+
+    if (mlt_tractor_set_track(pending_tractor, current_engine()->e_primary_producer, 0) != 0 ||
+        mlt_tractor_set_track(
+            pending_tractor,
+            mlt_playlist_producer(current_engine()->e_secondary_playlist),
+            1) != 0 ||
+        mlt_tractor_set_track(
+            pending_tractor,
+            mlt_playlist_producer(pending_tertiary_playlist),
+            2) != 0) {
+        snprintf(failure, sizeof(failure), "%s", "Could not connect all three layers to the tractor.");
+        goto add_tertiary_cleanup;
+    }
+
+    mlt_field field = mlt_tractor_field(pending_tractor);
+    if (field == NULL) {
+        snprintf(failure, sizeof(failure), "%s", "The three-layer tractor did not provide an MLT field.");
+        goto add_tertiary_cleanup;
+    }
+
+    pending_layer2_composite =
+        mlt_factory_transition(current_engine()->e_profile, "composite", NULL);
+    if (pending_layer2_composite == NULL ||
+        !mlt_composition_configure_transition(
+            pending_layer2_composite,
+            current_engine()->e_secondary_x,
+            current_engine()->e_secondary_y,
+            current_engine()->e_secondary_base_width * current_engine()->e_secondary_scale,
+            current_engine()->e_secondary_base_height * current_engine()->e_secondary_scale,
+            current_engine()->e_secondary_opacity) ||
+        mlt_field_plant_transition(field, pending_layer2_composite, 0, 1) != 0) {
+        snprintf(failure, sizeof(failure), "%s", "Could not rebuild the Layer 2 video composite.");
+        goto add_tertiary_cleanup;
+    }
+
+    if (current_engine()->e_track_has_audio[1]) {
+        pending_layer2_mix =
+            mlt_factory_transition(current_engine()->e_profile, "mix", NULL);
+        if (pending_layer2_mix == NULL) {
+            snprintf(failure, sizeof(failure), "%s", "Could not rebuild the Layer 2 audio mix.");
+            goto add_tertiary_cleanup;
+        }
+        mlt_properties mix_properties = MLT_TRANSITION_PROPERTIES(pending_layer2_mix);
+        mlt_properties_set_int(mix_properties, "always_active", 1);
+        mlt_properties_set_double(mix_properties, "start", 1.0);
+        mlt_properties_set_double(mix_properties, "end", 1.0);
+        mlt_properties_set_int(mix_properties, "sum", 1);
+        if (mlt_field_plant_transition(field, pending_layer2_mix, 0, 1) != 0) {
+            snprintf(failure, sizeof(failure), "%s", "Could not rebuild the Layer 2 audio transition.");
+            goto add_tertiary_cleanup;
+        }
+    }
+
+    pending_layer3_composite =
+        mlt_factory_transition(current_engine()->e_profile, "composite", NULL);
+    if (pending_layer3_composite == NULL ||
+        !mlt_composition_configure_transition(
+            pending_layer3_composite,
+            pending_x,
+            pending_y,
+            pending_base_width * pending_scale,
+            pending_base_height * pending_scale,
+            pending_opacity) ||
+        mlt_field_plant_transition(field, pending_layer3_composite, 0, 2) != 0) {
+        snprintf(failure, sizeof(failure), "%s", "Could not plant the Layer 3 video composite.");
+        goto add_tertiary_cleanup;
+    }
+
+    if (tertiary_has_audio) {
+        pending_layer3_mix =
+            mlt_factory_transition(current_engine()->e_profile, "mix", NULL);
+        if (pending_layer3_mix == NULL) {
+            snprintf(failure, sizeof(failure), "%s", "Could not create the Layer 3 audio mix.");
+            goto add_tertiary_cleanup;
+        }
+        mlt_properties mix_properties = MLT_TRANSITION_PROPERTIES(pending_layer3_mix);
+        mlt_properties_set_int(mix_properties, "always_active", 1);
+        mlt_properties_set_double(mix_properties, "start", 1.0);
+        mlt_properties_set_double(mix_properties, "end", 1.0);
+        mlt_properties_set_int(mix_properties, "sum", 1);
+        if (mlt_field_plant_transition(field, pending_layer3_mix, 0, 2) != 0) {
+            snprintf(failure, sizeof(failure), "%s", "Could not plant the Layer 3 audio mix.");
+            goto add_tertiary_cleanup;
+        }
+    }
+
+    mlt_tractor_refresh(pending_tractor);
+    mlt_producer pending_top = mlt_tractor_producer(pending_tractor);
+    if (pending_top == NULL) {
+        snprintf(failure, sizeof(failure), "%s", "The three-layer tractor did not expose a producer.");
+        goto add_tertiary_cleanup;
+    }
+
+    mlt_producer_set_in_and_out(pending_top, 0, primary_length - 1);
+    mlt_producer_set_speed(pending_top, 0.0);
+    mlt_producer_seek(pending_top, saved_position);
+    current_engine()->e_producer = pending_top;
+
+    if (g_atomic_int_get(&current_engine()->e_preview_enabled)) {
+        if (!create_consumer_locked()) {
+            snprintf(
+                failure,
+                sizeof(failure),
+                "%s",
+                current_engine()->e_last_error[0] != '\0'
+                    ? current_engine()->e_last_error
+                    : "Could not create preview for the three-layer tractor."
+            );
+            current_engine()->e_producer = old_top;
+            goto add_tertiary_cleanup;
+        }
+
+        if (mlt_consumer_start(current_engine()->e_consumer) != 0) {
+            snprintf(failure, sizeof(failure), "%s", "MLT could not start three-layer preview.");
+            close_consumer_locked();
+            current_engine()->e_producer = old_top;
+            goto add_tertiary_cleanup;
+        }
+        refresh_locked();
+    }
+
+    /* The new tractor now owns the active graph; retire the old two-layer graph. */
+    if (current_engine()->e_tractor != NULL) {
+        mlt_tractor_close(current_engine()->e_tractor);
+    }
+    if (current_engine()->e_video_composite != NULL) {
+        mlt_transition_close(current_engine()->e_video_composite);
+    }
+    if (current_engine()->e_audio_mix != NULL) {
+        mlt_transition_close(current_engine()->e_audio_mix);
+    }
+
+    current_engine()->e_tractor = pending_tractor;
+    current_engine()->e_video_composite = pending_layer2_composite;
+    current_engine()->e_audio_mix = pending_layer2_mix;
+    current_engine()->e_tertiary_video_composite = pending_layer3_composite;
+    current_engine()->e_tertiary_audio_mix = pending_layer3_mix;
+    current_engine()->e_tertiary_producer = pending_tertiary;
+    current_engine()->e_tertiary_playlist = pending_tertiary_playlist;
+    current_engine()->e_tertiary_alpha_filter = pending_tertiary_alpha_filter;
+    current_engine()->e_tertiary_has_alpha = tertiary_has_alpha_value ? 1 : 0;
+    current_engine()->e_tertiary_alpha_mode = pending_alpha_mode;
+    current_engine()->e_tertiary_is_still = tertiary_still ? 1 : 0;
+    current_engine()->e_tertiary_start_frame = (int64_t)pending_start;
+    current_engine()->e_tertiary_opacity = pending_opacity;
+    current_engine()->e_tertiary_x = pending_x;
+    current_engine()->e_tertiary_y = pending_y;
+    current_engine()->e_tertiary_scale = pending_scale;
+    current_engine()->e_tertiary_base_width = pending_base_width;
+    current_engine()->e_tertiary_base_height = pending_base_height;
+    current_engine()->e_track_has_audio[2] = tertiary_has_audio ? 1 : 0;
+    current_engine()->e_track_audio_gain[2] =
+        tertiary_has_audio ? pending_audio_gain : 1.0;
+    current_engine()->e_track_audio_filters[2] = pending_tertiary_audio_filter;
+    current_engine()->e_track_count = 3;
+    current_engine()->e_has_audio = prior_has_audio || tertiary_has_audio;
+
+    pending_tertiary = NULL;
+    pending_tertiary_playlist = NULL;
+    pending_tractor = NULL;
+    pending_layer2_composite = NULL;
+    pending_layer2_mix = NULL;
+    pending_layer3_composite = NULL;
+    pending_layer3_mix = NULL;
+    pending_tertiary_alpha_filter = NULL;
+
+    set_error(NULL);
+    succeeded = 1;
+
+add_tertiary_cleanup:
+    if (!succeeded) {
+        close_consumer_locked();
+        current_engine()->e_producer = old_top;
+
+        if (pending_tractor != NULL) {
+            mlt_tractor_close(pending_tractor);
+        }
+        if (pending_layer2_composite != NULL) {
+            mlt_transition_close(pending_layer2_composite);
+        }
+        if (pending_layer2_mix != NULL) {
+            mlt_transition_close(pending_layer2_mix);
+        }
+        if (pending_layer3_composite != NULL) {
+            mlt_transition_close(pending_layer3_composite);
+        }
+        if (pending_layer3_mix != NULL) {
+            mlt_transition_close(pending_layer3_mix);
+        }
+        if (pending_tertiary_playlist != NULL) {
+            mlt_playlist_close(pending_tertiary_playlist);
+        }
+        if (pending_tertiary != NULL) {
+            mlt_producer_close(pending_tertiary);
+        }
+
+        if (old_top != NULL) {
+            mlt_producer_set_speed(old_top, 0.0);
+            mlt_producer_seek(old_top, saved_position);
+        }
+
+        if (g_atomic_int_get(&current_engine()->e_preview_enabled) && old_top != NULL) {
+            if (create_consumer_locked()) {
+                if (mlt_consumer_start(current_engine()->e_consumer) == 0) {
+                    refresh_locked();
+                } else {
+                    close_consumer_locked();
+                }
+            }
+        }
+
+        current_engine()->e_has_audio = prior_has_audio;
+        set_error(failure[0] != '\0' ? failure : "Add Layer 3 failed.");
+    }
+
+    return succeeded;
+}
+
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_add_layer_with_state(
+    int layer_index,
+    const char *path,
+    int64_t start_frame,
+    double x,
+    double y,
+    double scale,
+    double opacity,
+    int alpha_mode,
+    double audio_gain)
+{
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
+    ensure_locks();
+    g_mutex_lock(&current_engine()->e_mutex);
+
+    if (layer_index != MLT_COMPOSITION_SECOND_OVERLAY ||
+        current_engine()->e_track_count != 2 ||
+        path == NULL ||
+        path[0] == '\0') {
+        set_error(
+            "Stateful layer insertion currently requires an existing two-layer composition and Layer 3."
+        );
+        g_mutex_unlock(&current_engine()->e_mutex);
+        return 0;
+    }
+
+    const TertiaryInitialState initial_state = {
+        .x = x,
+        .y = y,
+        .scale = scale,
+        .opacity = opacity,
+        .alpha_mode = alpha_mode,
+        .audio_gain = audio_gain,
+    };
+
+    const int added = add_tertiary_track_locked(
+        path,
+        start_frame,
+        &initial_state
+    );
+
+    g_mutex_unlock(&current_engine()->e_mutex);
+    invalidate_frames();
+    return added;
+}
+
 MLT_BRIDGE_EXPORT
 int mlt_bridge_add_track(
     const char *path,
     int64_t start_frame)
 {
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
 
     if (repository == NULL ||
         path == NULL ||
@@ -3219,33 +4444,40 @@ int mlt_bridge_add_track(
             "MLT is not initialized "
             "or the track path is invalid."
         );
-        g_mutex_unlock(&engine_mutex);
+        g_mutex_unlock(&current_engine()->e_mutex);
         return 0;
     }
 
-    if (primary_producer == NULL ||
-        producer == NULL ||
-        track_count != 1 ||
-        is_still ||
-        !has_video) {
+    if (current_engine()->e_primary_producer == NULL ||
+        current_engine()->e_producer == NULL ||
+        current_engine()->e_track_count < 1 ||
+        current_engine()->e_track_count >= MLT_COMPOSITION_MAX_LAYERS ||
+        current_engine()->e_is_still ||
+        !current_engine()->e_has_video) {
         set_error(
-            "Add to Movie requires one timed "
-            "video movie to already be open."
+            "Add to Movie requires a timed video composition with an available layer slot."
         );
-        g_mutex_unlock(&engine_mutex);
+        g_mutex_unlock(&current_engine()->e_mutex);
         return 0;
     }
 
-    const int primary_has_audio = has_audio;
+    if (current_engine()->e_track_count == 2) {
+        const int added = add_tertiary_track_locked(path, start_frame, NULL);
+        g_mutex_unlock(&current_engine()->e_mutex);
+        invalidate_frames();
+        return added;
+    }
+
+    const int primary_has_audio = current_engine()->e_has_audio;
 
     const mlt_position primary_length =
         mlt_producer_get_length(
-            primary_producer
+            current_engine()->e_primary_producer
         );
 
     if (primary_length <= 0) {
         set_error("The primary movie has no usable duration.");
-        g_mutex_unlock(&engine_mutex);
+        g_mutex_unlock(&current_engine()->e_mutex);
         return 0;
     }
 
@@ -3256,20 +4488,20 @@ int mlt_bridge_add_track(
      */
     mlt_position saved_position =
         mlt_producer_position(
-            producer
+            current_engine()->e_producer
         );
 
-    if (consumer != NULL &&
-        !mlt_consumer_is_stopped(consumer) &&
-        mlt_producer_get_speed(producer) != 0.0) {
+    if (current_engine()->e_consumer != NULL &&
+        !mlt_consumer_is_stopped(current_engine()->e_consumer) &&
+        mlt_producer_get_speed(current_engine()->e_producer) != 0.0) {
         const double speed =
             mlt_producer_get_speed(
-                producer
+                current_engine()->e_producer
             );
 
         saved_position =
             mlt_consumer_position(
-                consumer
+                current_engine()->e_consumer
             );
 
         if (speed > 0.0) {
@@ -3288,7 +4520,7 @@ int mlt_bridge_add_track(
     }
 
     mlt_producer_set_speed(
-        producer,
+        current_engine()->e_producer,
         0.0
     );
 
@@ -3330,7 +4562,7 @@ int mlt_bridge_add_track(
     if (path_is_still) {
         pending_secondary =
             mlt_factory_producer(
-                profile,
+                current_engine()->e_profile,
                 "pixbuf",
                 path
             );
@@ -3338,7 +4570,7 @@ int mlt_bridge_add_track(
         if (pending_secondary == NULL) {
             pending_secondary =
                 mlt_factory_producer(
-                    profile,
+                    current_engine()->e_profile,
                     "avformat",
                     path
                 );
@@ -3346,7 +4578,7 @@ int mlt_bridge_add_track(
     } else {
         pending_secondary =
             mlt_factory_producer(
-                profile,
+                current_engine()->e_profile,
                 NULL,
                 path
             );
@@ -3424,7 +4656,7 @@ int mlt_bridge_add_track(
     }
 
     if (!mlt_composition_secondary_base_size(
-            profile,
+            current_engine()->e_profile,
             pending_secondary,
             secondary_still,
             &pending_base_width,
@@ -3439,9 +4671,9 @@ int mlt_bridge_add_track(
     }
 
     pending_x =
-        ((double)profile->width - pending_base_width) / 2.0;
+        ((double)current_engine()->e_profile->width - pending_base_width) / 2.0;
     pending_y =
-        ((double)profile->height - pending_base_height) / 2.0;
+        ((double)current_engine()->e_profile->height - pending_base_height) / 2.0;
 
     /*
      * POC 10.3 uses the viewer playhead as the placement point. Preview and
@@ -3451,7 +4683,7 @@ int mlt_bridge_add_track(
 
     const MltSecondaryPlacementResult placement_result =
         mlt_composition_build_secondary_playlist(
-            profile,
+            current_engine()->e_profile,
             pending_secondary,
             (mlt_position)start_frame,
             primary_length,
@@ -3565,12 +4797,12 @@ int mlt_bridge_add_track(
         MLT_TRACTOR_SERVICE(
             pending_tractor
         ),
-        profile
+        current_engine()->e_profile
     );
 
     if (mlt_tractor_set_track(
             pending_tractor,
-            primary_producer,
+            current_engine()->e_primary_producer,
             0) != 0 ||
         mlt_tractor_set_track(
             pending_tractor,
@@ -3604,7 +4836,7 @@ int mlt_bridge_add_track(
 
     pending_composite =
         mlt_factory_transition(
-            profile,
+            current_engine()->e_profile,
             "composite",
             NULL
         );
@@ -3657,7 +4889,7 @@ int mlt_bridge_add_track(
     if (secondary_has_audio) {
         pending_mix =
             mlt_factory_transition(
-                profile,
+                current_engine()->e_profile,
                 "mix",
                 NULL
             );
@@ -3756,7 +4988,7 @@ int mlt_bridge_add_track(
         saved_position
     );
 
-    producer = pending_top;
+    current_engine()->e_producer = pending_top;
 
     if (g_atomic_int_get(
             &current_engine()->e_preview_enabled)) {
@@ -3765,15 +4997,15 @@ int mlt_bridge_add_track(
                 failure,
                 sizeof(failure),
                 "%s",
-                last_error[0] != '\0'
-                    ? last_error
+                current_engine()->e_last_error[0] != '\0'
+                    ? current_engine()->e_last_error
                     : "Could not create preview for the tractor."
             );
-            producer = primary_producer;
+            current_engine()->e_producer = current_engine()->e_primary_producer;
             goto add_track_cleanup;
         }
 
-        if (mlt_consumer_start(consumer) != 0) {
+        if (mlt_consumer_start(current_engine()->e_consumer) != 0) {
             snprintf(
                 failure,
                 sizeof(failure),
@@ -3781,36 +5013,36 @@ int mlt_bridge_add_track(
                 "MLT could not start tractor preview."
             );
             close_consumer_locked();
-            producer = primary_producer;
+            current_engine()->e_producer = current_engine()->e_primary_producer;
             goto add_track_cleanup;
         }
 
         refresh_locked();
     }
 
-    secondary_producer = pending_secondary;
-    secondary_playlist = pending_secondary_playlist;
-    tractor = pending_tractor;
-    video_composite = pending_composite;
-    audio_mix = pending_mix;
-    track_count = 2;
-    secondary_start_frame = (int64_t)pending_start;
-    secondary_opacity = 1.0;
-    secondary_x = pending_x;
-    secondary_y = pending_y;
-    secondary_scale = 1.0;
-    secondary_base_width = pending_base_width;
-    secondary_base_height = pending_base_height;
-    secondary_alpha_filter = pending_secondary_alpha_filter;
-    secondary_has_alpha = secondary_has_alpha_value ? 1 : 0;
-    secondary_alpha_mode = 0;
-    secondary_is_still = secondary_still ? 1 : 0;
+    current_engine()->e_secondary_producer = pending_secondary;
+    current_engine()->e_secondary_playlist = pending_secondary_playlist;
+    current_engine()->e_tractor = pending_tractor;
+    current_engine()->e_video_composite = pending_composite;
+    current_engine()->e_audio_mix = pending_mix;
+    current_engine()->e_track_count = 2;
+    current_engine()->e_secondary_start_frame = (int64_t)pending_start;
+    current_engine()->e_secondary_opacity = 1.0;
+    current_engine()->e_secondary_x = pending_x;
+    current_engine()->e_secondary_y = pending_y;
+    current_engine()->e_secondary_scale = 1.0;
+    current_engine()->e_secondary_base_width = pending_base_width;
+    current_engine()->e_secondary_base_height = pending_base_height;
+    current_engine()->e_secondary_alpha_filter = pending_secondary_alpha_filter;
+    current_engine()->e_secondary_has_alpha = secondary_has_alpha_value ? 1 : 0;
+    current_engine()->e_secondary_alpha_mode = 0;
+    current_engine()->e_secondary_is_still = secondary_still ? 1 : 0;
 
-    track_has_audio[1] = secondary_has_audio ? 1 : 0;
-    track_audio_gain[1] = 1.0;
-    track_audio_filters[1] = pending_secondary_audio_filter;
+    current_engine()->e_track_has_audio[1] = secondary_has_audio ? 1 : 0;
+    current_engine()->e_track_audio_gain[1] = 1.0;
+    current_engine()->e_track_audio_filters[1] = pending_secondary_audio_filter;
 
-    has_audio = primary_has_audio || secondary_has_audio;
+    current_engine()->e_has_audio = primary_has_audio || secondary_has_audio;
 
     pending_secondary = NULL;
     pending_secondary_playlist = NULL;
@@ -3826,7 +5058,7 @@ add_track_cleanup:
     if (!succeeded) {
         close_consumer_locked();
 
-        producer = primary_producer;
+        current_engine()->e_producer = current_engine()->e_primary_producer;
 
         if (pending_tractor != NULL) {
             mlt_tractor_close(
@@ -3863,13 +5095,13 @@ add_track_cleanup:
             pending_secondary = NULL;
         }
 
-        if (primary_producer != NULL) {
+        if (current_engine()->e_primary_producer != NULL) {
             mlt_producer_set_speed(
-                primary_producer,
+                current_engine()->e_primary_producer,
                 0.0
             );
             mlt_producer_seek(
-                primary_producer,
+                current_engine()->e_primary_producer,
                 saved_position
             );
         }
@@ -3881,9 +5113,9 @@ add_track_cleanup:
          */
         if (g_atomic_int_get(
                 &current_engine()->e_preview_enabled) &&
-            primary_producer != NULL) {
+            current_engine()->e_primary_producer != NULL) {
             if (create_consumer_locked()) {
-                if (mlt_consumer_start(consumer) == 0) {
+                if (mlt_consumer_start(current_engine()->e_consumer) == 0) {
                     refresh_locked();
                 } else {
                     close_consumer_locked();
@@ -3896,10 +5128,10 @@ add_track_cleanup:
                 ? failure
                 : "Add to Movie failed."
         );
-        has_audio = primary_has_audio;
+        current_engine()->e_has_audio = primary_has_audio;
     }
 
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     invalidate_frames();
 
@@ -3909,11 +5141,15 @@ add_track_cleanup:
 MLT_BRIDGE_EXPORT
 int mlt_bridge_track_count(void)
 {
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
-    const int result = track_count;
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
+    const int result = current_engine()->e_track_count;
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     return result;
 }
@@ -3921,14 +5157,18 @@ int mlt_bridge_track_count(void)
 MLT_BRIDGE_EXPORT
 int64_t mlt_bridge_secondary_start_frame(void)
 {
+    if (require_current_engine() == NULL) {
+        return -1;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
     const int64_t result =
-        track_count >= 2
-            ? secondary_start_frame
+        current_engine()->e_track_count >= 2
+            ? current_engine()->e_secondary_start_frame
             : -1;
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     return result;
 }
@@ -3937,22 +5177,26 @@ MLT_BRIDGE_EXPORT
 int mlt_bridge_set_secondary_opacity(
     double opacity)
 {
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
 
-    if (track_count < 2 ||
-        video_composite == NULL) {
+    if (current_engine()->e_track_count < 2 ||
+        current_engine()->e_video_composite == NULL) {
         set_error(
             "Layer 2 opacity requires a two-layer composition."
         );
-        g_mutex_unlock(&engine_mutex);
+        g_mutex_unlock(&current_engine()->e_mutex);
         return 0;
     }
 
     if (!isfinite(opacity)) {
         set_error("Layer 2 opacity must be a finite value.");
-        g_mutex_unlock(&engine_mutex);
+        g_mutex_unlock(&current_engine()->e_mutex);
         return 0;
     }
 
@@ -3963,8 +5207,8 @@ int mlt_bridge_set_secondary_opacity(
     }
 
     const double previous =
-        secondary_opacity;
-    secondary_opacity = opacity;
+        current_engine()->e_secondary_opacity;
+    current_engine()->e_secondary_opacity = opacity;
 
     /*
      * POC 10.8 routes opacity through the shared geometry writer so changing
@@ -3972,28 +5216,32 @@ int mlt_bridge_set_secondary_opacity(
      * rectangle.
      */
     if (!apply_secondary_geometry_locked()) {
-        secondary_opacity = previous;
+        current_engine()->e_secondary_opacity = previous;
         set_error("Could not apply Layer 2 opacity.");
-        g_mutex_unlock(&engine_mutex);
+        g_mutex_unlock(&current_engine()->e_mutex);
         return 0;
     }
 
     set_error(NULL);
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
     return 1;
 }
 
 MLT_BRIDGE_EXPORT
 double mlt_bridge_secondary_opacity(void)
 {
+    if (require_current_engine() == NULL) {
+        return 0.0;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
 
     double result = 1.0;
 
-    if (track_count >= 2 &&
-        video_composite != NULL) {
+    if (current_engine()->e_track_count >= 2 &&
+        current_engine()->e_video_composite != NULL) {
         /*
          * Read the value MLT will actually apply, rather than only returning
          * the bridge's requested cache. This makes the public getter and the
@@ -4002,14 +5250,14 @@ double mlt_bridge_secondary_opacity(void)
          */
         mlt_service_lock(
             MLT_TRANSITION_SERVICE(
-                video_composite
+                current_engine()->e_video_composite
             )
         );
 
         const mlt_rect applied =
             mlt_properties_anim_get_rect(
                 MLT_TRANSITION_PROPERTIES(
-                    video_composite
+                    current_engine()->e_video_composite
                 ),
                 "geometry",
                 0,
@@ -4018,7 +5266,7 @@ double mlt_bridge_secondary_opacity(void)
 
         mlt_service_unlock(
             MLT_TRANSITION_SERVICE(
-                video_composite
+                current_engine()->e_video_composite
             )
         );
 
@@ -4029,7 +5277,7 @@ double mlt_bridge_secondary_opacity(void)
         }
     }
 
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     return result;
 }
@@ -4041,16 +5289,20 @@ int mlt_bridge_set_secondary_geometry(
     double y,
     double scale)
 {
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
 
-    if (track_count < 2 ||
-        video_composite == NULL) {
+    if (current_engine()->e_track_count < 2 ||
+        current_engine()->e_video_composite == NULL) {
         set_error(
             "Layer 2 geometry requires a two-layer composition."
         );
-        g_mutex_unlock(&engine_mutex);
+        g_mutex_unlock(&current_engine()->e_mutex);
         return 0;
     }
 
@@ -4058,7 +5310,7 @@ int mlt_bridge_set_secondary_geometry(
         !isfinite(y) ||
         !isfinite(scale)) {
         set_error("Layer 2 geometry values must be finite.");
-        g_mutex_unlock(&engine_mutex);
+        g_mutex_unlock(&current_engine()->e_mutex);
         return 0;
     }
 
@@ -4068,25 +5320,25 @@ int mlt_bridge_set_secondary_geometry(
         scale = 3.0;
     }
 
-    const double old_x = secondary_x;
-    const double old_y = secondary_y;
-    const double old_scale = secondary_scale;
+    const double old_x = current_engine()->e_secondary_x;
+    const double old_y = current_engine()->e_secondary_y;
+    const double old_scale = current_engine()->e_secondary_scale;
 
-    secondary_x = x;
-    secondary_y = y;
-    secondary_scale = scale;
+    current_engine()->e_secondary_x = x;
+    current_engine()->e_secondary_y = y;
+    current_engine()->e_secondary_scale = scale;
 
     if (!apply_secondary_geometry_locked()) {
-        secondary_x = old_x;
-        secondary_y = old_y;
-        secondary_scale = old_scale;
+        current_engine()->e_secondary_x = old_x;
+        current_engine()->e_secondary_y = old_y;
+        current_engine()->e_secondary_scale = old_scale;
         set_error("Could not apply Layer 2 geometry.");
-        g_mutex_unlock(&engine_mutex);
+        g_mutex_unlock(&current_engine()->e_mutex);
         return 0;
     }
 
     set_error(NULL);
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
     return 1;
 }
 
@@ -4094,33 +5346,37 @@ MLT_BRIDGE_EXPORT
 int mlt_bridge_set_secondary_anchor(
     int anchor)
 {
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
 
-    if (track_count < 2 ||
-        video_composite == NULL ||
-        profile == NULL ||
+    if (current_engine()->e_track_count < 2 ||
+        current_engine()->e_video_composite == NULL ||
+        current_engine()->e_profile == NULL ||
         anchor < 0 ||
         anchor > 8) {
         set_error("Layer 2 anchor requires a valid two-layer composition.");
-        g_mutex_unlock(&engine_mutex);
+        g_mutex_unlock(&current_engine()->e_mutex);
         return 0;
     }
 
     const double width =
-        secondary_base_width *
-        secondary_scale;
+        current_engine()->e_secondary_base_width *
+        current_engine()->e_secondary_scale;
     const double height =
-        secondary_base_height *
-        secondary_scale;
+        current_engine()->e_secondary_base_height *
+        current_engine()->e_secondary_scale;
 
     if (!isfinite(width) ||
         !isfinite(height) ||
         width <= 0.0 ||
         height <= 0.0) {
         set_error("Layer 2 has invalid presentation geometry.");
-        g_mutex_unlock(&engine_mutex);
+        g_mutex_unlock(&current_engine()->e_mutex);
         return 0;
     }
 
@@ -4128,20 +5384,20 @@ int mlt_bridge_set_secondary_anchor(
     const int row = anchor / 3;
 
     const double available_x =
-        (double)profile->width - width;
+        (double)current_engine()->e_profile->width - width;
     const double available_y =
-        (double)profile->height - height;
+        (double)current_engine()->e_profile->height - height;
 
-    const double old_x = secondary_x;
-    const double old_y = secondary_y;
+    const double old_x = current_engine()->e_secondary_x;
+    const double old_y = current_engine()->e_secondary_y;
 
-    secondary_x =
+    current_engine()->e_secondary_x =
         column == 0
             ? 0.0
             : (column == 1
                    ? available_x / 2.0
                    : available_x);
-    secondary_y =
+    current_engine()->e_secondary_y =
         row == 0
             ? 0.0
             : (row == 1
@@ -4149,28 +5405,32 @@ int mlt_bridge_set_secondary_anchor(
                    : available_y);
 
     if (!apply_secondary_geometry_locked()) {
-        secondary_x = old_x;
-        secondary_y = old_y;
+        current_engine()->e_secondary_x = old_x;
+        current_engine()->e_secondary_y = old_y;
         set_error("Could not apply the Layer 2 anchor.");
-        g_mutex_unlock(&engine_mutex);
+        g_mutex_unlock(&current_engine()->e_mutex);
         return 0;
     }
 
     set_error(NULL);
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
     return 1;
 }
 
 MLT_BRIDGE_EXPORT
 double mlt_bridge_secondary_x(void)
 {
+    if (require_current_engine() == NULL) {
+        return 0.0;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
 
     double result =
-        track_count >= 2
-            ? secondary_x
+        current_engine()->e_track_count >= 2
+            ? current_engine()->e_secondary_x
             : 0.0;
 
     mlt_rect rect;
@@ -4178,20 +5438,24 @@ double mlt_bridge_secondary_x(void)
         result = rect.x;
     }
 
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
     return result;
 }
 
 MLT_BRIDGE_EXPORT
 double mlt_bridge_secondary_y(void)
 {
+    if (require_current_engine() == NULL) {
+        return 0.0;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
 
     double result =
-        track_count >= 2
-            ? secondary_y
+        current_engine()->e_track_count >= 2
+            ? current_engine()->e_secondary_y
             : 0.0;
 
     mlt_rect rect;
@@ -4199,43 +5463,51 @@ double mlt_bridge_secondary_y(void)
         result = rect.y;
     }
 
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
     return result;
 }
 
 MLT_BRIDGE_EXPORT
 double mlt_bridge_secondary_scale(void)
 {
+    if (require_current_engine() == NULL) {
+        return 1.0;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
 
     double result =
-        track_count >= 2
-            ? secondary_scale
+        current_engine()->e_track_count >= 2
+            ? current_engine()->e_secondary_scale
             : 1.0;
 
     mlt_rect rect;
-    if (secondary_base_width > 0.0 &&
+    if (current_engine()->e_secondary_base_width > 0.0 &&
         read_secondary_rect_locked(&rect)) {
-        result = rect.w / secondary_base_width;
+        result = rect.w / current_engine()->e_secondary_base_width;
     }
 
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
     return result;
 }
 
 MLT_BRIDGE_EXPORT
 int mlt_bridge_secondary_is_still(void)
 {
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
     const int result =
-        track_count >= 2
-            ? secondary_is_still
+        current_engine()->e_track_count >= 2
+            ? current_engine()->e_secondary_is_still
             : 0;
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     return result;
 }
@@ -4243,14 +5515,18 @@ int mlt_bridge_secondary_is_still(void)
 MLT_BRIDGE_EXPORT
 int mlt_bridge_secondary_has_alpha(void)
 {
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
     const int result =
-        track_count >= 2
-            ? secondary_has_alpha
+        current_engine()->e_track_count >= 2
+            ? current_engine()->e_secondary_has_alpha
             : 0;
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     return result;
 }
@@ -4259,16 +5535,20 @@ MLT_BRIDGE_EXPORT
 int mlt_bridge_set_secondary_alpha_mode(
     int mode)
 {
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
 
-    if (track_count < 2 ||
-        secondary_alpha_filter == NULL) {
+    if (current_engine()->e_track_count < 2 ||
+        current_engine()->e_secondary_alpha_filter == NULL) {
         set_error(
             "Alpha interpretation requires a second layer."
         );
-        g_mutex_unlock(&engine_mutex);
+        g_mutex_unlock(&current_engine()->e_mutex);
         return 0;
     }
 
@@ -4276,80 +5556,416 @@ int mlt_bridge_set_secondary_alpha_mode(
         set_error(
             "Alpha interpretation must be Auto, Straight, or Premultiplied."
         );
-        g_mutex_unlock(&engine_mutex);
+        g_mutex_unlock(&current_engine()->e_mutex);
         return 0;
     }
 
     if (!mlt_composition_apply_alpha_mode(
-            secondary_alpha_filter,
+            current_engine()->e_secondary_alpha_filter,
             mode)) {
         set_error("Could not apply Layer 2 alpha interpretation.");
-        g_mutex_unlock(&engine_mutex);
+        g_mutex_unlock(&current_engine()->e_mutex);
         return 0;
     }
 
-    secondary_alpha_mode = mode;
+    current_engine()->e_secondary_alpha_mode = mode;
     set_error(NULL);
 
     invalidate_frames();
     refresh_locked();
 
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
     return 1;
 }
 
 MLT_BRIDGE_EXPORT
 int mlt_bridge_secondary_alpha_mode(void)
 {
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
 
     int result = 0;
 
-    if (track_count >= 2 &&
-        secondary_alpha_filter != NULL) {
+    if (current_engine()->e_track_count >= 2 &&
+        current_engine()->e_secondary_alpha_filter != NULL) {
         mlt_service_lock(
             MLT_FILTER_SERVICE(
-                secondary_alpha_filter
+                current_engine()->e_secondary_alpha_filter
             )
         );
 
         result =
             mlt_properties_get_int(
                 MLT_FILTER_PROPERTIES(
-                    secondary_alpha_filter
+                    current_engine()->e_secondary_alpha_filter
                 ),
                 "mlt_player_alpha_mode"
             );
 
         mlt_service_unlock(
             MLT_FILTER_SERVICE(
-                secondary_alpha_filter
+                current_engine()->e_secondary_alpha_filter
             )
         );
     }
 
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
     return result;
 }
+
+MLT_BRIDGE_EXPORT
+int64_t mlt_bridge_layer_start_frame(int layer_index)
+{
+    if (layer_index == MLT_COMPOSITION_BASE_LAYER) {
+        return 0;
+    }
+    if (layer_index == MLT_COMPOSITION_FIRST_OVERLAY) {
+        return mlt_bridge_secondary_start_frame();
+    }
+    if (layer_index != MLT_COMPOSITION_SECOND_OVERLAY ||
+        require_current_engine() == NULL) {
+        return -1;
+    }
+
+    ensure_locks();
+    g_mutex_lock(&current_engine()->e_mutex);
+    const int64_t result =
+        current_engine()->e_track_count >= 3
+            ? current_engine()->e_tertiary_start_frame
+            : -1;
+    g_mutex_unlock(&current_engine()->e_mutex);
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_set_layer_opacity(int layer_index, double opacity)
+{
+    if (layer_index == MLT_COMPOSITION_FIRST_OVERLAY) {
+        return mlt_bridge_set_secondary_opacity(opacity);
+    }
+    if (layer_index != MLT_COMPOSITION_SECOND_OVERLAY ||
+        require_current_engine() == NULL) {
+        return 0;
+    }
+
+    ensure_locks();
+    g_mutex_lock(&current_engine()->e_mutex);
+
+    if (current_engine()->e_track_count < 3 ||
+        current_engine()->e_tertiary_video_composite == NULL) {
+        set_error("Layer 3 opacity requires a three-layer composition.");
+        g_mutex_unlock(&current_engine()->e_mutex);
+        return 0;
+    }
+    if (!isfinite(opacity)) {
+        set_error("Layer 3 opacity must be a finite value.");
+        g_mutex_unlock(&current_engine()->e_mutex);
+        return 0;
+    }
+
+    opacity = CLAMP(opacity, 0.0, 1.0);
+    const double previous = current_engine()->e_tertiary_opacity;
+    current_engine()->e_tertiary_opacity = opacity;
+    if (!apply_tertiary_geometry_locked()) {
+        current_engine()->e_tertiary_opacity = previous;
+        set_error("Could not apply Layer 3 opacity.");
+        g_mutex_unlock(&current_engine()->e_mutex);
+        return 0;
+    }
+
+    set_error(NULL);
+    g_mutex_unlock(&current_engine()->e_mutex);
+    return 1;
+}
+
+MLT_BRIDGE_EXPORT
+double mlt_bridge_layer_opacity(int layer_index)
+{
+    if (layer_index == MLT_COMPOSITION_BASE_LAYER) {
+        return 1.0;
+    }
+    if (layer_index == MLT_COMPOSITION_FIRST_OVERLAY) {
+        return mlt_bridge_secondary_opacity();
+    }
+    if (layer_index != MLT_COMPOSITION_SECOND_OVERLAY ||
+        require_current_engine() == NULL) {
+        return 0.0;
+    }
+
+    ensure_locks();
+    g_mutex_lock(&current_engine()->e_mutex);
+    double result = current_engine()->e_track_count >= 3
+        ? current_engine()->e_tertiary_opacity
+        : 1.0;
+    mlt_rect rect;
+    if (read_tertiary_rect_locked(&rect)) {
+        result = rect.o == DBL_MIN ? 1.0 : rect.o;
+    }
+    g_mutex_unlock(&current_engine()->e_mutex);
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_set_layer_geometry(
+    int layer_index,
+    double x,
+    double y,
+    double scale)
+{
+    if (layer_index == MLT_COMPOSITION_FIRST_OVERLAY) {
+        return mlt_bridge_set_secondary_geometry(x, y, scale);
+    }
+    if (layer_index != MLT_COMPOSITION_SECOND_OVERLAY ||
+        require_current_engine() == NULL) {
+        return 0;
+    }
+
+    ensure_locks();
+    g_mutex_lock(&current_engine()->e_mutex);
+
+    if (current_engine()->e_track_count < 3 ||
+        current_engine()->e_tertiary_video_composite == NULL) {
+        set_error("Layer 3 geometry requires a three-layer composition.");
+        g_mutex_unlock(&current_engine()->e_mutex);
+        return 0;
+    }
+    if (!isfinite(x) || !isfinite(y) || !isfinite(scale)) {
+        set_error("Layer 3 geometry values must be finite.");
+        g_mutex_unlock(&current_engine()->e_mutex);
+        return 0;
+    }
+
+    scale = CLAMP(scale, 0.10, 3.0);
+    const double old_x = current_engine()->e_tertiary_x;
+    const double old_y = current_engine()->e_tertiary_y;
+    const double old_scale = current_engine()->e_tertiary_scale;
+    current_engine()->e_tertiary_x = x;
+    current_engine()->e_tertiary_y = y;
+    current_engine()->e_tertiary_scale = scale;
+
+    if (!apply_tertiary_geometry_locked()) {
+        current_engine()->e_tertiary_x = old_x;
+        current_engine()->e_tertiary_y = old_y;
+        current_engine()->e_tertiary_scale = old_scale;
+        set_error("Could not apply Layer 3 geometry.");
+        g_mutex_unlock(&current_engine()->e_mutex);
+        return 0;
+    }
+
+    set_error(NULL);
+    g_mutex_unlock(&current_engine()->e_mutex);
+    return 1;
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_set_layer_anchor(int layer_index, int anchor)
+{
+    if (layer_index == MLT_COMPOSITION_FIRST_OVERLAY) {
+        return mlt_bridge_set_secondary_anchor(anchor);
+    }
+    if (layer_index != MLT_COMPOSITION_SECOND_OVERLAY ||
+        require_current_engine() == NULL) {
+        return 0;
+    }
+
+    ensure_locks();
+    g_mutex_lock(&current_engine()->e_mutex);
+
+    if (current_engine()->e_track_count < 3 ||
+        current_engine()->e_tertiary_video_composite == NULL ||
+        current_engine()->e_profile == NULL ||
+        anchor < 0 || anchor > 8) {
+        set_error("Layer 3 anchor requires a valid three-layer composition.");
+        g_mutex_unlock(&current_engine()->e_mutex);
+        return 0;
+    }
+
+    const double width = current_engine()->e_tertiary_base_width * current_engine()->e_tertiary_scale;
+    const double height = current_engine()->e_tertiary_base_height * current_engine()->e_tertiary_scale;
+    if (!isfinite(width) || !isfinite(height) || width <= 0.0 || height <= 0.0) {
+        set_error("Layer 3 has invalid presentation geometry.");
+        g_mutex_unlock(&current_engine()->e_mutex);
+        return 0;
+    }
+
+    const int column = anchor % 3;
+    const int row = anchor / 3;
+    const double available_x = (double)current_engine()->e_profile->width - width;
+    const double available_y = (double)current_engine()->e_profile->height - height;
+    const double old_x = current_engine()->e_tertiary_x;
+    const double old_y = current_engine()->e_tertiary_y;
+
+    current_engine()->e_tertiary_x = column == 0 ? 0.0 : (column == 1 ? available_x / 2.0 : available_x);
+    current_engine()->e_tertiary_y = row == 0 ? 0.0 : (row == 1 ? available_y / 2.0 : available_y);
+
+    if (!apply_tertiary_geometry_locked()) {
+        current_engine()->e_tertiary_x = old_x;
+        current_engine()->e_tertiary_y = old_y;
+        set_error("Could not apply the Layer 3 anchor.");
+        g_mutex_unlock(&current_engine()->e_mutex);
+        return 0;
+    }
+
+    set_error(NULL);
+    g_mutex_unlock(&current_engine()->e_mutex);
+    return 1;
+}
+
+MLT_BRIDGE_EXPORT
+double mlt_bridge_layer_x(int layer_index)
+{
+    if (layer_index == MLT_COMPOSITION_BASE_LAYER) return 0.0;
+    if (layer_index == MLT_COMPOSITION_FIRST_OVERLAY) return mlt_bridge_secondary_x();
+    if (layer_index != MLT_COMPOSITION_SECOND_OVERLAY || require_current_engine() == NULL) return 0.0;
+    ensure_locks();
+    g_mutex_lock(&current_engine()->e_mutex);
+    double result = current_engine()->e_track_count >= 3 ? current_engine()->e_tertiary_x : 0.0;
+    mlt_rect rect;
+    if (read_tertiary_rect_locked(&rect)) result = rect.x;
+    g_mutex_unlock(&current_engine()->e_mutex);
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+double mlt_bridge_layer_y(int layer_index)
+{
+    if (layer_index == MLT_COMPOSITION_BASE_LAYER) return 0.0;
+    if (layer_index == MLT_COMPOSITION_FIRST_OVERLAY) return mlt_bridge_secondary_y();
+    if (layer_index != MLT_COMPOSITION_SECOND_OVERLAY || require_current_engine() == NULL) return 0.0;
+    ensure_locks();
+    g_mutex_lock(&current_engine()->e_mutex);
+    double result = current_engine()->e_track_count >= 3 ? current_engine()->e_tertiary_y : 0.0;
+    mlt_rect rect;
+    if (read_tertiary_rect_locked(&rect)) result = rect.y;
+    g_mutex_unlock(&current_engine()->e_mutex);
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+double mlt_bridge_layer_scale(int layer_index)
+{
+    if (layer_index == MLT_COMPOSITION_BASE_LAYER) return 1.0;
+    if (layer_index == MLT_COMPOSITION_FIRST_OVERLAY) return mlt_bridge_secondary_scale();
+    if (layer_index != MLT_COMPOSITION_SECOND_OVERLAY || require_current_engine() == NULL) return 1.0;
+    ensure_locks();
+    g_mutex_lock(&current_engine()->e_mutex);
+    double result = current_engine()->e_track_count >= 3 ? current_engine()->e_tertiary_scale : 1.0;
+    mlt_rect rect;
+    if (current_engine()->e_tertiary_base_width > 0.0 && read_tertiary_rect_locked(&rect)) {
+        result = rect.w / current_engine()->e_tertiary_base_width;
+    }
+    g_mutex_unlock(&current_engine()->e_mutex);
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_layer_is_still(int layer_index)
+{
+    if (layer_index == MLT_COMPOSITION_BASE_LAYER) return 0;
+    if (layer_index == MLT_COMPOSITION_FIRST_OVERLAY) return mlt_bridge_secondary_is_still();
+    if (layer_index != MLT_COMPOSITION_SECOND_OVERLAY || require_current_engine() == NULL) return 0;
+    ensure_locks();
+    g_mutex_lock(&current_engine()->e_mutex);
+    const int result = current_engine()->e_track_count >= 3 ? current_engine()->e_tertiary_is_still : 0;
+    g_mutex_unlock(&current_engine()->e_mutex);
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_layer_has_alpha(int layer_index)
+{
+    if (layer_index == MLT_COMPOSITION_BASE_LAYER) return 0;
+    if (layer_index == MLT_COMPOSITION_FIRST_OVERLAY) return mlt_bridge_secondary_has_alpha();
+    if (layer_index != MLT_COMPOSITION_SECOND_OVERLAY || require_current_engine() == NULL) return 0;
+    ensure_locks();
+    g_mutex_lock(&current_engine()->e_mutex);
+    const int result = current_engine()->e_track_count >= 3 ? current_engine()->e_tertiary_has_alpha : 0;
+    g_mutex_unlock(&current_engine()->e_mutex);
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_set_layer_alpha_mode(int layer_index, int mode)
+{
+    if (layer_index == MLT_COMPOSITION_FIRST_OVERLAY) {
+        return mlt_bridge_set_secondary_alpha_mode(mode);
+    }
+    if (layer_index != MLT_COMPOSITION_SECOND_OVERLAY || require_current_engine() == NULL) {
+        return 0;
+    }
+
+    ensure_locks();
+    g_mutex_lock(&current_engine()->e_mutex);
+    if (current_engine()->e_track_count < 3 || current_engine()->e_tertiary_alpha_filter == NULL) {
+        set_error("Alpha interpretation requires Layer 3.");
+        g_mutex_unlock(&current_engine()->e_mutex);
+        return 0;
+    }
+    if (mode < 0 || mode > 2) {
+        set_error("Alpha interpretation must be Auto, Straight, or Premultiplied.");
+        g_mutex_unlock(&current_engine()->e_mutex);
+        return 0;
+    }
+    if (!mlt_composition_apply_alpha_mode(current_engine()->e_tertiary_alpha_filter, mode)) {
+        set_error("Could not apply Layer 3 alpha interpretation.");
+        g_mutex_unlock(&current_engine()->e_mutex);
+        return 0;
+    }
+    current_engine()->e_tertiary_alpha_mode = mode;
+    set_error(NULL);
+    invalidate_frames();
+    refresh_locked();
+    g_mutex_unlock(&current_engine()->e_mutex);
+    return 1;
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_layer_alpha_mode(int layer_index)
+{
+    if (layer_index == MLT_COMPOSITION_BASE_LAYER) return 0;
+    if (layer_index == MLT_COMPOSITION_FIRST_OVERLAY) return mlt_bridge_secondary_alpha_mode();
+    if (layer_index != MLT_COMPOSITION_SECOND_OVERLAY || require_current_engine() == NULL) return 0;
+    ensure_locks();
+    g_mutex_lock(&current_engine()->e_mutex);
+    int result = 0;
+    if (current_engine()->e_track_count >= 3 && current_engine()->e_tertiary_alpha_filter != NULL) {
+        mlt_service_lock(MLT_FILTER_SERVICE(current_engine()->e_tertiary_alpha_filter));
+        result = mlt_properties_get_int(
+            MLT_FILTER_PROPERTIES(current_engine()->e_tertiary_alpha_filter),
+            "mlt_player_alpha_mode"
+        );
+        mlt_service_unlock(MLT_FILTER_SERVICE(current_engine()->e_tertiary_alpha_filter));
+    }
+    g_mutex_unlock(&current_engine()->e_mutex);
+    return result;
+}
+
 
 MLT_BRIDGE_EXPORT
 int mlt_bridge_track_has_audio(
     int track_index)
 {
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
 
     const int result =
         track_index >= 0 &&
-        track_index < track_count &&
-        track_index < 2
-            ? track_has_audio[track_index]
+        track_index < current_engine()->e_track_count &&
+        track_index < MLT_COMPOSITION_MAX_LAYERS
+            ? current_engine()->e_track_has_audio[track_index]
             : 0;
 
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     return result;
 }
@@ -4359,36 +5975,40 @@ int mlt_bridge_set_track_audio_gain(
     int track_index,
     double gain)
 {
-    ensure_locks();
-
-    g_mutex_lock(&engine_mutex);
-
-    if (track_index < 0 ||
-        track_index >= track_count ||
-        track_index >= 2) {
-        set_error(
-            "That track is not available."
-        );
-        g_mutex_unlock(&engine_mutex);
+    if (require_current_engine() == NULL) {
         return 0;
     }
 
-    if (!track_has_audio[track_index]) {
+    ensure_locks();
+
+    g_mutex_lock(&current_engine()->e_mutex);
+
+    if (track_index < 0 ||
+        track_index >= current_engine()->e_track_count ||
+        track_index >= MLT_COMPOSITION_MAX_LAYERS) {
+        set_error(
+            "That track is not available."
+        );
+        g_mutex_unlock(&current_engine()->e_mutex);
+        return 0;
+    }
+
+    if (!current_engine()->e_track_has_audio[track_index]) {
         set_error(
             "That track has no audio."
         );
-        g_mutex_unlock(&engine_mutex);
+        g_mutex_unlock(&current_engine()->e_mutex);
         return 0;
     }
 
     mlt_filter filter =
-        track_audio_filters[track_index];
+        current_engine()->e_track_audio_filters[track_index];
 
     if (filter == NULL) {
         set_error(
             "MLT's volume filter is unavailable for that track."
         );
-        g_mutex_unlock(&engine_mutex);
+        g_mutex_unlock(&current_engine()->e_mutex);
         return 0;
     }
 
@@ -4412,10 +6032,10 @@ int mlt_bridge_set_track_audio_gain(
         MLT_FILTER_SERVICE(filter)
     );
 
-    track_audio_gain[track_index] = gain;
+    current_engine()->e_track_audio_gain[track_index] = gain;
     set_error(NULL);
 
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     return 1;
 }
@@ -4424,17 +6044,21 @@ MLT_BRIDGE_EXPORT
 double mlt_bridge_track_audio_gain(
     int track_index)
 {
+    if (require_current_engine() == NULL) {
+        return 0.0;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
 
     double result = 1.0;
 
     if (track_index >= 0 &&
-        track_index < track_count &&
-        track_index < 2) {
+        track_index < current_engine()->e_track_count &&
+        track_index < MLT_COMPOSITION_MAX_LAYERS) {
         mlt_filter filter =
-            track_audio_filters[track_index];
+            current_engine()->e_track_audio_filters[track_index];
 
         if (filter != NULL) {
             mlt_service_lock(
@@ -4452,11 +6076,11 @@ double mlt_bridge_track_audio_gain(
             );
         } else {
             result =
-                track_audio_gain[track_index];
+                current_engine()->e_track_audio_gain[track_index];
         }
     }
 
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     return result;
 }
@@ -4464,13 +6088,17 @@ double mlt_bridge_track_audio_gain(
 MLT_BRIDGE_EXPORT
 void mlt_bridge_close_media(void)
 {
+    if (require_current_engine() == NULL) {
+        return;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
 
     close_producer_locked();
 
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     release_slots();
 }
@@ -4479,20 +6107,24 @@ MLT_BRIDGE_EXPORT
 int mlt_bridge_set_play_all_frames(
     int enabled)
 {
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
 
     const int requested = enabled != 0;
-    const int previous_requested = requested_play_all_frames;
+    const int previous_requested = current_engine()->e_requested_play_all_frames;
 
     if (requested == previous_requested) {
-        g_mutex_unlock(&engine_mutex);
+        g_mutex_unlock(&current_engine()->e_mutex);
 
         return 1;
     }
 
-    requested_play_all_frames = requested;
+    current_engine()->e_requested_play_all_frames = requested;
 
     /*
      * MLT copies real_time into consumer-private state when the consumer
@@ -4500,20 +6132,20 @@ int mlt_bridge_set_play_all_frames(
      * Rebuild only the consumer, preserving the viewer-visible frame and the
      * producer's current shuttle speed.
      */
-    if (producer != NULL && consumer != NULL) {
+    if (current_engine()->e_producer != NULL && current_engine()->e_consumer != NULL) {
         const double speed =
-            mlt_producer_get_speed(producer);
+            mlt_producer_get_speed(current_engine()->e_producer);
 
         const mlt_position length =
-            mlt_producer_get_length(producer);
+            mlt_producer_get_length(current_engine()->e_producer);
 
         mlt_position position =
-            mlt_producer_position(producer);
+            mlt_producer_position(current_engine()->e_producer);
 
-        if (!mlt_consumer_is_stopped(consumer) &&
+        if (!mlt_consumer_is_stopped(current_engine()->e_consumer) &&
             speed != 0.0) {
             position =
-                mlt_consumer_position(consumer);
+                mlt_consumer_position(current_engine()->e_consumer);
 
             if (speed > 0.0) {
                 position += 1;
@@ -4531,32 +6163,32 @@ int mlt_bridge_set_play_all_frames(
             position = length - 1;
         }
 
-        mlt_producer_set_speed(producer, 0.0);
+        mlt_producer_set_speed(current_engine()->e_producer, 0.0);
         close_consumer_locked();
-        mlt_producer_seek(producer, position);
+        mlt_producer_seek(current_engine()->e_producer, position);
 
         if (!create_consumer_locked()) {
-            requested_play_all_frames = previous_requested;
+            current_engine()->e_requested_play_all_frames = previous_requested;
 
-            g_mutex_unlock(&engine_mutex);
+            g_mutex_unlock(&current_engine()->e_mutex);
 
             invalidate_frames();
 
             return 0;
         }
 
-        mlt_producer_set_speed(producer, speed);
+        mlt_producer_set_speed(current_engine()->e_producer, speed);
 
-        if (mlt_consumer_start(consumer) != 0) {
+        if (mlt_consumer_start(current_engine()->e_consumer) != 0) {
             set_error(
                 "MLT could not restart playback "
                 "after changing Play All Frames."
             );
 
             close_consumer_locked();
-            requested_play_all_frames = previous_requested;
+            current_engine()->e_requested_play_all_frames = previous_requested;
 
-            g_mutex_unlock(&engine_mutex);
+            g_mutex_unlock(&current_engine()->e_mutex);
 
             invalidate_frames();
 
@@ -4567,7 +6199,7 @@ int mlt_bridge_set_play_all_frames(
         set_error(NULL);
     }
 
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     invalidate_frames();
 
@@ -4577,14 +6209,18 @@ int mlt_bridge_set_play_all_frames(
 MLT_BRIDGE_EXPORT
 int mlt_bridge_play_all_frames(void)
 {
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
 
     const int enabled =
-        requested_play_all_frames;
+        current_engine()->e_requested_play_all_frames;
 
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     return enabled;
 }
@@ -4597,36 +6233,40 @@ MLT_BRIDGE_EXPORT
 int mlt_bridge_set_speed(
     double speed)
 {
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
     if (speed == 0.0) {
         return mlt_bridge_pause();
     }
 
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
 
-    if (producer == NULL || is_still) {
+    if (current_engine()->e_producer == NULL || current_engine()->e_is_still) {
         set_error("No timed media is loaded.");
 
-        g_mutex_unlock(&engine_mutex);
+        g_mutex_unlock(&current_engine()->e_mutex);
 
         return 0;
     }
 
     if (!create_consumer_locked()) {
-        g_mutex_unlock(&engine_mutex);
+        g_mutex_unlock(&current_engine()->e_mutex);
 
         return 0;
     }
 
     const double current_speed =
-        mlt_producer_get_speed(producer);
+        mlt_producer_get_speed(current_engine()->e_producer);
 
     const mlt_position length =
-        mlt_producer_get_length(producer);
+        mlt_producer_get_length(current_engine()->e_producer);
 
     mlt_position position =
-        mlt_producer_position(producer);
+        mlt_producer_position(current_engine()->e_producer);
 
     int repositioned = 0;
 
@@ -4636,11 +6276,11 @@ int mlt_bridge_set_speed(
      * the visible position before changing direction or magnitude. This
      * avoids a small but very noticeable jump when tapping J or L.
      */
-    if (consumer != NULL &&
-        !mlt_consumer_is_stopped(consumer) &&
+    if (current_engine()->e_consumer != NULL &&
+        !mlt_consumer_is_stopped(current_engine()->e_consumer) &&
         current_speed != 0.0) {
         position =
-            mlt_consumer_position(consumer);
+            mlt_consumer_position(current_engine()->e_consumer);
 
         if (current_speed > 0.0) {
             position += 1;
@@ -4657,8 +6297,8 @@ int mlt_bridge_set_speed(
             position = length - 1;
         }
 
-        mlt_consumer_purge(consumer);
-        mlt_producer_seek(producer, position);
+        mlt_consumer_purge(current_engine()->e_consumer);
+        mlt_producer_seek(current_engine()->e_producer, position);
 
         repositioned = 1;
     }
@@ -4666,23 +6306,23 @@ int mlt_bridge_set_speed(
     if (speed > 0.0 &&
         length > 0 &&
         position >= length - 1) {
-        mlt_consumer_purge(consumer);
-        mlt_producer_seek(producer, 0);
+        mlt_consumer_purge(current_engine()->e_consumer);
+        mlt_producer_seek(current_engine()->e_producer, 0);
 
         repositioned = 1;
     } else if (speed < 0.0 &&
                length > 0 &&
                position <= 0) {
-        mlt_consumer_purge(consumer);
-        mlt_producer_seek(producer, length - 1);
+        mlt_consumer_purge(current_engine()->e_consumer);
+        mlt_producer_seek(current_engine()->e_producer, length - 1);
 
         repositioned = 1;
     }
 
-    mlt_producer_set_speed(producer, speed);
+    mlt_producer_set_speed(current_engine()->e_producer, speed);
 
     if (!ensure_consumer_running_locked()) {
-        g_mutex_unlock(&engine_mutex);
+        g_mutex_unlock(&current_engine()->e_mutex);
 
         return 0;
     }
@@ -4691,7 +6331,7 @@ int mlt_bridge_set_speed(
 
     set_error(NULL);
 
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     if (repositioned) {
         invalidate_frames();
@@ -4703,18 +6343,22 @@ int mlt_bridge_set_speed(
 MLT_BRIDGE_EXPORT
 double mlt_bridge_speed(void)
 {
+    if (require_current_engine() == NULL) {
+        return 0.0;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
 
     const double speed =
-        producer != NULL &&
-        consumer != NULL &&
-        !mlt_consumer_is_stopped(consumer)
-            ? mlt_producer_get_speed(producer)
+        current_engine()->e_producer != NULL &&
+        current_engine()->e_consumer != NULL &&
+        !mlt_consumer_is_stopped(current_engine()->e_consumer)
+            ? mlt_producer_get_speed(current_engine()->e_producer)
             : 0.0;
 
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     return speed;
 }
@@ -4722,26 +6366,34 @@ double mlt_bridge_speed(void)
 MLT_BRIDGE_EXPORT
 int mlt_bridge_play(void)
 {
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
     return mlt_bridge_set_speed(1.0);
 }
 
 MLT_BRIDGE_EXPORT
 int mlt_bridge_pause(void)
 {
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
 
-    if (producer == NULL) {
-        g_mutex_unlock(&engine_mutex);
+    if (current_engine()->e_producer == NULL) {
+        g_mutex_unlock(&current_engine()->e_mutex);
 
         return 0;
     }
 
-    if (consumer == NULL) {
-        mlt_producer_set_speed(producer, 0.0);
+    if (current_engine()->e_consumer == NULL) {
+        mlt_producer_set_speed(current_engine()->e_producer, 0.0);
 
-        g_mutex_unlock(&engine_mutex);
+        g_mutex_unlock(&current_engine()->e_mutex);
 
         return 1;
     }
@@ -4751,10 +6403,10 @@ int mlt_bridge_pause(void)
      * parked position is the next frame in the direction we were moving.
      */
     const double speed =
-        mlt_producer_get_speed(producer);
+        mlt_producer_get_speed(current_engine()->e_producer);
 
     mlt_position position =
-        mlt_consumer_position(consumer);
+        mlt_consumer_position(current_engine()->e_consumer);
 
     if (speed > 0.0) {
         position += 1;
@@ -4763,7 +6415,7 @@ int mlt_bridge_pause(void)
     }
 
     const mlt_position length =
-        mlt_producer_get_length(producer);
+        mlt_producer_get_length(current_engine()->e_producer);
 
     if (position < 0) {
         position = 0;
@@ -4774,15 +6426,15 @@ int mlt_bridge_pause(void)
         position = length - 1;
     }
 
-    mlt_producer_set_speed(producer, 0.0);
-    mlt_consumer_purge(consumer);
-    mlt_producer_seek(producer, position);
+    mlt_producer_set_speed(current_engine()->e_producer, 0.0);
+    mlt_consumer_purge(current_engine()->e_consumer);
+    mlt_producer_seek(current_engine()->e_producer, position);
 
     refresh_locked();
 
     set_error(NULL);
 
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     invalidate_frames();
 
@@ -4791,12 +6443,12 @@ int mlt_bridge_pause(void)
 
 static int seek_frame_locked(mlt_position frame)
 {
-    if (producer == NULL) {
+    if (current_engine()->e_producer == NULL) {
         return 0;
     }
 
     const mlt_position length =
-        mlt_producer_get_length(producer);
+        mlt_producer_get_length(current_engine()->e_producer);
 
     if (frame < 0) {
         frame = 0;
@@ -4807,11 +6459,11 @@ static int seek_frame_locked(mlt_position frame)
         frame = length - 1;
     }
 
-    if (consumer != NULL) {
-        mlt_consumer_purge(consumer);
+    if (current_engine()->e_consumer != NULL) {
+        mlt_consumer_purge(current_engine()->e_consumer);
     }
 
-    if (mlt_producer_seek(producer, frame) != 0) {
+    if (mlt_producer_seek(current_engine()->e_producer, frame) != 0) {
         set_error("MLT seek failed.");
         return 0;
     }
@@ -4829,7 +6481,7 @@ static int seek_frame_locked(mlt_position frame)
 
 static mlt_position visible_position_locked(void)
 {
-    if (producer == NULL) {
+    if (current_engine()->e_producer == NULL) {
         return 0;
     }
 
@@ -4839,21 +6491,21 @@ static mlt_position visible_position_locked(void)
      * position and the consumer may still be stale.
      */
     const int playing =
-        consumer != NULL &&
-        !mlt_consumer_is_stopped(consumer) &&
-        mlt_producer_get_speed(producer) != 0.0;
+        current_engine()->e_consumer != NULL &&
+        !mlt_consumer_is_stopped(current_engine()->e_consumer) &&
+        mlt_producer_get_speed(current_engine()->e_producer) != 0.0;
 
     mlt_position position =
         playing
-            ? mlt_consumer_position(consumer)
-            : mlt_producer_position(producer);
+            ? mlt_consumer_position(current_engine()->e_consumer)
+            : mlt_producer_position(current_engine()->e_producer);
 
     if (position < 0) {
         position = 0;
     }
 
     const mlt_position length =
-        mlt_producer_get_length(producer);
+        mlt_producer_get_length(current_engine()->e_producer);
 
     if (length > 0 && position >= length) {
         position = length - 1;
@@ -4866,11 +6518,15 @@ MLT_BRIDGE_EXPORT
 int mlt_bridge_seek_frame(
     int64_t frame)
 {
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
     const int result = seek_frame_locked((mlt_position)frame);
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     if (result) {
         invalidate_frames();
@@ -4882,12 +6538,16 @@ int mlt_bridge_seek_frame(
 MLT_BRIDGE_EXPORT
 int64_t mlt_bridge_position_frame(void)
 {
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
     const int64_t result =
         (int64_t)visible_position_locked();
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     return result;
 }
@@ -4896,21 +6556,25 @@ MLT_BRIDGE_EXPORT
 int mlt_bridge_seek_ms(
     int64_t milliseconds)
 {
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
 
-    if (producer == NULL) {
-        g_mutex_unlock(&engine_mutex);
+    if (current_engine()->e_producer == NULL) {
+        g_mutex_unlock(&current_engine()->e_mutex);
         return 0;
     }
 
     const double fps =
-        mlt_producer_get_fps(producer);
+        mlt_producer_get_fps(current_engine()->e_producer);
 
     if (fps <= 0.0) {
         set_error("Producer has an invalid frame rate.");
-        g_mutex_unlock(&engine_mutex);
+        g_mutex_unlock(&current_engine()->e_mutex);
         return 0;
     }
 
@@ -4920,7 +6584,7 @@ int mlt_bridge_seek_ms(
         );
 
     const int result = seek_frame_locked(frame);
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     if (result) {
         invalidate_frames();
@@ -4932,27 +6596,31 @@ int mlt_bridge_seek_ms(
 MLT_BRIDGE_EXPORT
 int64_t mlt_bridge_position_ms(void)
 {
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
 
-    if (producer == NULL) {
-        g_mutex_unlock(&engine_mutex);
+    if (current_engine()->e_producer == NULL) {
+        g_mutex_unlock(&current_engine()->e_mutex);
         return 0;
     }
 
     const double fps =
-        mlt_producer_get_fps(producer);
+        mlt_producer_get_fps(current_engine()->e_producer);
 
     if (fps <= 0.0) {
-        g_mutex_unlock(&engine_mutex);
+        g_mutex_unlock(&current_engine()->e_mutex);
         return 0;
     }
 
     const mlt_position position =
         visible_position_locked();
 
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     return (int64_t)(
         ((double)position / fps) * 1000.0
@@ -4962,17 +6630,21 @@ int64_t mlt_bridge_position_ms(void)
 MLT_BRIDGE_EXPORT
 int mlt_bridge_is_playing(void)
 {
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
 
     const int playing =
-        producer != NULL &&
-        consumer != NULL &&
-        !mlt_consumer_is_stopped(consumer) &&
-        mlt_producer_get_speed(producer) != 0.0;
+        current_engine()->e_producer != NULL &&
+        current_engine()->e_consumer != NULL &&
+        !mlt_consumer_is_stopped(current_engine()->e_consumer) &&
+        mlt_producer_get_speed(current_engine()->e_producer) != 0.0;
 
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     return playing;
 }
@@ -4980,24 +6652,28 @@ int mlt_bridge_is_playing(void)
 MLT_BRIDGE_EXPORT
 int mlt_bridge_is_eof(void)
 {
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
 
     int at_end = 0;
 
-    if (producer != NULL && !is_still) {
+    if (current_engine()->e_producer != NULL && !current_engine()->e_is_still) {
         const mlt_position length =
-            mlt_producer_get_length(producer);
+            mlt_producer_get_length(current_engine()->e_producer);
 
         mlt_position position =
-            mlt_producer_position(producer);
+            mlt_producer_position(current_engine()->e_producer);
 
-        if (consumer != NULL &&
-            !mlt_consumer_is_stopped(consumer) &&
-            mlt_producer_get_speed(producer) != 0.0) {
+        if (current_engine()->e_consumer != NULL &&
+            !mlt_consumer_is_stopped(current_engine()->e_consumer) &&
+            mlt_producer_get_speed(current_engine()->e_producer) != 0.0) {
             position =
-                mlt_consumer_position(consumer);
+                mlt_consumer_position(current_engine()->e_consumer);
         }
 
         at_end =
@@ -5005,7 +6681,7 @@ int mlt_bridge_is_eof(void)
             position >= length - 1;
     }
 
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     return at_end;
 }
@@ -5018,6 +6694,10 @@ MLT_BRIDGE_EXPORT
 void mlt_bridge_set_volume(
     double volume)
 {
+    if (require_current_engine() == NULL) {
+        return;
+    }
+
     ensure_locks();
 
     if (volume < 0.0) {
@@ -5028,31 +6708,35 @@ void mlt_bridge_set_volume(
         volume = 1.0;
     }
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
 
-    requested_volume = volume;
+    current_engine()->e_requested_volume = volume;
 
-    if (consumer != NULL) {
+    if (current_engine()->e_consumer != NULL) {
         mlt_properties_set_double(
-            MLT_CONSUMER_PROPERTIES(consumer),
+            MLT_CONSUMER_PROPERTIES(current_engine()->e_consumer),
             "volume",
             volume
         );
     }
 
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
 }
 
 MLT_BRIDGE_EXPORT
 double mlt_bridge_volume(void)
 {
+    if (require_current_engine() == NULL) {
+        return 1.0;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
 
-    const double volume = requested_volume;
+    const double volume = current_engine()->e_requested_volume;
 
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     return volume;
 }
@@ -5060,14 +6744,18 @@ double mlt_bridge_volume(void)
 MLT_BRIDGE_EXPORT
 int mlt_bridge_has_audio(void)
 {
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
 
     const int result =
-        producer != NULL && has_audio;
+        current_engine()->e_producer != NULL && current_engine()->e_has_audio;
 
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     return result;
 }
@@ -5079,11 +6767,15 @@ int mlt_bridge_has_audio(void)
 MLT_BRIDGE_EXPORT
 int mlt_bridge_stream_count(void)
 {
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
-    const int result = producer != NULL ? stream_count : 0;
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
+    const int result = current_engine()->e_producer != NULL ? current_engine()->e_stream_count : 0;
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     return result;
 }
@@ -5091,12 +6783,16 @@ int mlt_bridge_stream_count(void)
 MLT_BRIDGE_EXPORT
 int mlt_bridge_video_stream_index(void)
 {
+    if (require_current_engine() == NULL) {
+        return -1;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
     const int result =
-        producer != NULL ? selected_video_stream_index : -1;
-    g_mutex_unlock(&engine_mutex);
+        current_engine()->e_producer != NULL ? current_engine()->e_selected_video_stream_index : -1;
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     return result;
 }
@@ -5104,12 +6800,16 @@ int mlt_bridge_video_stream_index(void)
 MLT_BRIDGE_EXPORT
 int mlt_bridge_audio_stream_index(void)
 {
+    if (require_current_engine() == NULL) {
+        return -1;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
     const int result =
-        producer != NULL ? selected_audio_stream_index : -1;
-    g_mutex_unlock(&engine_mutex);
+        current_engine()->e_producer != NULL ? current_engine()->e_selected_audio_stream_index : -1;
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     return result;
 }
@@ -5119,14 +6819,18 @@ int mlt_bridge_video_codec_name_copy(
     char *buffer,
     int capacity)
 {
+    if (require_current_engine() == NULL) {
+        return copy_string_value("", buffer, capacity);
+    }
+
     ensure_locks();
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
     const int required = copy_string_value(
-        producer != NULL ? video_codec_name : "",
+        current_engine()->e_producer != NULL ? current_engine()->e_video_codec_name : "",
         buffer,
         capacity
     );
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
     return required;
 }
 
@@ -5135,14 +6839,18 @@ int mlt_bridge_video_codec_long_name_copy(
     char *buffer,
     int capacity)
 {
+    if (require_current_engine() == NULL) {
+        return copy_string_value("", buffer, capacity);
+    }
+
     ensure_locks();
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
     const int required = copy_string_value(
-        producer != NULL ? video_codec_long_name : "",
+        current_engine()->e_producer != NULL ? current_engine()->e_video_codec_long_name : "",
         buffer,
         capacity
     );
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
     return required;
 }
 
@@ -5151,14 +6859,18 @@ int mlt_bridge_audio_codec_name_copy(
     char *buffer,
     int capacity)
 {
+    if (require_current_engine() == NULL) {
+        return copy_string_value("", buffer, capacity);
+    }
+
     ensure_locks();
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
     const int required = copy_string_value(
-        producer != NULL ? audio_codec_name : "",
+        current_engine()->e_producer != NULL ? current_engine()->e_audio_codec_name : "",
         buffer,
         capacity
     );
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
     return required;
 }
 
@@ -5167,14 +6879,18 @@ int mlt_bridge_audio_codec_long_name_copy(
     char *buffer,
     int capacity)
 {
+    if (require_current_engine() == NULL) {
+        return copy_string_value("", buffer, capacity);
+    }
+
     ensure_locks();
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
     const int required = copy_string_value(
-        producer != NULL ? audio_codec_long_name : "",
+        current_engine()->e_producer != NULL ? current_engine()->e_audio_codec_long_name : "",
         buffer,
         capacity
     );
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
     return required;
 }
 
@@ -5184,15 +6900,19 @@ int mlt_bridge_stream_type_copy(
     char *buffer,
     int capacity)
 {
+    if (require_current_engine() == NULL) {
+        return copy_string_value("", buffer, capacity);
+    }
+
     ensure_locks();
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
     const StreamInspection *info = stream_inspection_at_locked(index);
     const int required = copy_string_value(
         info != NULL ? info->type : "",
         buffer,
         capacity
     );
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
     return required;
 }
 
@@ -5202,15 +6922,19 @@ int mlt_bridge_stream_codec_name_copy(
     char *buffer,
     int capacity)
 {
+    if (require_current_engine() == NULL) {
+        return copy_string_value("", buffer, capacity);
+    }
+
     ensure_locks();
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
     const StreamInspection *info = stream_inspection_at_locked(index);
     const int required = copy_string_value(
         info != NULL ? info->codec_name : "",
         buffer,
         capacity
     );
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
     return required;
 }
 
@@ -5220,15 +6944,19 @@ int mlt_bridge_stream_codec_long_name_copy(
     char *buffer,
     int capacity)
 {
+    if (require_current_engine() == NULL) {
+        return copy_string_value("", buffer, capacity);
+    }
+
     ensure_locks();
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
     const StreamInspection *info = stream_inspection_at_locked(index);
     const int required = copy_string_value(
         info != NULL ? info->codec_long_name : "",
         buffer,
         capacity
     );
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
     return required;
 }
 
@@ -5238,70 +6966,94 @@ int mlt_bridge_stream_language_copy(
     char *buffer,
     int capacity)
 {
+    if (require_current_engine() == NULL) {
+        return copy_string_value("", buffer, capacity);
+    }
+
     ensure_locks();
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
     const StreamInspection *info = stream_inspection_at_locked(index);
     const int required = copy_string_value(
         info != NULL ? info->language : "",
         buffer,
         capacity
     );
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
     return required;
 }
 
 MLT_BRIDGE_EXPORT
 int mlt_bridge_stream_channels(int index)
 {
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
     ensure_locks();
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
     const StreamInspection *info = stream_inspection_at_locked(index);
     const int result = info != NULL ? info->channels : 0;
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
     return result;
 }
 
 MLT_BRIDGE_EXPORT
 int mlt_bridge_stream_sample_rate(int index)
 {
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
     ensure_locks();
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
     const StreamInspection *info = stream_inspection_at_locked(index);
     const int result = info != NULL ? info->sample_rate : 0;
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
     return result;
 }
 
 MLT_BRIDGE_EXPORT
 int mlt_bridge_stream_width(int index)
 {
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
     ensure_locks();
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
     const StreamInspection *info = stream_inspection_at_locked(index);
     const int result = info != NULL ? info->width : 0;
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
     return result;
 }
 
 MLT_BRIDGE_EXPORT
 int mlt_bridge_stream_height(int index)
 {
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
     ensure_locks();
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
     const StreamInspection *info = stream_inspection_at_locked(index);
     const int result = info != NULL ? info->height : 0;
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
     return result;
 }
 
 MLT_BRIDGE_EXPORT
 int64_t mlt_bridge_stream_bit_rate(int index)
 {
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
     ensure_locks();
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
     const StreamInspection *info = stream_inspection_at_locked(index);
     const int64_t result = info != NULL ? info->bit_rate : 0;
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
     return result;
 }
 
@@ -5310,25 +7062,33 @@ int mlt_bridge_video_pixel_format_copy(
     char *buffer,
     int capacity)
 {
+    if (require_current_engine() == NULL) {
+        return copy_string_value("", buffer, capacity);
+    }
+
     ensure_locks();
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
     const int required = copy_string_value(
-        producer != NULL ? video_pixel_format : "",
+        current_engine()->e_producer != NULL ? current_engine()->e_video_pixel_format : "",
         buffer,
         capacity
     );
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
     return required;
 }
 
 MLT_BRIDGE_EXPORT
 int mlt_bridge_video_colorspace(void)
 {
+    if (require_current_engine() == NULL) {
+        return -1;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
-    const int result = producer != NULL ? video_colorspace : -1;
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
+    const int result = current_engine()->e_producer != NULL ? current_engine()->e_video_colorspace : -1;
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     return result;
 }
@@ -5336,11 +7096,15 @@ int mlt_bridge_video_colorspace(void)
 MLT_BRIDGE_EXPORT
 int mlt_bridge_video_color_trc(void)
 {
+    if (require_current_engine() == NULL) {
+        return -1;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
-    const int result = producer != NULL ? video_color_trc : -1;
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
+    const int result = current_engine()->e_producer != NULL ? current_engine()->e_video_color_trc : -1;
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     return result;
 }
@@ -5350,14 +7114,18 @@ int mlt_bridge_video_color_range_copy(
     char *buffer,
     int capacity)
 {
+    if (require_current_engine() == NULL) {
+        return copy_string_value("", buffer, capacity);
+    }
+
     ensure_locks();
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
     const int required = copy_string_value(
-        producer != NULL ? video_color_range : "",
+        current_engine()->e_producer != NULL ? current_engine()->e_video_color_range : "",
         buffer,
         capacity
     );
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
     return required;
 }
 
@@ -5366,30 +7134,38 @@ int mlt_bridge_source_timecode_copy(
     char *buffer,
     int capacity)
 {
+    if (require_current_engine() == NULL) {
+        return copy_string_value("", buffer, capacity);
+    }
+
     ensure_locks();
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
     const int required = copy_string_value(
-        producer != NULL ? source_timecode : "",
+        current_engine()->e_producer != NULL ? current_engine()->e_source_timecode : "",
         buffer,
         capacity
     );
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
     return required;
 }
 
 MLT_BRIDGE_EXPORT
 int64_t mlt_bridge_duration_frames(void)
 {
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
 
     const int64_t frames =
-        producer != NULL && !is_still
-            ? (int64_t)mlt_producer_get_length(producer)
+        current_engine()->e_producer != NULL && !current_engine()->e_is_still
+            ? (int64_t)mlt_producer_get_length(current_engine()->e_producer)
             : 0;
 
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     return frames;
 }
@@ -5397,16 +7173,20 @@ int64_t mlt_bridge_duration_frames(void)
 MLT_BRIDGE_EXPORT
 double mlt_bridge_fps(void)
 {
+    if (require_current_engine() == NULL) {
+        return 0.0;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
 
     const double fps =
-        producer != NULL
-            ? mlt_producer_get_fps(producer)
+        current_engine()->e_producer != NULL
+            ? mlt_producer_get_fps(current_engine()->e_producer)
             : 0.0;
 
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     return fps;
 }
@@ -5414,26 +7194,30 @@ double mlt_bridge_fps(void)
 MLT_BRIDGE_EXPORT
 int64_t mlt_bridge_duration_ms(void)
 {
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
 
     int64_t duration = 0;
 
-    if (producer != NULL && !is_still) {
+    if (current_engine()->e_producer != NULL && !current_engine()->e_is_still) {
         const double fps =
-            mlt_producer_get_fps(producer);
+            mlt_producer_get_fps(current_engine()->e_producer);
 
         if (fps > 0.0) {
             const int64_t frames =
-                (int64_t)mlt_producer_get_length(producer);
+                (int64_t)mlt_producer_get_length(current_engine()->e_producer);
 
             duration =
                 (int64_t)(((double)frames / fps) * 1000.0);
         }
     }
 
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     return duration;
 }
@@ -5441,16 +7225,20 @@ int64_t mlt_bridge_duration_ms(void)
 MLT_BRIDGE_EXPORT
 int mlt_bridge_width(void)
 {
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
 
     const int width =
-        producer != NULL && has_video && profile != NULL
-            ? profile->width
+        current_engine()->e_producer != NULL && current_engine()->e_has_video && current_engine()->e_profile != NULL
+            ? current_engine()->e_profile->width
             : 0;
 
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     return width;
 }
@@ -5458,16 +7246,20 @@ int mlt_bridge_width(void)
 MLT_BRIDGE_EXPORT
 int mlt_bridge_height(void)
 {
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
 
     const int height =
-        producer != NULL && has_video && profile != NULL
-            ? profile->height
+        current_engine()->e_producer != NULL && current_engine()->e_has_video && current_engine()->e_profile != NULL
+            ? current_engine()->e_profile->height
             : 0;
 
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     return height;
 }
@@ -5475,28 +7267,32 @@ int mlt_bridge_height(void)
 MLT_BRIDGE_EXPORT
 double mlt_bridge_display_aspect(void)
 {
+    if (require_current_engine() == NULL) {
+        return 0.0;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
 
     double aspect = 0.0;
 
-    if (producer != NULL &&
-        has_video &&
-        profile != NULL) {
-        if (profile->display_aspect_num > 0 &&
-            profile->display_aspect_den > 0) {
+    if (current_engine()->e_producer != NULL &&
+        current_engine()->e_has_video &&
+        current_engine()->e_profile != NULL) {
+        if (current_engine()->e_profile->display_aspect_num > 0 &&
+            current_engine()->e_profile->display_aspect_den > 0) {
             aspect =
-                (double)profile->display_aspect_num /
-                (double)profile->display_aspect_den;
-        } else if (profile->height > 0) {
+                (double)current_engine()->e_profile->display_aspect_num /
+                (double)current_engine()->e_profile->display_aspect_den;
+        } else if (current_engine()->e_profile->height > 0) {
             aspect =
-                (double)profile->width /
-                (double)profile->height;
+                (double)current_engine()->e_profile->width /
+                (double)current_engine()->e_profile->height;
         }
     }
 
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     return aspect;
 }
@@ -5504,14 +7300,18 @@ double mlt_bridge_display_aspect(void)
 MLT_BRIDGE_EXPORT
 int mlt_bridge_is_still(void)
 {
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&current_engine()->e_mutex);
 
     const int result =
-        producer != NULL && is_still;
+        current_engine()->e_producer != NULL && current_engine()->e_is_still;
 
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&current_engine()->e_mutex);
 
     return result;
 }

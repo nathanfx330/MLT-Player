@@ -55,6 +55,15 @@ int mlt_composition_configure_transition(
     double opacity
 );
 
+int mlt_composition_get_geometry(
+    mlt_transition transition,
+    double *x_out,
+    double *y_out,
+    double *width_out,
+    double *height_out,
+    double *opacity_out
+);
+
 mlt_filter mlt_composition_attach_alpha_filter(
     mlt_producer target,
     int mode

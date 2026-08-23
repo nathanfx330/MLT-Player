@@ -4,6 +4,9 @@
 
 #include <stdint.h>
 
+#include "mlt_layers.h"
+#include "mlt_parity.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -15,21 +18,30 @@ typedef enum _MltExportKind {
     MLT_EXPORT_KIND_WAV_AUDIO = 3
 } MltExportKind;
 
+typedef struct _MltExportLayerSnapshot {
+    const char *path;
+    int present;
+    int64_t start_frame;
+
+    int has_audio;
+    int is_still;
+    int alpha_mode;
+
+    double audio_gain;
+    double opacity;
+    double x;
+    double y;
+    double scale;
+} MltExportLayerSnapshot;
+
+/*
+ * POC 11 composition snapshot. Slot 0 is the base movie; slots 1 and 2 are
+ * independent overlays. Preview and export consume the same three-slot value
+ * state so Layer 3 cannot drift from the live tractor during export.
+ */
 typedef struct _MltExportCompositionSnapshot {
-    const char *base_path;
-    const char *layer2_path;
-    int has_layer2;
-    int base_has_audio;
-    int layer2_has_audio;
-    int layer2_is_still;
-    int layer2_alpha_mode;
-    int64_t layer2_start_frame;
-    double base_audio_gain;
-    double layer2_audio_gain;
-    double layer2_opacity;
-    double layer2_x;
-    double layer2_y;
-    double layer2_scale;
+    int layer_count;
+    MltExportLayerSnapshot layers[MLT_COMPOSITION_MAX_LAYERS];
 } MltExportCompositionSnapshot;
 
 void mlt_export_set_error(const char *message);
@@ -48,6 +60,15 @@ int mlt_export_start_composition(
     int64_t in_frame,
     int64_t out_frame,
     MltExportKind kind
+);
+
+int mlt_export_derive_composition(
+    const MltExportCompositionSnapshot *snapshot,
+    int64_t in_frame,
+    int64_t out_frame,
+    MltCompositionDerivedState *state_out,
+    char *error_buffer,
+    int error_capacity
 );
 
 void mlt_export_cancel(void);
