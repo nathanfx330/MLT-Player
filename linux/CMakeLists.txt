@@ -126,6 +126,8 @@ add_library(
   mlt_bridge
   SHARED
   "../native/mlt_bridge.c"
+  "../native/mlt_composition.c"
+  "../native/mlt_export.c"
 )
 
 target_include_directories(

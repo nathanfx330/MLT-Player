@@ -1,6 +1,8 @@
 /* native/mlt_bridge.c */
 
 #include "mlt_bridge.h"
+#include "mlt_composition.h"
+#include "mlt_export.h"
 
 #include <flutter_linux/flutter_linux.h>
 #include <epoxy/gl.h>
@@ -236,68 +238,6 @@ static int factory_shutdown_requested = 0;
 static char init_error[512] = "";
 
 /* ------------------------------------------------------------------------- */
-/* Export state                                                              */
-/* ------------------------------------------------------------------------- */
-
-/*
- * Export owns a completely separate producer/profile/consumer graph from
- * preview playback. Only these small status fields cross thread boundaries.
- */
-static GMutex export_mutex;
-static GThread *export_thread = NULL;
-static int export_running = 0;
-static int export_success = 0;
-static int export_cancel_requested = 0;
-static double export_progress = 0.0;
-static char export_error[512] = "";
-
-typedef enum _ExportKind {
-    EXPORT_KIND_MP4 = 0,
-    EXPORT_KIND_PNG_FRAME = 1,
-    EXPORT_KIND_PNG_SEQUENCE = 2,
-    EXPORT_KIND_WAV_AUDIO = 3
-} ExportKind;
-
-typedef struct _ExportJob {
-    char *export_source_path;
-    char *export_secondary_path;
-    char *export_output_path;
-    int64_t export_in_frame;
-    int64_t export_out_frame;
-    int64_t export_secondary_start_frame;
-    int export_has_secondary;
-    int export_snapshot_valid;
-    int export_primary_has_audio;
-    int export_secondary_has_audio;
-    int export_secondary_is_still;
-    int export_secondary_alpha_mode;
-    double export_primary_audio_gain;
-    double export_secondary_audio_gain;
-    double export_secondary_opacity;
-    double export_secondary_x;
-    double export_secondary_y;
-    double export_secondary_scale;
-    ExportKind export_kind;
-} ExportJob;
-
-typedef struct _ExportGraph {
-    mlt_profile export_profile;
-    mlt_producer export_primary;
-    mlt_producer export_secondary;
-    mlt_playlist export_secondary_playlist;
-    mlt_tractor export_tractor;
-    mlt_transition export_composite;
-    mlt_transition export_mix;
-    mlt_producer export_top;
-} ExportGraph;
-
-/* Defined with the layer-alpha helpers below; export reuses the same filter. */
-static mlt_frame alpha_interpret_process(
-    mlt_filter filter,
-    mlt_frame frame
-);
-
-/* ------------------------------------------------------------------------- */
 /* Flutter texture state                                                     */
 /* ------------------------------------------------------------------------- */
 
@@ -344,7 +284,6 @@ static void ensure_locks(void)
     if (g_once_init_enter(&locks_initialized)) {
         g_mutex_init(&factory_mutex);
         g_mutex_init(&texture_mutex);
-        g_mutex_init(&export_mutex);
 
         g_once_init_leave(&locks_initialized, 1);
     }
@@ -1977,2104 +1916,6 @@ static void refresh_locked(void)
 
 
 /* ------------------------------------------------------------------------- */
-/* Background export                                                        */
-/* ------------------------------------------------------------------------- */
-
-static void export_set_error_locked(const char *message)
-{
-    if (message == NULL) {
-        export_error[0] = '\0';
-        return;
-    }
-
-    snprintf(
-        export_error,
-        sizeof(export_error),
-        "%s",
-        message
-    );
-}
-
-static int export_cancel_was_requested(void)
-{
-    ensure_locks();
-
-    g_mutex_lock(&export_mutex);
-    const int requested = export_cancel_requested;
-    g_mutex_unlock(&export_mutex);
-
-    return requested;
-}
-
-static void export_publish_progress(double value)
-{
-    if (value < 0.0) {
-        value = 0.0;
-    } else if (value > 1.0) {
-        value = 1.0;
-    }
-
-    ensure_locks();
-
-    g_mutex_lock(&export_mutex);
-    export_progress = value;
-    g_mutex_unlock(&export_mutex);
-}
-
-static int output_file_has_data(const char *path)
-{
-    struct stat info;
-
-    return path != NULL &&
-        stat(path, &info) == 0 &&
-        info.st_size > 0;
-}
-
-/*
- * image2 treats percent signs in its target as filename-pattern syntax.
- * Escape any literal percent signs in the chosen directory before appending
- * the one pattern token that belongs to this export.
- */
-static char *export_sequence_consumer_target(
-    const char *directory)
-{
-    if (directory == NULL ||
-        directory[0] == '\0') {
-        return NULL;
-    }
-
-    GString *escaped =
-        g_string_sized_new(strlen(directory) + 32);
-
-    if (escaped == NULL) {
-        return NULL;
-    }
-
-    for (const char *cursor = directory;
-         *cursor != '\0';
-         cursor++) {
-        if (*cursor == '%') {
-            g_string_append(escaped, "%%");
-        } else {
-            g_string_append_c(escaped, *cursor);
-        }
-    }
-
-    char *target =
-        g_build_filename(
-            escaped->str,
-            "frame_%06d.png",
-            NULL
-        );
-
-    g_string_free(escaped, TRUE);
-
-    return target;
-}
-
-static int64_t export_sequence_frame_number(
-    const char *name)
-{
-    static const char prefix[] = "frame_";
-    static const char suffix[] = ".png";
-
-    if (name == NULL ||
-        !g_str_has_prefix(name, prefix) ||
-        !g_str_has_suffix(name, suffix)) {
-        return -1;
-    }
-
-    const size_t name_length = strlen(name);
-    const size_t prefix_length = strlen(prefix);
-    const size_t suffix_length = strlen(suffix);
-
-    if (name_length <= prefix_length + suffix_length) {
-        return -1;
-    }
-
-    const size_t digits_length =
-        name_length - prefix_length - suffix_length;
-
-    if (digits_length < 6) {
-        return -1;
-    }
-
-    int64_t value = 0;
-
-    for (size_t index = 0;
-         index < digits_length;
-         index++) {
-        const char digit =
-            name[prefix_length + index];
-
-        if (digit < '0' || digit > '9') {
-            return -1;
-        }
-
-        const int next_digit = digit - '0';
-
-        if (value > (G_MAXINT64 - next_digit) / 10) {
-            return -1;
-        }
-
-        value = (value * 10) + next_digit;
-    }
-
-    return value > 0 ? value : -1;
-}
-
-static int export_sequence_filename_is_owned(
-    const char *name)
-{
-    return export_sequence_frame_number(name) > 0;
-}
-
-static int export_directory_is_empty(
-    const char *directory)
-{
-    if (directory == NULL ||
-        directory[0] == '\0') {
-        return 0;
-    }
-
-    GDir *dir =
-        g_dir_open(directory, 0, NULL);
-
-    if (dir == NULL) {
-        return 0;
-    }
-
-    const char *name =
-        g_dir_read_name(dir);
-
-    const int is_empty =
-        name == NULL;
-
-    g_dir_close(dir);
-
-    return is_empty;
-}
-
-/*
- * Sequence exports always target a dedicated directory created by the Dart
- * UI. On cancellation or failure, delete only filenames owned by this export
- * and then remove the directory if it is empty. This preserves the same
- * "no partial output" contract used by movie and still exports.
- */
-static void export_remove_sequence_outputs(
-    const char *directory)
-{
-    if (directory == NULL ||
-        directory[0] == '\0') {
-        return;
-    }
-
-    GDir *dir =
-        g_dir_open(directory, 0, NULL);
-
-    if (dir != NULL) {
-        const char *name = NULL;
-
-        while ((name = g_dir_read_name(dir)) != NULL) {
-            if (!export_sequence_filename_is_owned(name)) {
-                continue;
-            }
-
-            char *path =
-                g_build_filename(
-                    directory,
-                    name,
-                    NULL
-                );
-
-            if (path != NULL) {
-                remove(path);
-                g_free(path);
-            }
-        }
-
-        g_dir_close(dir);
-    }
-
-    /*
-     * remove() also removes an empty directory on POSIX. If a caller placed
-     * unrelated files there, it safely fails and leaves the directory alone.
-     */
-    remove(directory);
-}
-
-static void export_remove_partial_output(
-    const ExportJob *job)
-{
-    if (job == NULL) {
-        return;
-    }
-
-    if (job->export_kind == EXPORT_KIND_PNG_SEQUENCE) {
-        export_remove_sequence_outputs(job->export_output_path);
-        return;
-    }
-
-    remove(job->export_output_path);
-}
-
-static void export_job_free(ExportJob *job)
-{
-    if (job == NULL) {
-        return;
-    }
-
-    g_free(job->export_source_path);
-    g_free(job->export_secondary_path);
-    g_free(job->export_output_path);
-    g_free(job);
-}
-
-static void export_set_failure(
-    char *failure,
-    size_t failure_size,
-    const char *message)
-{
-    if (failure == NULL ||
-        failure_size == 0) {
-        return;
-    }
-
-    snprintf(
-        failure,
-        failure_size,
-        "%s",
-        message != NULL ? message : "Export failed."
-    );
-}
-
-static int export_prepare_destination(
-    const ExportJob *job,
-    char *failure,
-    size_t failure_size)
-{
-    if (job->export_kind == EXPORT_KIND_PNG_SEQUENCE) {
-        if (!g_file_test(
-                job->export_output_path,
-                G_FILE_TEST_IS_DIR)) {
-            export_set_failure(
-                failure,
-                failure_size,
-                "The image-sequence destination directory is unavailable."
-            );
-            return 0;
-        }
-
-        /*
-         * Native code enforces the same ownership contract as the Dart UI:
-         * a sequence export only starts in a fresh, empty directory. This
-         * makes cancellation cleanup safe even for callers outside Flutter.
-         */
-        if (!export_directory_is_empty(job->export_output_path)) {
-            export_set_failure(
-                failure,
-                failure_size,
-                "The image-sequence destination directory must be empty."
-            );
-            return 0;
-        }
-
-        return 1;
-    }
-
-    /*
-     * Save dialogs handle overwrite confirmation for single-file exports.
-     * Remove the destination immediately before encoding so avformat always
-     * receives a fresh target.
-     */
-    remove(job->export_output_path);
-
-    return 1;
-}
-
-/*
- * Build the independent source graph shared by every export kind.
- *
- * The source is probed once to derive its native profile, reopened against
- * that profile, constrained to the requested absolute source-frame range,
- * then rebased so producer position zero is the first export frame.
- */
-static void export_graph_close(ExportGraph *graph)
-{
-    if (graph == NULL) {
-        return;
-    }
-
-    graph->export_top = NULL;
-
-    if (graph->export_tractor != NULL) {
-        mlt_tractor_close(graph->export_tractor);
-        graph->export_tractor = NULL;
-    }
-
-    if (graph->export_composite != NULL) {
-        mlt_transition_close(graph->export_composite);
-        graph->export_composite = NULL;
-    }
-
-    if (graph->export_mix != NULL) {
-        mlt_transition_close(graph->export_mix);
-        graph->export_mix = NULL;
-    }
-
-    if (graph->export_secondary_playlist != NULL) {
-        mlt_playlist_close(graph->export_secondary_playlist);
-        graph->export_secondary_playlist = NULL;
-    }
-
-    if (graph->export_secondary != NULL) {
-        mlt_producer_close(graph->export_secondary);
-        graph->export_secondary = NULL;
-    }
-
-    if (graph->export_primary != NULL) {
-        mlt_producer_close(graph->export_primary);
-        graph->export_primary = NULL;
-    }
-
-    if (graph->export_profile != NULL) {
-        mlt_profile_close(graph->export_profile);
-        graph->export_profile = NULL;
-    }
-}
-
-static int export_attach_audio_gain(
-    mlt_profile export_profile,
-    mlt_producer target,
-    double gain)
-{
-    if (export_profile == NULL || target == NULL) {
-        return 0;
-    }
-
-    mlt_filter filter =
-        mlt_factory_filter(
-            export_profile,
-            "volume",
-            NULL
-        );
-
-    if (filter == NULL) {
-        return 0;
-    }
-
-    mlt_properties_set_double(
-        MLT_FILTER_PROPERTIES(filter),
-        "gain",
-        gain
-    );
-
-    const int attached =
-        mlt_producer_attach(
-            target,
-            filter
-        ) == 0;
-
-    mlt_filter_close(filter);
-    return attached;
-}
-
-static int export_attach_still_converter(
-    mlt_profile export_profile,
-    mlt_producer target)
-{
-    if (export_profile == NULL || target == NULL) {
-        return 0;
-    }
-
-    mlt_filter filter =
-        mlt_factory_filter(
-            export_profile,
-            "avcolor_space",
-            NULL
-        );
-
-    if (filter == NULL) {
-        filter =
-            mlt_factory_filter(
-                export_profile,
-                "imageconvert",
-                NULL
-            );
-    }
-
-    if (filter == NULL) {
-        return 0;
-    }
-
-    const int attached =
-        mlt_producer_attach(
-            target,
-            filter
-        ) == 0;
-
-    mlt_filter_close(filter);
-    return attached;
-}
-
-static int export_attach_alpha_interpretation(
-    mlt_producer target,
-    int mode)
-{
-    if (target == NULL || mode < 0 || mode > 2) {
-        return 0;
-    }
-
-    mlt_filter filter = mlt_filter_new();
-
-    if (filter == NULL) {
-        return 0;
-    }
-
-    filter->process = alpha_interpret_process;
-
-    mlt_properties_set_int(
-        MLT_FILTER_PROPERTIES(filter),
-        "mlt_player_alpha_mode",
-        mode
-    );
-    mlt_properties_set_int(
-        MLT_FILTER_PROPERTIES(filter),
-        "disable",
-        mode == 2 ? 0 : 1
-    );
-
-    const int attached =
-        mlt_producer_attach(
-            target,
-            filter
-        ) == 0;
-
-    mlt_filter_close(filter);
-    return attached;
-}
-
-static int secondary_base_size_for_source(
-    mlt_profile target_profile,
-    mlt_producer source,
-    int source_is_still,
-    double *out_width,
-    double *out_height)
-{
-    if (target_profile == NULL ||
-        source == NULL ||
-        out_width == NULL ||
-        out_height == NULL ||
-        target_profile->width <= 0 ||
-        target_profile->height <= 0) {
-        return 0;
-    }
-
-    mlt_properties properties =
-        MLT_PRODUCER_PROPERTIES(source);
-
-    int source_width =
-        mlt_properties_get_int(
-            properties,
-            "meta.media.width"
-        );
-    int source_height =
-        mlt_properties_get_int(
-            properties,
-            "meta.media.height"
-        );
-
-    if (source_width <= 0) {
-        source_width =
-            mlt_properties_get_int(
-                properties,
-                "width"
-            );
-    }
-    if (source_height <= 0) {
-        source_height =
-            mlt_properties_get_int(
-                properties,
-                "height"
-            );
-    }
-
-    if (source_width <= 0 || source_height <= 0) {
-        return 0;
-    }
-
-    double source_sar =
-        mlt_properties_get_double(
-            properties,
-            "aspect_ratio"
-        );
-    if (!isfinite(source_sar) || source_sar <= 0.0) {
-        source_sar = 1.0;
-    }
-
-    double output_sar =
-        mlt_profile_sar(target_profile);
-    if (!isfinite(output_sar) || output_sar <= 0.0) {
-        output_sar = 1.0;
-    }
-
-    double display_width =
-        (double)source_width *
-        source_sar /
-        output_sar;
-    double display_height =
-        (double)source_height;
-
-    if (!isfinite(display_width) ||
-        !isfinite(display_height) ||
-        display_width <= 0.0 ||
-        display_height <= 0.0) {
-        return 0;
-    }
-
-    const double canvas_width =
-        (double)target_profile->width;
-    const double canvas_height =
-        (double)target_profile->height;
-
-    double fit =
-        canvas_width / display_width;
-    const double height_fit =
-        canvas_height / display_height;
-
-    if (height_fit < fit) {
-        fit = height_fit;
-    }
-
-    if (source_is_still && fit > 1.0) {
-        fit = 1.0;
-    }
-
-    if (!isfinite(fit) || fit <= 0.0) {
-        return 0;
-    }
-
-    display_width *= fit;
-    display_height *= fit;
-
-    if (display_width < 1.0) {
-        display_width = 1.0;
-    }
-    if (display_height < 1.0) {
-        display_height = 1.0;
-    }
-
-    *out_width = display_width;
-    *out_height = display_height;
-    return 1;
-}
-
-typedef enum _SecondaryPlacementResult {
-    SECONDARY_PLACEMENT_OK = 0,
-    SECONDARY_PLACEMENT_INVALID_ARGUMENT = 1,
-    SECONDARY_PLACEMENT_NO_DURATION = 2,
-    SECONDARY_PLACEMENT_NO_ROOM = 3,
-    SECONDARY_PLACEMENT_SOURCE_INIT_FAILED = 4,
-    SECONDARY_PLACEMENT_PLAYLIST_CREATE_FAILED = 5,
-    SECONDARY_PLACEMENT_LEAD_IN_FAILED = 6,
-    SECONDARY_PLACEMENT_APPEND_FAILED = 7
-} SecondaryPlacementResult;
-
-/*
- * Build Layer 2's timeline in exactly one place.
- *
- * Preview and export own separate MLT producers/playlists, but the rules for
- * when Layer 2 starts, how long it runs, and how stills are held must be
- * identical. Keeping those rules here prevents a future trim/timing change
- * from silently making the exported movie disagree with the viewer.
- *
- * The caller keeps ownership of source. On success playlist_out receives a
- * newly created playlist owned by the caller. On failure this helper closes
- * any playlist it created and leaves playlist_out NULL.
- */
-static SecondaryPlacementResult build_secondary_playlist(
-    mlt_profile target_profile,
-    mlt_producer source,
-    mlt_position start_frame,
-    mlt_position base_length,
-    int source_is_still,
-    mlt_playlist *playlist_out,
-    mlt_position *normalized_start_out)
-{
-    if (playlist_out == NULL) {
-        return SECONDARY_PLACEMENT_INVALID_ARGUMENT;
-    }
-
-    *playlist_out = NULL;
-
-    if (normalized_start_out != NULL) {
-        *normalized_start_out = 0;
-    }
-
-    if (target_profile == NULL ||
-        source == NULL ||
-        base_length <= 0) {
-        return SECONDARY_PLACEMENT_INVALID_ARGUMENT;
-    }
-
-    mlt_position normalized_start = start_frame;
-
-    if (normalized_start < 0) {
-        normalized_start = 0;
-    }
-    if (normalized_start >= base_length) {
-        normalized_start = base_length - 1;
-    }
-
-    const mlt_position available_length =
-        base_length - normalized_start;
-
-    const mlt_position source_length =
-        source_is_still
-            ? 0
-            : mlt_producer_get_length(source);
-
-    if (!source_is_still &&
-        source_length <= 0) {
-        return SECONDARY_PLACEMENT_NO_DURATION;
-    }
-
-    const mlt_position playtime =
-        source_is_still
-            ? available_length
-            : (source_length < available_length
-                   ? source_length
-                   : available_length);
-
-    if (playtime <= 0) {
-        return SECONDARY_PLACEMENT_NO_ROOM;
-    }
-
-    const mlt_position source_out =
-        playtime - 1;
-
-    if (source_is_still) {
-        /*
-         * Still producers have a synthetic default length. Make the still
-         * explicitly last for every remaining base-movie frame.
-         */
-        mlt_properties_set_position(
-            MLT_PRODUCER_PROPERTIES(source),
-            "length",
-            playtime
-        );
-    }
-
-    if (mlt_producer_set_in_and_out(
-            source,
-            0,
-            source_out) != 0 ||
-        mlt_producer_seek(source, 0) != 0 ||
-        mlt_producer_set_speed(source, 0.0) != 0) {
-        return SECONDARY_PLACEMENT_SOURCE_INIT_FAILED;
-    }
-
-    mlt_playlist playlist =
-        mlt_playlist_new(target_profile);
-
-    if (playlist == NULL) {
-        return SECONDARY_PLACEMENT_PLAYLIST_CREATE_FAILED;
-    }
-
-    if (normalized_start > 0 &&
-        mlt_playlist_blank(
-            playlist,
-            normalized_start - 1) != 0) {
-        mlt_playlist_close(playlist);
-        return SECONDARY_PLACEMENT_LEAD_IN_FAILED;
-    }
-
-    if (mlt_playlist_append_io(
-            playlist,
-            source,
-            0,
-            source_out) != 0) {
-        mlt_playlist_close(playlist);
-        return SECONDARY_PLACEMENT_APPEND_FAILED;
-    }
-
-    *playlist_out = playlist;
-
-    if (normalized_start_out != NULL) {
-        *normalized_start_out = normalized_start;
-    }
-
-    return SECONDARY_PLACEMENT_OK;
-}
-
-/*
- * Encode the composite rectangle in exactly one place. Preview mutations and
- * offline export both call this helper, so adding a future transform cannot
- * silently fork the two render paths.
- */
-static int set_composite_geometry(
-    mlt_transition transition,
-    double x,
-    double y,
-    double width,
-    double height,
-    double opacity)
-{
-    if (transition == NULL ||
-        !isfinite(x) ||
-        !isfinite(y) ||
-        !isfinite(width) ||
-        !isfinite(height) ||
-        !isfinite(opacity) ||
-        width <= 0.0 ||
-        height <= 0.0 ||
-        opacity < 0.0 ||
-        opacity > 1.0) {
-        return 0;
-    }
-
-    char geometry[160];
-    snprintf(
-        geometry,
-        sizeof(geometry),
-        "%.6f/%.6f:%.6fx%.6f:%.6f",
-        x,
-        y,
-        width,
-        height,
-        opacity
-    );
-
-    mlt_properties_set(
-        MLT_TRANSITION_PROPERTIES(transition),
-        "geometry",
-        geometry
-    );
-
-    return 1;
-}
-
-/*
- * Static composite policy is also shared. The live preview and the export
- * worker still own separate MLT transitions; they now share the rules used to
- * configure those transitions.
- */
-static int configure_composite_transition(
-    mlt_transition transition,
-    double x,
-    double y,
-    double width,
-    double height,
-    double opacity)
-{
-    if (transition == NULL) {
-        return 0;
-    }
-
-    mlt_properties properties =
-        MLT_TRANSITION_PROPERTIES(transition);
-
-    mlt_properties_set_int(properties, "always_active", 1);
-    mlt_properties_set_int(properties, "progressive", 1);
-    mlt_properties_set_int(properties, "invert", 0);
-    mlt_properties_set_int(properties, "aligned", 1);
-    mlt_properties_set_int(properties, "fill", 1);
-    mlt_properties_set_int(properties, "distort", 0);
-    mlt_properties_set(properties, "halign", "left");
-    mlt_properties_set(properties, "valign", "top");
-
-    return set_composite_geometry(
-        transition,
-        x,
-        y,
-        width,
-        height,
-        opacity
-    );
-}
-
-/*
- * Build an export-only graph from a snapshot of the open movie. With one
- * layer this remains the original source-only path. With two layers it
- * recreates the preview tractor using fresh producers so the export worker
- * never shares live MLT objects with preview playback.
- */
-static int export_prepare_source_graph(
-    const ExportJob *job,
-    ExportGraph *graph,
-    int64_t *in_frame_out,
-    int64_t *out_frame_out,
-    char *failure,
-    size_t failure_size)
-{
-    mlt_producer probe_producer = NULL;
-
-    if (job == NULL || graph == NULL) {
-        export_set_failure(
-            failure,
-            failure_size,
-            "The export graph request is invalid."
-        );
-        return 0;
-    }
-
-    memset(graph, 0, sizeof(*graph));
-
-    graph->export_profile = mlt_profile_init(NULL);
-
-    if (graph->export_profile == NULL) {
-        export_set_failure(
-            failure,
-            failure_size,
-            "Could not create an MLT export profile."
-        );
-        goto fail;
-    }
-
-    probe_producer =
-        mlt_factory_producer(
-            graph->export_profile,
-            NULL,
-            job->export_source_path
-        );
-
-    if (probe_producer == NULL) {
-        export_set_failure(
-            failure,
-            failure_size,
-            "MLT could not open the base source for export."
-        );
-        goto fail;
-    }
-
-    mlt_producer_probe(probe_producer);
-    mlt_profile_from_producer(graph->export_profile, probe_producer);
-    mlt_producer_close(probe_producer);
-    probe_producer = NULL;
-
-    graph->export_primary =
-        mlt_factory_producer(
-            graph->export_profile,
-            NULL,
-            job->export_source_path
-        );
-
-    if (graph->export_primary == NULL) {
-        export_set_failure(
-            failure,
-            failure_size,
-            "MLT could not reopen the base source for export."
-        );
-        goto fail;
-    }
-
-    mlt_producer_probe(graph->export_primary);
-
-    const int64_t source_length =
-        (int64_t)mlt_producer_get_length(graph->export_primary);
-
-    int64_t in_frame = job->export_in_frame;
-    int64_t out_frame = job->export_out_frame;
-
-    if (in_frame < 0) {
-        in_frame = 0;
-    }
-    if (out_frame >= source_length) {
-        out_frame = source_length - 1;
-    }
-
-    if (source_length <= 0 || out_frame < in_frame) {
-        export_set_failure(
-            failure,
-            failure_size,
-            "The requested export range is invalid."
-        );
-        goto fail;
-    }
-
-    if (job->export_snapshot_valid &&
-        job->export_primary_has_audio &&
-        !export_attach_audio_gain(
-            graph->export_profile,
-            graph->export_primary,
-            job->export_primary_audio_gain)) {
-        export_set_failure(
-            failure,
-            failure_size,
-            "Could not apply Layer 1 audio level to export."
-        );
-        goto fail;
-    }
-
-    if (!job->export_has_secondary) {
-        if (mlt_producer_set_in_and_out(
-                graph->export_primary,
-                (mlt_position)in_frame,
-                (mlt_position)out_frame) != 0 ||
-            mlt_producer_seek(graph->export_primary, 0) != 0 ||
-            mlt_producer_set_speed(graph->export_primary, 1.0) != 0) {
-            export_set_failure(
-                failure,
-                failure_size,
-                "MLT could not initialize the export range."
-            );
-            goto fail;
-        }
-
-        graph->export_top = graph->export_primary;
-        *in_frame_out = in_frame;
-        *out_frame_out = out_frame;
-        return 1;
-    }
-
-    if (job->export_secondary_path == NULL ||
-        job->export_secondary_path[0] == '\0') {
-        export_set_failure(
-            failure,
-            failure_size,
-            "Layer 2 has no exportable source path."
-        );
-        goto fail;
-    }
-
-    if (job->export_secondary_is_still) {
-        graph->export_secondary =
-            mlt_factory_producer(
-                graph->export_profile,
-                "pixbuf",
-                job->export_secondary_path
-            );
-
-        if (graph->export_secondary == NULL) {
-            graph->export_secondary =
-                mlt_factory_producer(
-                    graph->export_profile,
-                    "avformat",
-                    job->export_secondary_path
-                );
-        }
-    } else {
-        graph->export_secondary =
-            mlt_factory_producer(
-                graph->export_profile,
-                NULL,
-                job->export_secondary_path
-            );
-    }
-
-    if (graph->export_secondary == NULL) {
-        export_set_failure(
-            failure,
-            failure_size,
-            "MLT could not open Layer 2 for export."
-        );
-        goto fail;
-    }
-
-    if (job->export_secondary_is_still &&
-        !export_attach_still_converter(
-            graph->export_profile,
-            graph->export_secondary)) {
-        export_set_failure(
-            failure,
-            failure_size,
-            "Could not install Layer 2 still-image conversion for export."
-        );
-        goto fail;
-    }
-
-    mlt_producer_probe(graph->export_secondary);
-
-    const SecondaryPlacementResult placement_result =
-        build_secondary_playlist(
-            graph->export_profile,
-            graph->export_secondary,
-            (mlt_position)job->export_secondary_start_frame,
-            (mlt_position)source_length,
-            job->export_secondary_is_still,
-            &graph->export_secondary_playlist,
-            NULL
-        );
-
-    if (placement_result != SECONDARY_PLACEMENT_OK) {
-        const char *placement_error =
-            "Could not configure Layer 2 placement for export.";
-
-        switch (placement_result) {
-            case SECONDARY_PLACEMENT_NO_DURATION:
-                placement_error =
-                    "Layer 2 reports no usable duration for export.";
-                break;
-
-            case SECONDARY_PLACEMENT_NO_ROOM:
-                placement_error =
-                    "Layer 2 has no frames inside the base movie.";
-                break;
-
-            case SECONDARY_PLACEMENT_SOURCE_INIT_FAILED:
-                placement_error =
-                    "MLT could not initialize Layer 2 for export.";
-                break;
-
-            case SECONDARY_PLACEMENT_PLAYLIST_CREATE_FAILED:
-                placement_error =
-                    "Could not create the Layer 2 export playlist.";
-                break;
-
-            case SECONDARY_PLACEMENT_LEAD_IN_FAILED:
-                placement_error =
-                    "Could not create the Layer 2 export lead-in.";
-                break;
-
-            case SECONDARY_PLACEMENT_APPEND_FAILED:
-                placement_error =
-                    "Could not place Layer 2 in the export composition.";
-                break;
-
-            case SECONDARY_PLACEMENT_INVALID_ARGUMENT:
-            case SECONDARY_PLACEMENT_OK:
-            default:
-                break;
-        }
-
-        export_set_failure(
-            failure,
-            failure_size,
-            placement_error
-        );
-        goto fail;
-    }
-
-    if (job->export_secondary_has_audio &&
-        !export_attach_audio_gain(
-            graph->export_profile,
-            mlt_playlist_producer(graph->export_secondary_playlist),
-            job->export_secondary_audio_gain)) {
-        export_set_failure(
-            failure,
-            failure_size,
-            "Could not apply Layer 2 audio level to export."
-        );
-        goto fail;
-    }
-
-    if (!export_attach_alpha_interpretation(
-            graph->export_secondary,
-            job->export_secondary_alpha_mode)) {
-        export_set_failure(
-            failure,
-            failure_size,
-            "Could not apply Layer 2 alpha interpretation to export."
-        );
-        goto fail;
-    }
-
-    graph->export_tractor = mlt_tractor_new();
-
-    if (graph->export_tractor == NULL) {
-        export_set_failure(
-            failure,
-            failure_size,
-            "Could not create the export tractor."
-        );
-        goto fail;
-    }
-
-    mlt_service_set_profile(
-        MLT_TRACTOR_SERVICE(graph->export_tractor),
-        graph->export_profile
-    );
-
-    if (mlt_tractor_set_track(
-            graph->export_tractor,
-            graph->export_primary,
-            0) != 0 ||
-        mlt_tractor_set_track(
-            graph->export_tractor,
-            mlt_playlist_producer(graph->export_secondary_playlist),
-            1) != 0) {
-        export_set_failure(
-            failure,
-            failure_size,
-            "Could not connect both layers to the export tractor."
-        );
-        goto fail;
-    }
-
-    mlt_field field = mlt_tractor_field(graph->export_tractor);
-
-    if (field == NULL) {
-        export_set_failure(
-            failure,
-            failure_size,
-            "The export tractor did not provide an MLT field."
-        );
-        goto fail;
-    }
-
-    graph->export_composite =
-        mlt_factory_transition(
-            graph->export_profile,
-            "composite",
-            NULL
-        );
-
-    if (graph->export_composite == NULL) {
-        export_set_failure(
-            failure,
-            failure_size,
-            "MLT's composite transition is unavailable for export."
-        );
-        goto fail;
-    }
-
-    double base_width = 0.0;
-    double base_height = 0.0;
-
-    if (!secondary_base_size_for_source(
-            graph->export_profile,
-            graph->export_secondary,
-            job->export_secondary_is_still,
-            &base_width,
-            &base_height)) {
-        export_set_failure(
-            failure,
-            failure_size,
-            "Layer 2 has invalid export geometry."
-        );
-        goto fail;
-    }
-
-    const double scale =
-        isfinite(job->export_secondary_scale)
-            ? CLAMP(job->export_secondary_scale, 0.10, 3.0)
-            : 1.0;
-    const double x =
-        isfinite(job->export_secondary_x) ? job->export_secondary_x : 0.0;
-    const double y =
-        isfinite(job->export_secondary_y) ? job->export_secondary_y : 0.0;
-    const double opacity =
-        isfinite(job->export_secondary_opacity)
-            ? CLAMP(job->export_secondary_opacity, 0.0, 1.0)
-            : 1.0;
-
-    if (!configure_composite_transition(
-            graph->export_composite,
-            x,
-            y,
-            base_width * scale,
-            base_height * scale,
-            opacity)) {
-        export_set_failure(
-            failure,
-            failure_size,
-            "Could not configure the export video composite."
-        );
-        goto fail;
-    }
-
-    if (mlt_field_plant_transition(
-            field,
-            graph->export_composite,
-            0,
-            1) != 0) {
-        export_set_failure(
-            failure,
-            failure_size,
-            "Could not plant the export video composite."
-        );
-        goto fail;
-    }
-
-    if (job->export_secondary_has_audio) {
-        graph->export_mix =
-            mlt_factory_transition(
-                graph->export_profile,
-                "mix",
-                NULL
-            );
-
-        if (graph->export_mix == NULL) {
-            export_set_failure(
-                failure,
-                failure_size,
-                "MLT's audio mix transition is unavailable for export."
-            );
-            goto fail;
-        }
-
-        mlt_properties mix_properties =
-            MLT_TRANSITION_PROPERTIES(graph->export_mix);
-
-        mlt_properties_set_int(mix_properties, "always_active", 1);
-        mlt_properties_set_double(mix_properties, "start", 1.0);
-        mlt_properties_set_double(mix_properties, "end", 1.0);
-        mlt_properties_set_int(mix_properties, "sum", 1);
-
-        if (mlt_field_plant_transition(
-                field,
-                graph->export_mix,
-                0,
-                1) != 0) {
-            export_set_failure(
-                failure,
-                failure_size,
-                "Could not plant the export audio mix."
-            );
-            goto fail;
-        }
-    }
-
-    mlt_tractor_refresh(graph->export_tractor);
-    graph->export_top = mlt_tractor_producer(graph->export_tractor);
-
-    if (graph->export_top == NULL) {
-        export_set_failure(
-            failure,
-            failure_size,
-            "The export tractor did not expose a producer."
-        );
-        goto fail;
-    }
-
-    mlt_producer_set_in_and_out(
-        graph->export_top,
-        0,
-        (mlt_position)source_length - 1
-    );
-
-    if (mlt_producer_set_in_and_out(
-            graph->export_top,
-            (mlt_position)in_frame,
-            (mlt_position)out_frame) != 0 ||
-        mlt_producer_seek(graph->export_top, 0) != 0 ||
-        mlt_producer_set_speed(graph->export_top, 1.0) != 0) {
-        export_set_failure(
-            failure,
-            failure_size,
-            "MLT could not initialize the composite export range."
-        );
-        goto fail;
-    }
-
-    *in_frame_out = in_frame;
-    *out_frame_out = out_frame;
-    return 1;
-
-fail:
-    if (probe_producer != NULL) {
-        mlt_producer_close(probe_producer);
-    }
-
-    export_graph_close(graph);
-    return 0;
-}
-
-/*
- * Most exports consume the source profile directly. PNG image exports differ:
- * it needs square pixels at display geometry so anamorphic storage dimensions
- * are not written as a squeezed image. The cloned profile belongs to the
- * caller; source_profile always remains owned by the source graph.
- */
-static int export_prepare_consumer_profile(
-    ExportKind kind,
-    mlt_profile source_profile,
-    mlt_profile *owned_profile_out,
-    mlt_profile *consumer_profile_out,
-    char *failure,
-    size_t failure_size)
-{
-    *owned_profile_out = NULL;
-    *consumer_profile_out = source_profile;
-
-    if (kind == EXPORT_KIND_MP4 ||
-        kind == EXPORT_KIND_WAV_AUDIO) {
-        return 1;
-    }
-
-    if (kind != EXPORT_KIND_PNG_FRAME &&
-        kind != EXPORT_KIND_PNG_SEQUENCE) {
-        export_set_failure(
-            failure,
-            failure_size,
-            "The requested export type is unsupported."
-        );
-        return 0;
-    }
-
-    mlt_profile image_profile =
-        mlt_profile_clone(source_profile);
-
-    if (image_profile == NULL) {
-        export_set_failure(
-            failure,
-            failure_size,
-            "Could not create the PNG export profile."
-        );
-        return 0;
-    }
-
-    const double display_aspect =
-        mlt_profile_dar(source_profile);
-
-    if (image_profile->height <= 0 ||
-        display_aspect <= 0.0) {
-        mlt_profile_close(image_profile);
-
-        export_set_failure(
-            failure,
-            failure_size,
-            "The source has invalid display geometry."
-        );
-        return 0;
-    }
-
-    const int display_width =
-        (int)(
-            ((double)image_profile->height * display_aspect) +
-            0.5
-        );
-
-    if (display_width <= 0) {
-        mlt_profile_close(image_profile);
-
-        export_set_failure(
-            failure,
-            failure_size,
-            "The source has invalid display geometry."
-        );
-        return 0;
-    }
-
-    image_profile->width = display_width;
-    image_profile->sample_aspect_num = 1;
-    image_profile->sample_aspect_den = 1;
-    image_profile->display_aspect_num = display_width;
-    image_profile->display_aspect_den = image_profile->height;
-    image_profile->progressive = 1;
-
-    *owned_profile_out = image_profile;
-    *consumer_profile_out = image_profile;
-
-    return 1;
-}
-
-static int export_source_has_audio(
-    mlt_producer source_producer)
-{
-    if (source_producer == NULL) {
-        return 0;
-    }
-
-    mlt_properties properties =
-        MLT_PRODUCER_PROPERTIES(source_producer);
-
-    if (properties == NULL) {
-        return 0;
-    }
-
-    const char *audio_index_value =
-        mlt_properties_get(
-            properties,
-            "audio_index"
-        );
-
-    if (audio_index_value != NULL) {
-        return mlt_properties_get_int(
-            properties,
-            "audio_index"
-        ) >= 0;
-    }
-
-    /*
-     * Some producer types do not publish audio_index. If stream metadata is
-     * available, scan it before falling back to the historic "audio may be
-     * present" behavior.
-     */
-    if (mlt_properties_get(
-            properties,
-            "meta.media.nb_streams") != NULL) {
-        const int stream_total =
-            mlt_properties_get_int(
-                properties,
-                "meta.media.nb_streams"
-            );
-
-        for (int index = 0;
-             index < stream_total;
-             index++) {
-            char key[128];
-
-            snprintf(
-                key,
-                sizeof(key),
-                "meta.media.%d.stream.type",
-                index
-            );
-
-            const char *type =
-                mlt_properties_get(
-                    properties,
-                    key
-                );
-
-            if (type != NULL &&
-                strcmp(type, "audio") == 0) {
-                return 1;
-            }
-        }
-
-        return 0;
-    }
-
-    return 1;
-}
-
-static void export_configure_mp4_consumer(
-    mlt_properties properties,
-    int source_has_audio)
-{
-    /*
-     * Fixed POC 9 delivery preset. Match the progressive/deinterlaced image
-     * policy used by the viewer and PNG exports, and do not manufacture an
-     * AAC stream when the source has no audio.
-     */
-    mlt_properties_set(properties, "f", "mp4");
-    mlt_properties_set(properties, "vcodec", "libx264");
-    mlt_properties_set(properties, "pix_fmt", "yuv420p");
-    mlt_properties_set(properties, "preset", "medium");
-    mlt_properties_set_int(properties, "crf", 18);
-    mlt_properties_set(properties, "movflags", "+faststart");
-
-    mlt_properties_set(
-        properties,
-        "deinterlacer",
-        MLT_BRIDGE_DEINTERLACER
-    );
-    mlt_properties_set_int(
-        properties,
-        "top_field_first",
-        -1
-    );
-    mlt_properties_set_int(
-        properties,
-        "progressive",
-        1
-    );
-
-    if (source_has_audio) {
-        mlt_properties_set(
-            properties,
-            "acodec",
-            "aac"
-        );
-    } else {
-        mlt_properties_set_int(
-            properties,
-            "an",
-            1
-        );
-    }
-}
-
-static void export_configure_wav_audio_consumer(
-    mlt_properties properties,
-    mlt_producer source_producer)
-{
-    /*
-     * POC 9.4 uses one dependable professional interchange preset:
-     * uncompressed 24-bit PCM in a WAV container. MLT renders 32-bit integer
-     * samples internally because it has no 24-bit render-buffer format;
-     * FFmpeg's pcm_s24le encoder writes the final 24-bit samples.
-     */
-    mlt_properties_set(properties, "f", "wav");
-    mlt_properties_set(properties, "acodec", "pcm_s24le");
-    mlt_properties_set(properties, "mlt_audio_format", "s32le");
-    mlt_properties_set_int(properties, "vn", 1);
-
-    /*
-     * Preserve the selected source stream's sample rate and channel count
-     * when avformat exposes them. Otherwise leave MLT's consumer defaults
-     * alone rather than inventing metadata.
-     */
-    if (source_producer != NULL) {
-        mlt_properties source_properties =
-            MLT_PRODUCER_PROPERTIES(source_producer);
-
-        const char *audio_index_value =
-            mlt_properties_get(
-                source_properties,
-                "audio_index"
-            );
-
-        if (audio_index_value != NULL) {
-            const int audio_index =
-                mlt_properties_get_int(
-                    source_properties,
-                    "audio_index"
-                );
-
-            if (audio_index >= 0) {
-                char key[128];
-
-                snprintf(
-                    key,
-                    sizeof(key),
-                    "meta.media.%d.codec.sample_rate",
-                    audio_index
-                );
-
-                if (mlt_properties_get(source_properties, key) != NULL) {
-                    const int sample_rate =
-                        mlt_properties_get_int(
-                            source_properties,
-                            key
-                        );
-
-                    if (sample_rate > 0) {
-                        mlt_properties_set_int(
-                            properties,
-                            "frequency",
-                            sample_rate
-                        );
-                    }
-                }
-
-                snprintf(
-                    key,
-                    sizeof(key),
-                    "meta.media.%d.codec.channels",
-                    audio_index
-                );
-
-                if (mlt_properties_get(source_properties, key) != NULL) {
-                    const int channels =
-                        mlt_properties_get_int(
-                            source_properties,
-                            key
-                        );
-
-                    if (channels > 0) {
-                        mlt_properties_set_int(
-                            properties,
-                            "channels",
-                            channels
-                        );
-                    }
-                }
-            }
-        }
-    }
-}
-
-static void export_configure_png_common(
-    mlt_properties properties)
-{
-    /*
-     * PNG exports are rendered from the source graph, not copied from
-     * Flutter's display texture. Their consumer profile converts anamorphic
-     * storage pixels to display-correct square pixels. RGBA preserves
-     * source alpha when the decoder provides it.
-     */
-    mlt_properties_set(properties, "f", "image2");
-    mlt_properties_set(properties, "vcodec", "png");
-    mlt_properties_set(properties, "pix_fmt", "rgba");
-    mlt_properties_set_int(properties, "an", 1);
-    mlt_properties_set(properties, "mlt_image_format", "rgba");
-
-    /* Match the progressive frame the viewer presents. */
-    mlt_properties_set(properties, "rescale", "lanczos");
-    mlt_properties_set(properties, "deinterlacer", MLT_BRIDGE_DEINTERLACER);
-    mlt_properties_set_int(properties, "top_field_first", -1);
-    mlt_properties_set_int(properties, "progressive", 1);
-}
-
-static void export_configure_png_frame_consumer(
-    mlt_properties properties)
-{
-    export_configure_png_common(properties);
-
-    /*
-     * A frame export is one literal file, never an image2 filename pattern.
-     */
-    mlt_properties_set_int(properties, "update", 1);
-}
-
-static void export_configure_png_sequence_consumer(
-    mlt_properties properties)
-{
-    export_configure_png_common(properties);
-
-    /*
-     * Image2 expands frame_%06d.png into a one-based sequence. Keep update
-     * disabled so every source frame becomes a separate PNG.
-     */
-    mlt_properties_set_int(properties, "update", 0);
-    mlt_properties_set_int(properties, "start_number", 1);
-}
-
-static int export_configure_consumer(
-    const ExportJob *job,
-    mlt_properties properties,
-    mlt_producer source_producer,
-    char *failure,
-    size_t failure_size)
-{
-    const ExportKind kind = job->export_kind;
-    const int composition_has_audio =
-        job->export_snapshot_valid
-            ? (job->export_primary_has_audio || job->export_secondary_has_audio)
-            : export_source_has_audio(source_producer);
-
-    switch (kind) {
-        case EXPORT_KIND_MP4:
-            export_configure_mp4_consumer(
-                properties,
-                composition_has_audio
-            );
-            break;
-
-        case EXPORT_KIND_PNG_FRAME:
-            export_configure_png_frame_consumer(properties);
-            break;
-
-        case EXPORT_KIND_PNG_SEQUENCE:
-            export_configure_png_sequence_consumer(properties);
-            break;
-
-        case EXPORT_KIND_WAV_AUDIO:
-            export_configure_wav_audio_consumer(
-                properties,
-                source_producer
-            );
-            break;
-
-        default:
-            export_set_failure(
-                failure,
-                failure_size,
-                "The requested export type is unsupported."
-            );
-            return 0;
-    }
-
-    /* Export never drops frames. */
-    mlt_properties_set_int(properties, "real_time", -1);
-    mlt_properties_set_int(properties, "terminate_on_pause", 1);
-
-    return 1;
-}
-
-static int export_sequence_outputs_complete(
-    const char *directory,
-    int64_t expected_frames)
-{
-    if (directory == NULL ||
-        directory[0] == '\0' ||
-        expected_frames <= 0) {
-        return 0;
-    }
-
-    GDir *dir =
-        g_dir_open(directory, 0, NULL);
-
-    if (dir == NULL) {
-        return 0;
-    }
-
-    int64_t owned_count = 0;
-    int64_t minimum_frame = G_MAXINT64;
-    int64_t maximum_frame = 0;
-    int all_have_data = 1;
-
-    const char *name = NULL;
-
-    while ((name = g_dir_read_name(dir)) != NULL) {
-        const int64_t frame_number =
-            export_sequence_frame_number(name);
-
-        if (frame_number <= 0) {
-            continue;
-        }
-
-        owned_count += 1;
-
-        if (frame_number < minimum_frame) {
-            minimum_frame = frame_number;
-        }
-
-        if (frame_number > maximum_frame) {
-            maximum_frame = frame_number;
-        }
-
-        char *path =
-            g_build_filename(
-                directory,
-                name,
-                NULL
-            );
-
-        if (path == NULL ||
-            !output_file_has_data(path)) {
-            all_have_data = 0;
-        }
-
-        g_free(path);
-    }
-
-    g_dir_close(dir);
-
-    /*
-     * Filenames are unique directory entries. If N owned files exist and
-     * their minimum and maximum indices are 1 and N, there can be no gap.
-     */
-    return all_have_data &&
-           owned_count == expected_frames &&
-           minimum_frame == 1 &&
-           maximum_frame == expected_frames;
-}
-
-static int export_output_completed(
-    const ExportJob *job,
-    mlt_producer source_producer,
-    int64_t total_frames,
-    char *failure,
-    size_t failure_size)
-{
-    switch (job->export_kind) {
-        case EXPORT_KIND_PNG_FRAME:
-            /*
-             * A one-frame producer has no meaningful terminal-position check:
-             * frame zero is both its start and end. The output file itself is
-             * the useful completion signal for this export kind.
-             */
-            if (output_file_has_data(job->export_output_path)) {
-                return 1;
-            }
-
-            export_set_failure(
-                failure,
-                failure_size,
-                "MLT did not write the requested PNG frame."
-            );
-            return 0;
-
-        case EXPORT_KIND_PNG_SEQUENCE: {
-            const int64_t final_position =
-                (int64_t)mlt_producer_position(source_producer);
-
-            if (final_position >= total_frames - 1 &&
-                export_sequence_outputs_complete(
-                    job->export_output_path,
-                    total_frames)) {
-                return 1;
-            }
-
-            export_set_failure(
-                failure,
-                failure_size,
-                "MLT image-sequence export stopped before every frame completed."
-            );
-            return 0;
-        }
-
-        case EXPORT_KIND_WAV_AUDIO:
-        case EXPORT_KIND_MP4: {
-            const int64_t final_position =
-                (int64_t)mlt_producer_position(source_producer);
-
-            if (final_position >= total_frames - 1 &&
-                output_file_has_data(job->export_output_path)) {
-                return 1;
-            }
-
-            export_set_failure(
-                failure,
-                failure_size,
-                "MLT export stopped before the requested range completed."
-            );
-            return 0;
-        }
-
-        default:
-            export_set_failure(
-                failure,
-                failure_size,
-                "The requested export type is unsupported."
-            );
-            return 0;
-    }
-}
-
-static gpointer export_worker(gpointer data)
-{
-    ExportJob *job = (ExportJob *)data;
-
-    ExportGraph graph;
-    memset(&graph, 0, sizeof(graph));
-
-    mlt_profile owned_consumer_profile = NULL;
-    mlt_profile consumer_profile = NULL;
-    mlt_consumer export_consumer = NULL;
-
-    char *owned_consumer_target = NULL;
-    const char *consumer_target = NULL;
-
-    int64_t in_frame = 0;
-    int64_t out_frame = -1;
-
-    int succeeded = 0;
-    int cancelled = 0;
-    int destination_prepared = 0;
-    char failure[512] = "";
-
-    if (!export_prepare_source_graph(
-            job,
-            &graph,
-            &in_frame,
-            &out_frame,
-            failure,
-            sizeof(failure))) {
-        goto cleanup;
-    }
-
-    mlt_producer export_producer = graph.export_top;
-    mlt_profile export_profile = graph.export_profile;
-
-    if (!export_prepare_consumer_profile(
-            job->export_kind,
-            export_profile,
-            &owned_consumer_profile,
-            &consumer_profile,
-            failure,
-            sizeof(failure))) {
-        goto cleanup;
-    }
-
-    if (job->export_kind == EXPORT_KIND_PNG_SEQUENCE) {
-        owned_consumer_target =
-            export_sequence_consumer_target(
-                job->export_output_path
-            );
-
-        if (owned_consumer_target == NULL) {
-            export_set_failure(
-                failure,
-                sizeof(failure),
-                "Could not build the image-sequence filename pattern."
-            );
-            goto cleanup;
-        }
-
-        consumer_target = owned_consumer_target;
-    } else {
-        consumer_target = job->export_output_path;
-    }
-
-    export_consumer =
-        mlt_factory_consumer(
-            consumer_profile,
-            "avformat",
-            consumer_target
-        );
-
-    if (export_consumer == NULL) {
-        export_set_failure(
-            failure,
-            sizeof(failure),
-            "MLT avformat export consumer is unavailable."
-        );
-        goto cleanup;
-    }
-
-    mlt_properties properties =
-        MLT_CONSUMER_PROPERTIES(export_consumer);
-
-    mlt_producer metadata_source = graph.export_primary;
-    if (job->export_snapshot_valid &&
-        !job->export_primary_has_audio &&
-        job->export_secondary_has_audio &&
-        graph.export_secondary != NULL) {
-        metadata_source = graph.export_secondary;
-    }
-
-    if (!export_configure_consumer(
-            job,
-            properties,
-            metadata_source,
-            failure,
-            sizeof(failure))) {
-        goto cleanup;
-    }
-
-    if (mlt_consumer_connect(
-            export_consumer,
-            MLT_PRODUCER_SERVICE(export_producer)) != 0) {
-        export_set_failure(
-            failure,
-            sizeof(failure),
-            "MLT could not connect the export consumer."
-        );
-        goto cleanup;
-    }
-
-    if (!export_prepare_destination(
-            job,
-            failure,
-            sizeof(failure))) {
-        goto cleanup;
-    }
-
-    destination_prepared = 1;
-
-    if (mlt_consumer_start(export_consumer) != 0) {
-        export_set_failure(
-            failure,
-            sizeof(failure),
-            "MLT could not start the export encoder."
-        );
-        goto cleanup;
-    }
-
-    const int64_t total_frames =
-        out_frame - in_frame + 1;
-
-    while (!mlt_consumer_is_stopped(export_consumer)) {
-        if (export_cancel_was_requested()) {
-            cancelled = 1;
-            mlt_consumer_stop(export_consumer);
-            break;
-        }
-
-        const int64_t position =
-            (int64_t)mlt_producer_position(export_producer);
-
-        const double progress =
-            total_frames > 0
-                ? ((double)(position + 1) / (double)total_frames)
-                : 0.0;
-
-        export_publish_progress(progress);
-
-        g_usleep(50000);
-    }
-
-    /*
-     * Even if the consumer stopped itself at EOF, stop() joins its worker
-     * threads and flushes the muxer trailer.
-     */
-    mlt_consumer_stop(export_consumer);
-
-    if (export_cancel_was_requested()) {
-        cancelled = 1;
-    }
-
-    if (!cancelled &&
-        export_output_completed(
-            job,
-            export_producer,
-            total_frames,
-            failure,
-            sizeof(failure))) {
-        succeeded = 1;
-        export_publish_progress(1.0);
-    }
-
-cleanup:
-    if (export_consumer != NULL) {
-        if (!mlt_consumer_is_stopped(export_consumer)) {
-            mlt_consumer_stop(export_consumer);
-        }
-        mlt_consumer_close(export_consumer);
-        export_consumer = NULL;
-    }
-
-    if (owned_consumer_profile != NULL) {
-        mlt_profile_close(owned_consumer_profile);
-        owned_consumer_profile = NULL;
-    }
-
-    export_graph_close(&graph);
-
-    g_free(owned_consumer_target);
-    owned_consumer_target = NULL;
-
-    if (!succeeded &&
-        destination_prepared) {
-        export_remove_partial_output(job);
-    }
-
-    ensure_locks();
-
-    g_mutex_lock(&export_mutex);
-
-    export_running = 0;
-    export_success = succeeded;
-
-    if (cancelled) {
-        export_set_error_locked("Export cancelled.");
-    } else if (succeeded) {
-        export_set_error_locked(NULL);
-    } else if (failure[0] != '\0') {
-        export_set_error_locked(failure);
-    } else {
-        export_set_error_locked("Export failed.");
-    }
-
-    g_mutex_unlock(&export_mutex);
-
-    export_job_free(job);
-
-    return NULL;
-}
-
-/*
- * Join a completed export worker so its GThread handle never leaks. This is
- * intentionally never called while export_mutex is held.
- */
-static void join_finished_export_thread(void)
-{
-    ensure_locks();
-
-    GThread *thread = NULL;
-
-    g_mutex_lock(&export_mutex);
-
-    if (!export_running &&
-        export_thread != NULL) {
-        thread = export_thread;
-        export_thread = NULL;
-    }
-
-    g_mutex_unlock(&export_mutex);
-
-    if (thread != NULL) {
-        g_thread_join(thread);
-    }
-}
-
-static void cancel_export_and_join(void)
-{
-    ensure_locks();
-
-    GThread *thread = NULL;
-
-    g_mutex_lock(&export_mutex);
-
-    if (export_thread != NULL) {
-        export_cancel_requested = 1;
-        thread = export_thread;
-        export_thread = NULL;
-    }
-
-    g_mutex_unlock(&export_mutex);
-
-    if (thread != NULL) {
-        g_thread_join(thread);
-    }
-}
-
-/* ------------------------------------------------------------------------- */
 /* Lifecycle                                                                 */
 /* ------------------------------------------------------------------------- */
 
@@ -4311,7 +2152,7 @@ void mlt_bridge_shutdown(void)
     ensure_locks();
 
     /* The background exporter shares the process-wide MLT factory. */
-    cancel_export_and_join();
+    mlt_export_shutdown();
 
     g_mutex_lock(&factory_mutex);
 
@@ -4332,104 +2173,25 @@ void mlt_bridge_shutdown(void)
 /* Export                                                                    */
 /* ------------------------------------------------------------------------- */
 
-static int launch_export_job(ExportJob *job)
+static int export_factory_is_ready(void)
 {
     ensure_locks();
 
-    if (job == NULL ||
-        job->export_source_path == NULL ||
-        job->export_source_path[0] == '\0' ||
-        job->export_output_path == NULL ||
-        job->export_output_path[0] == '\0' ||
-        job->export_out_frame < job->export_in_frame) {
-        export_job_free(job);
-        g_mutex_lock(&export_mutex);
-        export_set_error_locked("Invalid export request.");
-        g_mutex_unlock(&export_mutex);
-        return 0;
-    }
-
     g_mutex_lock(&factory_mutex);
-    const int initialized = repository != NULL;
+    const int ready = repository != NULL;
     g_mutex_unlock(&factory_mutex);
 
-    if (!initialized) {
-        export_job_free(job);
-        g_mutex_lock(&export_mutex);
-        export_set_error_locked("MLT is not initialized.");
-        g_mutex_unlock(&export_mutex);
-        return 0;
+    if (!ready) {
+        mlt_export_set_error("MLT is not initialized.");
     }
 
-    join_finished_export_thread();
-
-    g_mutex_lock(&export_mutex);
-
-    if (export_running || export_thread != NULL) {
-        export_job_free(job);
-        export_set_error_locked("An export is already running.");
-        g_mutex_unlock(&export_mutex);
-        return 0;
-    }
-
-    export_running = 1;
-    export_success = 0;
-    export_cancel_requested = 0;
-    export_progress = 0.0;
-    export_set_error_locked(NULL);
-
-    export_thread =
-        g_thread_new(
-            "mlt-player-export",
-            export_worker,
-            job
-        );
-
-    if (export_thread == NULL) {
-        export_running = 0;
-        export_job_free(job);
-        export_set_error_locked("Could not start the export worker.");
-        g_mutex_unlock(&export_mutex);
-        return 0;
-    }
-
-    g_mutex_unlock(&export_mutex);
-    return 1;
-}
-
-static int start_export_job(
-    const char *source_path,
-    const char *output_path,
-    int64_t in_frame,
-    int64_t out_frame,
-    ExportKind kind)
-{
-    ExportJob *job = g_new0(ExportJob, 1);
-
-    if (job == NULL) {
-        ensure_locks();
-        g_mutex_lock(&export_mutex);
-        export_set_error_locked("Could not allocate the export job.");
-        g_mutex_unlock(&export_mutex);
-        return 0;
-    }
-
-    job->export_source_path = g_strdup(source_path);
-    job->export_output_path = g_strdup(output_path);
-    job->export_in_frame = in_frame;
-    job->export_out_frame = out_frame;
-    job->export_primary_audio_gain = 1.0;
-    job->export_secondary_audio_gain = 1.0;
-    job->export_secondary_opacity = 1.0;
-    job->export_secondary_scale = 1.0;
-    job->export_kind = kind;
-
-    return launch_export_job(job);
+    return ready;
 }
 
 /*
- * POC 10.9 snapshots the open layered movie and exports from a completely
- * independent graph. kind uses ExportKind's stable 0..3 values.
+ * POC 10.9 snapshots the open layered movie and hands only scalar/path state
+ * to the export module. The worker still builds a completely independent MLT
+ * graph; no live preview object crosses the module boundary.
  */
 MLT_BRIDGE_EXPORT
 int mlt_bridge_export_composition_start(
@@ -4443,21 +2205,14 @@ int mlt_bridge_export_composition_start(
     if (output_path == NULL ||
         output_path[0] == '\0' ||
         out_frame < in_frame ||
-        kind < (int)EXPORT_KIND_MP4 ||
-        kind > (int)EXPORT_KIND_WAV_AUDIO ||
+        kind < (int)MLT_EXPORT_KIND_MP4 ||
+        kind > (int)MLT_EXPORT_KIND_WAV_AUDIO ||
         current_engine() == NULL) {
-        g_mutex_lock(&export_mutex);
-        export_set_error_locked("Invalid composition export request.");
-        g_mutex_unlock(&export_mutex);
+        mlt_export_set_error("Invalid composition export request.");
         return 0;
     }
 
-    ExportJob *job = g_new0(ExportJob, 1);
-
-    if (job == NULL) {
-        g_mutex_lock(&export_mutex);
-        export_set_error_locked("Could not allocate the export snapshot.");
-        g_mutex_unlock(&export_mutex);
+    if (!export_factory_is_ready()) {
         return 0;
     }
 
@@ -4469,10 +2224,7 @@ int mlt_bridge_export_composition_start(
         is_still ||
         !has_video) {
         g_mutex_unlock(&engine_mutex);
-        export_job_free(job);
-        g_mutex_lock(&export_mutex);
-        export_set_error_locked("The open movie cannot be exported.");
-        g_mutex_unlock(&export_mutex);
+        mlt_export_set_error("The open movie cannot be exported.");
         return 0;
     }
 
@@ -4484,25 +2236,18 @@ int mlt_bridge_export_composition_start(
 
     if (primary_resource == NULL || primary_resource[0] == '\0') {
         g_mutex_unlock(&engine_mutex);
-        export_job_free(job);
-        g_mutex_lock(&export_mutex);
-        export_set_error_locked("The base layer has no exportable source path.");
-        g_mutex_unlock(&export_mutex);
+        mlt_export_set_error("The base layer has no exportable source path.");
         return 0;
     }
 
-    job->export_source_path = g_strdup(primary_resource);
-    job->export_output_path = g_strdup(output_path);
-    job->export_in_frame = in_frame;
-    job->export_out_frame = out_frame;
-    job->export_kind = (ExportKind)kind;
-    job->export_snapshot_valid = 1;
-    job->export_primary_has_audio = track_has_audio[0] ? 1 : 0;
-    job->export_primary_audio_gain =
+    MltExportCompositionSnapshot snapshot = {0};
+    snapshot.base_path = primary_resource;
+    snapshot.base_has_audio = track_has_audio[0] ? 1 : 0;
+    snapshot.base_audio_gain =
         CLAMP(track_audio_gain[0], 0.0, 1.0);
-    job->export_secondary_audio_gain = 1.0;
-    job->export_secondary_opacity = 1.0;
-    job->export_secondary_scale = 1.0;
+    snapshot.layer2_audio_gain = 1.0;
+    snapshot.layer2_opacity = 1.0;
+    snapshot.layer2_scale = 1.0;
 
     if (track_count >= 2 &&
         secondary_producer != NULL &&
@@ -4516,42 +2261,37 @@ int mlt_bridge_export_composition_start(
 
         if (secondary_resource == NULL || secondary_resource[0] == '\0') {
             g_mutex_unlock(&engine_mutex);
-            export_job_free(job);
-            g_mutex_lock(&export_mutex);
-            export_set_error_locked("Layer 2 has no exportable source path.");
-            g_mutex_unlock(&export_mutex);
+            mlt_export_set_error("Layer 2 has no exportable source path.");
             return 0;
         }
 
-        job->export_secondary_path = g_strdup(secondary_resource);
-        job->export_has_secondary = 1;
-        job->export_secondary_start_frame = secondary_start_frame;
-        job->export_secondary_has_audio = track_has_audio[1] ? 1 : 0;
-        job->export_secondary_is_still = secondary_is_still ? 1 : 0;
-        job->export_secondary_alpha_mode = secondary_alpha_mode;
-        job->export_secondary_audio_gain =
+        snapshot.layer2_path = secondary_resource;
+        snapshot.has_layer2 = 1;
+        snapshot.layer2_start_frame = secondary_start_frame;
+        snapshot.layer2_has_audio = track_has_audio[1] ? 1 : 0;
+        snapshot.layer2_is_still = secondary_is_still ? 1 : 0;
+        snapshot.layer2_alpha_mode = secondary_alpha_mode;
+        snapshot.layer2_audio_gain =
             CLAMP(track_audio_gain[1], 0.0, 1.0);
-        job->export_secondary_opacity =
+        snapshot.layer2_opacity =
             CLAMP(secondary_opacity, 0.0, 1.0);
-        job->export_secondary_x = secondary_x;
-        job->export_secondary_y = secondary_y;
-        job->export_secondary_scale =
+        snapshot.layer2_x = secondary_x;
+        snapshot.layer2_y = secondary_y;
+        snapshot.layer2_scale =
             CLAMP(secondary_scale, 0.10, 3.0);
     }
 
+    const int result =
+        mlt_export_start_composition(
+            &snapshot,
+            output_path,
+            in_frame,
+            out_frame,
+            (MltExportKind)kind
+        );
+
     g_mutex_unlock(&engine_mutex);
-
-    if (job->export_source_path == NULL ||
-        job->export_output_path == NULL ||
-        (job->export_has_secondary && job->export_secondary_path == NULL)) {
-        export_job_free(job);
-        g_mutex_lock(&export_mutex);
-        export_set_error_locked("Could not copy the composition export snapshot.");
-        g_mutex_unlock(&export_mutex);
-        return 0;
-    }
-
-    return launch_export_job(job);
+    return result;
 }
 
 MLT_BRIDGE_EXPORT
@@ -4561,12 +2301,16 @@ int mlt_bridge_export_start(
     int64_t in_frame,
     int64_t out_frame)
 {
-    return start_export_job(
+    if (!export_factory_is_ready()) {
+        return 0;
+    }
+
+    return mlt_export_start_simple(
         source_path,
         output_path,
         in_frame,
         out_frame,
-        EXPORT_KIND_MP4
+        MLT_EXPORT_KIND_MP4
     );
 }
 
@@ -4576,12 +2320,16 @@ int mlt_bridge_export_frame_start(
     const char *output_path,
     int64_t frame)
 {
-    return start_export_job(
+    if (!export_factory_is_ready()) {
+        return 0;
+    }
+
+    return mlt_export_start_simple(
         source_path,
         output_path,
         frame,
         frame,
-        EXPORT_KIND_PNG_FRAME
+        MLT_EXPORT_KIND_PNG_FRAME
     );
 }
 
@@ -4592,12 +2340,16 @@ int mlt_bridge_export_png_sequence_start(
     int64_t in_frame,
     int64_t out_frame)
 {
-    return start_export_job(
+    if (!export_factory_is_ready()) {
+        return 0;
+    }
+
+    return mlt_export_start_simple(
         source_path,
         output_directory,
         in_frame,
         out_frame,
-        EXPORT_KIND_PNG_SEQUENCE
+        MLT_EXPORT_KIND_PNG_SEQUENCE
     );
 }
 
@@ -4608,67 +2360,41 @@ int mlt_bridge_export_audio_start(
     int64_t in_frame,
     int64_t out_frame)
 {
-    return start_export_job(
+    if (!export_factory_is_ready()) {
+        return 0;
+    }
+
+    return mlt_export_start_simple(
         source_path,
         output_path,
         in_frame,
         out_frame,
-        EXPORT_KIND_WAV_AUDIO
+        MLT_EXPORT_KIND_WAV_AUDIO
     );
 }
 
 MLT_BRIDGE_EXPORT
 void mlt_bridge_export_cancel(void)
 {
-    ensure_locks();
-
-    g_mutex_lock(&export_mutex);
-
-    if (export_running) {
-        export_cancel_requested = 1;
-    }
-
-    g_mutex_unlock(&export_mutex);
+    mlt_export_cancel();
 }
 
 MLT_BRIDGE_EXPORT
 int mlt_bridge_export_is_running(void)
 {
-    ensure_locks();
-
-    g_mutex_lock(&export_mutex);
-    const int result = export_running;
-    g_mutex_unlock(&export_mutex);
-
-    if (!result) {
-        join_finished_export_thread();
-    }
-
-    return result;
+    return mlt_export_is_running();
 }
 
 MLT_BRIDGE_EXPORT
 double mlt_bridge_export_progress(void)
 {
-    ensure_locks();
-
-    g_mutex_lock(&export_mutex);
-    const double result = export_progress;
-    g_mutex_unlock(&export_mutex);
-
-    return result;
+    return mlt_export_progress();
 }
 
 MLT_BRIDGE_EXPORT
 int mlt_bridge_export_succeeded(void)
 {
-    ensure_locks();
-
-    g_mutex_lock(&export_mutex);
-    const int result = !export_running && export_success;
-    g_mutex_unlock(&export_mutex);
-
-    return result;
+    return mlt_export_succeeded();
 }
 
 MLT_BRIDGE_EXPORT
@@ -4676,14 +2402,7 @@ int mlt_bridge_export_error_copy(
     char *buffer,
     int capacity)
 {
-    ensure_locks();
-
-    g_mutex_lock(&export_mutex);
-    const int required =
-        copy_string_value(export_error, buffer, capacity);
-    g_mutex_unlock(&export_mutex);
-
-    return required;
+    return mlt_export_error_copy(buffer, capacity);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -4888,7 +2607,7 @@ static int apply_secondary_geometry_locked(void)
     );
 
     const int applied =
-        set_composite_geometry(
+        mlt_composition_set_geometry(
             video_composite,
             secondary_x,
             secondary_y,
@@ -5067,115 +2786,6 @@ static int producer_has_alpha_locked(
     return producer_frame_reports_alpha_locked(candidate);
 }
 
-static int alpha_unpremultiply_get_image(
-    mlt_frame frame,
-    uint8_t **image,
-    mlt_image_format *format,
-    int *width,
-    int *height,
-    int writable)
-{
-    (void)writable;
-
-    mlt_filter filter =
-        (mlt_filter)mlt_frame_pop_service(frame);
-
-    const mlt_image_format requested_format =
-        *format;
-
-    *format = mlt_image_rgba;
-
-    int error =
-        mlt_frame_get_image(
-            frame,
-            image,
-            format,
-            width,
-            height,
-            1
-        );
-
-    if (error != 0 ||
-        image == NULL ||
-        *image == NULL ||
-        *format != mlt_image_rgba ||
-        *width <= 0 ||
-        *height <= 0) {
-        return error;
-    }
-
-    if (mlt_properties_get_int(
-            MLT_FILTER_PROPERTIES(filter),
-            "mlt_player_alpha_mode") != 2) {
-        return error;
-    }
-
-    const size_t pixels =
-        (size_t)(*width) * (size_t)(*height);
-
-    for (size_t index = 0; index < pixels; index++) {
-        uint8_t *pixel =
-            *image + index * 4;
-        const unsigned int alpha =
-            pixel[3];
-
-        if (alpha == 0) {
-            pixel[0] = 0;
-            pixel[1] = 0;
-            pixel[2] = 0;
-            continue;
-        }
-
-        if (alpha >= 255) {
-            continue;
-        }
-
-        for (int channel = 0; channel < 3; channel++) {
-            const unsigned int expanded =
-                ((unsigned int)pixel[channel] * 255u + alpha / 2u) /
-                alpha;
-            pixel[channel] =
-                (uint8_t)(expanded > 255u ? 255u : expanded);
-        }
-    }
-
-    /*
-     * The correction must be transparent to the caller's image-format
-     * contract. Core/composite requests YUV422; returning RGBA here would
-     * make it interpret four-byte pixels with a two-byte stride. Convert the
-     * corrected RGBA back to whatever the caller originally requested.
-     */
-    if (requested_format != mlt_image_none &&
-        requested_format != mlt_image_movit &&
-        requested_format != mlt_image_rgba) {
-        if (frame->convert_image == NULL) {
-            return 1;
-        }
-
-        error =
-            frame->convert_image(
-                frame,
-                image,
-                format,
-                requested_format
-            );
-    }
-
-    return error;
-}
-
-static mlt_frame alpha_interpret_process(
-    mlt_filter filter,
-    mlt_frame frame)
-{
-    mlt_frame_push_service(frame, filter);
-    mlt_frame_push_get_image(
-        frame,
-        alpha_unpremultiply_get_image
-    );
-    return frame;
-}
-
 /*
  * The filter is always attached to layer 2 but normally disabled. Auto and
  * Straight therefore preserve MLT's native decode path exactly. Selecting
@@ -5185,40 +2795,10 @@ static mlt_frame alpha_interpret_process(
 static mlt_filter attach_secondary_alpha_filter_locked(
     mlt_producer target)
 {
-    if (target == NULL) {
-        return NULL;
-    }
-
-    mlt_filter filter =
-        mlt_filter_new();
-
-    if (filter == NULL) {
-        return NULL;
-    }
-
-    filter->process =
-        alpha_interpret_process;
-
-    mlt_properties_set_int(
-        MLT_FILTER_PROPERTIES(filter),
-        "mlt_player_alpha_mode",
+    return mlt_composition_attach_alpha_filter(
+        target,
         0
     );
-    mlt_properties_set_int(
-        MLT_FILTER_PROPERTIES(filter),
-        "disable",
-        1
-    );
-
-    if (mlt_producer_attach(
-            target,
-            filter) != 0) {
-        mlt_filter_close(filter);
-        return NULL;
-    }
-
-    mlt_filter_close(filter);
-    return filter;
 }
 
 MLT_BRIDGE_EXPORT
@@ -5843,7 +3423,7 @@ int mlt_bridge_add_track(
         goto add_track_cleanup;
     }
 
-    if (!secondary_base_size_for_source(
+    if (!mlt_composition_secondary_base_size(
             profile,
             pending_secondary,
             secondary_still,
@@ -5869,8 +3449,8 @@ int mlt_bridge_add_track(
      */
     mlt_position pending_start = 0;
 
-    const SecondaryPlacementResult placement_result =
-        build_secondary_playlist(
+    const MltSecondaryPlacementResult placement_result =
+        mlt_composition_build_secondary_playlist(
             profile,
             pending_secondary,
             (mlt_position)start_frame,
@@ -5880,43 +3460,43 @@ int mlt_bridge_add_track(
             &pending_start
         );
 
-    if (placement_result != SECONDARY_PLACEMENT_OK) {
+    if (placement_result != MLT_SECONDARY_PLACEMENT_OK) {
         const char *placement_error =
             "Could not configure the added layer's timing and placement.";
 
         switch (placement_result) {
-            case SECONDARY_PLACEMENT_NO_DURATION:
+            case MLT_SECONDARY_PLACEMENT_NO_DURATION:
                 placement_error =
                     "The added video layer reports no usable duration.";
                 break;
 
-            case SECONDARY_PLACEMENT_NO_ROOM:
+            case MLT_SECONDARY_PLACEMENT_NO_ROOM:
                 placement_error =
                     "There is no room for the added layer at that playhead.";
                 break;
 
-            case SECONDARY_PLACEMENT_SOURCE_INIT_FAILED:
+            case MLT_SECONDARY_PLACEMENT_SOURCE_INIT_FAILED:
                 placement_error =
                     "MLT could not initialize the added layer.";
                 break;
 
-            case SECONDARY_PLACEMENT_PLAYLIST_CREATE_FAILED:
+            case MLT_SECONDARY_PLACEMENT_PLAYLIST_CREATE_FAILED:
                 placement_error =
                     "Could not create the offset playlist for layer 2.";
                 break;
 
-            case SECONDARY_PLACEMENT_LEAD_IN_FAILED:
+            case MLT_SECONDARY_PLACEMENT_LEAD_IN_FAILED:
                 placement_error =
                     "Could not create the blank lead-in for layer 2.";
                 break;
 
-            case SECONDARY_PLACEMENT_APPEND_FAILED:
+            case MLT_SECONDARY_PLACEMENT_APPEND_FAILED:
                 placement_error =
                     "Could not place the added media on layer 2.";
                 break;
 
-            case SECONDARY_PLACEMENT_INVALID_ARGUMENT:
-            case SECONDARY_PLACEMENT_OK:
+            case MLT_SECONDARY_PLACEMENT_INVALID_ARGUMENT:
+            case MLT_SECONDARY_PLACEMENT_OK:
             default:
                 break;
         }
@@ -6044,7 +3624,7 @@ int mlt_bridge_add_track(
      * overlay rectangle. Preview and export intentionally share one
      * configuration function so compositor policy cannot drift.
      */
-    if (!configure_composite_transition(
+    if (!mlt_composition_configure_transition(
             pending_composite,
             pending_x,
             pending_y,
@@ -6700,32 +4280,13 @@ int mlt_bridge_set_secondary_alpha_mode(
         return 0;
     }
 
-    mlt_service_lock(
-        MLT_FILTER_SERVICE(
-            secondary_alpha_filter
-        )
-    );
-
-    mlt_properties_set_int(
-        MLT_FILTER_PROPERTIES(
-            secondary_alpha_filter
-        ),
-        "mlt_player_alpha_mode",
-        mode
-    );
-    mlt_properties_set_int(
-        MLT_FILTER_PROPERTIES(
-            secondary_alpha_filter
-        ),
-        "disable",
-        mode == 2 ? 0 : 1
-    );
-
-    mlt_service_unlock(
-        MLT_FILTER_SERVICE(
-            secondary_alpha_filter
-        )
-    );
+    if (!mlt_composition_apply_alpha_mode(
+            secondary_alpha_filter,
+            mode)) {
+        set_error("Could not apply Layer 2 alpha interpretation.");
+        g_mutex_unlock(&engine_mutex);
+        return 0;
+    }
 
     secondary_alpha_mode = mode;
     set_error(NULL);

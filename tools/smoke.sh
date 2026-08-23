@@ -56,6 +56,8 @@ echo "smoke: building the bridge"
 
 gcc -shared -fPIC \
     native/mlt_bridge.c \
+    native/mlt_composition.c \
+    native/mlt_export.c \
     -o "$WORK/libmlt_bridge.so" \
     -Inative \
     -I"$EPHEMERAL" \

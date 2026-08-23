@@ -274,7 +274,7 @@ class _PlayerPageState extends State<PlayerPage>
   Future<void> _pickMedia() async {
     _showOverlay();
 
-    final typeGroup = XTypeGroup(
+    const typeGroup = XTypeGroup(
       label: 'Media',
       extensions: <String>[
         'mp4', 'mov', 'mkv', 'avi', 'webm', 'm4v', 'mxf', 'mpg', 'mpeg',
@@ -320,7 +320,7 @@ class _PlayerPageState extends State<PlayerPage>
 
     _showOverlay();
 
-    final typeGroup = XTypeGroup(
+    const typeGroup = XTypeGroup(
       label: 'Layer media',
       extensions: <String>[
         'mp4', 'mov', 'mkv', 'avi', 'webm', 'm4v', 'mxf', 'mpg', 'mpeg',
@@ -361,7 +361,7 @@ class _PlayerPageState extends State<PlayerPage>
 
     _showOverlay();
 
-    final typeGroup = XTypeGroup(
+    const typeGroup = XTypeGroup(
       label: 'Base video',
       extensions: <String>[
         'mp4', 'mov', 'mkv', 'avi', 'webm', 'm4v', 'mxf', 'mpg', 'mpeg',
@@ -402,7 +402,7 @@ class _PlayerPageState extends State<PlayerPage>
 
     _showOverlay();
 
-    final typeGroup = XTypeGroup(
+    const typeGroup = XTypeGroup(
       label: 'Overlay layer media',
       extensions: <String>[
         'mp4', 'mov', 'mkv', 'avi', 'webm', 'm4v', 'mxf', 'mpg', 'mpeg',
@@ -457,7 +457,7 @@ class _PlayerPageState extends State<PlayerPage>
         _infoOpen = false;
         _tracksOpen = false;
       });
-      _infoController.reverse();
+      await _infoController.reverse();
     }
     await _engine.open(path);
     if (mounted) {
@@ -529,7 +529,7 @@ class _PlayerPageState extends State<PlayerPage>
     final location = await getSaveLocation(
       confirmButtonText: 'Export',
       suggestedName: '${stem}_$suffix.mp4',
-      acceptedTypeGroups: <XTypeGroup>[
+      acceptedTypeGroups: const <XTypeGroup>[
         XTypeGroup(
           label: 'MP4 Video',
           extensions: <String>['mp4'],
@@ -579,7 +579,7 @@ class _PlayerPageState extends State<PlayerPage>
     final location = await getSaveLocation(
       confirmButtonText: 'Export Frame',
       suggestedName: '${stem}_frame_$frameLabel.png',
-      acceptedTypeGroups: <XTypeGroup>[
+      acceptedTypeGroups: const <XTypeGroup>[
         XTypeGroup(
           label: 'PNG Image',
           extensions: <String>['png'],
@@ -684,7 +684,7 @@ class _PlayerPageState extends State<PlayerPage>
     final location = await getSaveLocation(
       confirmButtonText: 'Export Audio',
       suggestedName: '${stem}_$suffix.wav',
-      acceptedTypeGroups: <XTypeGroup>[
+      acceptedTypeGroups: const <XTypeGroup>[
         XTypeGroup(
           label: 'WAV Audio',
           extensions: <String>['wav'],
@@ -734,6 +734,11 @@ class _PlayerPageState extends State<PlayerPage>
   }
 
   String _exportModeTooltip(MediaInfo media) {
+    final rangeIssue = _engine.exportRangeIssue;
+    if (rangeIssue != null) {
+      return rangeIssue;
+    }
+
     final rangeLabel = _engine.exportRangeMode == ExportRangeMode.inOut
         ? 'In / Out'
         : 'Whole Movie';
@@ -759,7 +764,7 @@ class _PlayerPageState extends State<PlayerPage>
     if (_infoOpen) {
       _infoController.forward();
     } else {
-      _infoController.reverse();
+      unawaited(_infoController.reverse());
     }
     _showOverlay();
   }
@@ -1740,6 +1745,7 @@ class _PlayerPageState extends State<PlayerPage>
             onPressed: _engine.exporting
                 ? _engine.cancelExport
                 : (!_engine.exportsAvailable ||
+                        _engine.exportRangeIssue != null ||
                         (_exportMode == _ExportMode.imageSequence && !media.hasVideo) ||
                         (_exportMode == _ExportMode.audio && !_engine.exportHasAudio)
                     ? null
@@ -1747,6 +1753,17 @@ class _PlayerPageState extends State<PlayerPage>
             onModeSelected: _selectExportMode,
             onRangeSelected: _selectExportRange,
           ),
+          if (!_engine.exporting && _engine.exportRangeIssue != null) ...[
+            const SizedBox(width: 3),
+            Tooltip(
+              message: _engine.exportRangeIssue!,
+              child: const Icon(
+                Icons.warning_amber_rounded,
+                size: 16,
+                color: Color(0xFFE8A33D),
+              ),
+            ),
+          ],
           const SizedBox(width: 2),
           _OverlayButton(
             icon: Icons.photo_camera_outlined,
@@ -2023,7 +2040,6 @@ class _ModeButton extends StatelessWidget {
     );
   }
 }
-
 
 class _ExportSplitButton extends StatefulWidget {
   const _ExportSplitButton({
