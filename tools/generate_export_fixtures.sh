@@ -1,5 +1,5 @@
-# tools/generate_export_fixtures.sh
 #!/usr/bin/env bash
+# tools/generate_export_fixtures.sh
 set -euo pipefail
 
 output_dir="${1:-export_fixtures}"
