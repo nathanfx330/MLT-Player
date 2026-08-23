@@ -41,22 +41,30 @@ Built and tested against **MLT 7.22.0** on Linux.
 | Current-frame PNG export | Done |
 | PNG image-sequence export | Done |
 | WAV audio export | Done |
-| Two-layer MLT tractor | Done |
+| Three-layer MLT tractor | Done |
 | Add to Movie at the playhead | Done |
-| Layer opacity / visibility | Done |
-| Per-track audio levels | Done |
+| Layer 2 + Layer 3 opacity / visibility | Done |
+| Independent layer position / scale / anchors | Done |
 | Still + alpha-capable overlay layers | Done |
-| Layer replacement / order swap | Done |
-| Layer position / scale / anchors | Done |
-| Tractor-aware composition export | Done |
+| Per-track audio levels | Done |
+| Layer source replacement | Done |
+| Two-layer base/overlay order swap | Done |
+| Layer removal + composition Undo / Redo | Done |
+| Seamless Layer 3 remove / Undo restore | Done |
+| Tractor-aware three-layer composition export | Done |
+| Preview / export parity harness | Done |
+| No-active-engine guard regression | Done |
+| Linux CI smoke + parity | Done |
 | Export preset / codec selection | Next |
 | Explicit output frame-rate control | Next |
-| More than two tracks | Planned |
+| Richer layer timing / ordering operations | Planned |
 | MLT XML interchange | Planned |
 
-**POC 10.9 closes the current loop:** the player can preview a real two-layer
-MLT composition and export that composition through a separate background
-tractor graph. Export no longer falls back to rendering only the base source.
+The current checkpoint is a **hardened three-layer composition system**. Layer 1
+is the timed base movie. Layers 2 and 3 can be timed video or held stills, can
+start at the parked playhead, and carry independent geometry, opacity,
+visibility, alpha interpretation, and audio gain. Preview and export rebuild the
+same indexed composition state on separate MLT graphs.
 
 Engineering notes live in [`docs/`](docs/README.md).
 
@@ -132,9 +140,9 @@ Current readouts include:
 - audio channel count
 - audio sample rate
 
-The Tracks inspector also exposes current two-layer composition state such as
-track audio levels, Layer 2 opacity, visibility, alpha interpretation,
-position, and scale.
+The **Layers** inspector exposes the current composition state for Layers 1–3.
+Overlay controls include opacity, visibility, alpha interpretation, X/Y
+position, scale, anchors, source replacement, and per-track audio gain.
 
 Color primaries are intentionally not shown yet because the current MLT 7.22
 metadata path used here does not expose an independent source-primaries value
@@ -164,45 +172,59 @@ Undo and Redo are application-owned edit history:
 - `Ctrl+Z` — Undo
 - `Ctrl+Shift+Z` — Redo
 
+Composition edits participate in the same history. Explicit layer removal is
+undoable. Adding Layer 2 or Layer 3 establishes a new composition baseline, so
+walking backward through later property edits does not accidentally un-add the
+layer.
+
 ---
 
-## Two-layer composition
+## Three-layer composition
 
-POC 10 promotes the viewer from a single producer to an MLT tractor when a
-second layer is added.
+The player begins with one producer. Adding media promotes the visible movie to
+an MLT tractor.
 
 ```text
-Layer 1 producer -----------\
-                            -> tractor -> preview consumer
-Layer 2 playlist/producer --/
+Layer 1 producer ------------------+
+                                   |
+Layer 2 playlist / producer -------+--> tractor --> preview consumer
+                                   |
+Layer 3 playlist / producer -------+
 ```
+
+Layer slots are stable and indexed internally:
+
+```text
+slot 0 = Layer 1 / base movie
+slot 1 = Layer 2 / overlay
+slot 2 = Layer 3 / overlay
+```
+
+A fourth layer is currently rejected rather than silently changing topology.
 
 ### Layer 1
 
-Layer 1 is the timed base movie.
-
-It defines:
+Layer 1 is the timed base movie. It defines:
 
 - the movie canvas/profile
 - frame zero
 - the overall movie duration
 
-A still image cannot become Layer 1 in the current two-layer model.
+A still image cannot become Layer 1 in the current model.
 
-### Layer 2
+### Layers 2 and 3
 
-Layer 2 can be timed video or a still image.
+Layers 2 and 3 can be timed video or still images.
 
-Add to Movie places it at the currently parked playhead. Internally, MLT Player
-builds a Layer 2 playlist with a blank lead-in so the added media begins at the
-requested movie frame.
+Add to Movie places a new overlay at the currently parked playhead. Internally,
+MLT Player builds a playlist with a blank lead-in so the added media starts at
+the requested movie frame.
 
-Current Layer 2 controls include:
+Overlay controls include:
 
 - opacity
 - show / hide
 - replace source
-- swap layer order when the new base remains timed video
 - per-track audio level
 - alpha interpretation: Auto / Straight / Premultiplied
 - X / Y position
@@ -213,41 +235,60 @@ Still images are held from their insertion frame through the end of Layer 1.
 Small stills keep native display size when they already fit the canvas; larger
 stills scale down to fit.
 
-Video compositing uses MLT's `composite` transition. Audio-bearing layers are
-summed through an MLT `mix` transition after track-local `volume` filters.
+Video compositing uses MLT `composite` transitions. Audio-bearing tracks are
+summed with MLT `mix` transitions after track-local `volume` filters.
+
+The existing Layer 1 / Layer 2 swap remains a two-layer operation. It is disabled
+while Layer 3 exists; remove the top layer first rather than implicitly
+reindexing the stack.
+
+### Seamless Layer 3 removal and Undo
+
+Layer 3 removal and history restoration use a small preview transaction.
+
+During the graph rebuild, native frame publication is frozen and Dart
+`ChangeNotifier` updates are batched. The last valid texture remains on screen
+until the replacement graph and all saved Layer 3 properties are ready. The
+transaction then publishes one final state.
+
+That prevents the viewer from flashing through intermediate Layer 1 / Layer 2
+rebuild states during Remove or Undo.
 
 ---
 
 ## Export
 
-Export still runs on a **separate native MLT graph**. The encoder never steals
-or mutates the live preview tractor.
+Export runs on a **separate native MLT graph**. The encoder never steals or
+mutates the live preview tractor.
 
-The crucial POC 10 change is that export now snapshots the current composition
-and rebuilds it with fresh objects on the worker thread:
+The bridge snapshots the indexed composition state and rebuilds it with fresh
+objects on the worker thread:
 
 ```text
 preview
   Layer 1 producer
   Layer 2 playlist
+  Layer 3 playlist (when present)
   tractor
-  composite / mix
+  composite / mix transitions
   sdl2_audio consumer
 
 export worker
   fresh Layer 1 producer
   fresh Layer 2 playlist
+  fresh Layer 3 playlist (when present)
   fresh tractor
-  fresh composite / mix
+  fresh composite / mix transitions
   avformat consumer
 ```
 
-The export snapshot carries the second layer's placement, opacity/visibility
-result, position, scale, alpha interpretation, and track audio gains.
+The snapshot carries presence, placement, still/timed classification, geometry,
+opacity/visibility result, alpha interpretation, audio presence, and audio gain
+for each indexed layer.
 
 ### Export range
 
-The grouped Export menu now has an explicit range choice:
+The grouped Export menu has an explicit range choice:
 
 ```text
 Export Video
@@ -262,8 +303,9 @@ RANGE
 **Whole Movie is the default.** For a trimmed movie it means the current active
 trim bounds. `In / Out` is available when a valid marked range exists.
 
-This is intentionally no longer an implicit "selection wins if markers happen
-to exist" rule.
+The range is fail-closed: In / Out export requires a complete valid pair. A
+completed In/Out pair can select the In / Out mode automatically until the user
+explicitly chooses a range mode; an explicit Whole Movie choice remains sticky.
 
 ### Current export families
 
@@ -294,12 +336,27 @@ Quality:     CRF 18
 Preset:      medium
 Fast start:  yes
 Frames:      progressive output
-MLT:         real_time = -1
 ```
 
-Interlaced sources are rendered through the same deinterlacing policy used by
-the viewer and PNG exports. A composition with no audio does not receive a
-manufactured silent AAC stream.
+The native exporter uses parallel MLT rendering for offline output. Export
+telemetry is written to a sidecar JSON file while an export runs; it records
+frame progress, wall time, throughput, CPU usage, graph setup, and result state.
+
+A composition with no audio does not receive a manufactured silent AAC stream.
+
+### Known MLT 7.22 audio-flush warning
+
+On MLT 7.22, successful MP4 exports with an encoded audio stream can emit:
+
+```text
+Timestamps are unset in a packet for stream 1
+Encoder did not produce proper pts, making some up.
+```
+
+The project PTS diagnostic demonstrates that this follows the presence of an
+encoded audio stream: audio fixtures warn, silent fixtures do not. The bridge
+does not handle FFmpeg packets directly, so the project does not locally patch
+packet timestamps in the exporter.
 
 ### Current-frame PNG
 
@@ -343,8 +400,8 @@ Rate:       preserve an audio-bearing source rate when available
 Channels:   preserve an audio-bearing source channel count when available
 ```
 
-With two audio tracks this is now a **composition mixdown**, not merely a copy
-of Layer 1 audio. Track gains and the tractor mix are rendered into the WAV.
+With multiple audio-bearing layers this is a **composition mixdown**, not merely
+a copy of Layer 1 audio. Track gains and tractor mixes are rendered into the WAV.
 
 ---
 
@@ -355,40 +412,43 @@ Flutter UI
     |
     +-- PlayerEngine
     |      +-- transport
-    |      +-- selection / trim / history
-    |      +-- Layer 2 composition state
+    |      +-- selection / trim
+    |      +-- composition history
+    |      +-- Layer 1 / 2 / 3 state
     |      +-- export range / status
     |
-    +-- Dart FFI ---------------------> libmlt_bridge.so
-    |                                      |
-    +-- MethodChannel -> GTK runner        |
-                                           v
-                                    opaque MLT engine
-                                           |
-                     +---------------------+---------------------+
-                     |                                           |
-                  preview                                      export
-                     |                                           |
-          Layer 1 + Layer 2 playlist                 composition snapshot
-                     |                                           |
-                  tractor                              fresh worker tractor
-             composite + mix                           composite + mix
-                     |                                           |
-             sdl2_audio consumer                         avformat consumer
-                     |
-              render threads + RGBA
-                     |
-              triple frame buffer
-                     |
-             OpenGL external texture
-                     |
-                  Flutter
+    +-- Dart FFI --------------------------> libmlt_bridge.so
+    |                                           |
+    +-- MethodChannel -> GTK runner             |
+                                                v
+                                         opaque MLT engine
+                                                |
+                      +-------------------------+-------------------------+
+                      |                                                   |
+                   preview                                              export
+                      |                                                   |
+          indexed 1–3 layer composition                     indexed snapshot
+                      |                                                   |
+                   tractor                                      fresh tractor
+            composite + mix fields                        composite + mix fields
+                      |                                                   |
+              sdl2_audio consumer                           avformat consumer
+                      |
+               render threads + RGBA
+                      |
+               triple frame buffer
+                      |
+              OpenGL external texture
+                      |
+                   Flutter
 ```
 
 Important architecture rules:
 
 - MLT factory/repository lifetime is process-wide.
 - Playback state lives in opaque `MltBridgeEngine` handles.
+- Public media/transport/property entry points fail closed when no engine is
+  active.
 - Dart resolves the bridge with `DynamicLibrary.process()`.
 - The GTK runner links the same bridge into the application process.
 - The Flutter texture registrar is process-wide, with one engine selected as
@@ -397,46 +457,55 @@ Important architecture rules:
 - Video frame transfer uses three buffers so producer and Flutter raster
   threads can own buffers independently.
 - Scaling, deinterlacing, and image conversion happen on MLT render threads.
-- The visible `producer` is the primary source for one track and the tractor
-  producer after Add to Movie.
-- Preview and export represent the same composition but share no live
+- Retired OpenGL texture names are deleted only while Flutter has a valid GL
+  context, rather than from arbitrary teardown code.
+- Preview and export represent the same indexed composition but share no live
   producer/playlist/tractor objects.
+- Layer 3 graph changes can freeze frame publication temporarily so history
+  operations become visually atomic.
 
 ---
 
 ## Deterministic testing
 
-`tools/generate_export_fixtures.sh` creates a local regression set with FFmpeg:
+The main native safety net is:
 
-```text
-progressive_av.mp4
-interlaced_av.mkv
-video_only.mp4
-anamorphic_1440x1080_16x9.mp4
-pcm24.wav
+```bash
+tools/smoke.sh
 ```
 
-Run:
+It builds the bridge and runs several independent checks:
+
+1. **no-active-engine guards** — deliberately destroys the active engine and
+   verifies public calls fail closed and return safe sentinel values.
+2. **native smoke** — transport, engine isolation, Layer 2 composition,
+   still/alpha behavior, audio levels, export, reopen/reset, and teardown.
+3. **preview/export parity** — derives state from the live preview graph and a
+   freshly constructed export graph, then compares them.
+4. **MP4 PTS diagnosis** — compares audio and silent exports and reports whether
+   the known MLT 7.22 unset-PTS warning appears.
+
+Parity includes:
+
+- timed Layer 2
+- held-still Layer 2
+- timed/audio Layer 3
+- held-alpha Layer 3
+- exact insertion frames
+- layer counts
+- output profile dimensions and frame rate
+- composition length and export range
+- still/timed classification
+- alpha mode
+- presentation geometry and opacity
+- per-track audio presence and gain
+- rejection of a fourth layer without damaging the three-layer tractor
+
+The deterministic export fixture generator is also available:
 
 ```bash
 bash tools/generate_export_fixtures.sh
 ```
-
-The native smoke test also exercises the bridge without Flutter. POC 10 checks
-now cover:
-
-- independent opaque engines
-- second-layer insertion at an exact frame
-- blank lead-in seeks
-- tractor playhead preservation
-- opacity and scale clamps
-- position / scale round-trips
-- anchors
-- per-track audio levels
-- still-image overlays
-- alpha detection and interpretation
-- held stills through the end of Layer 1
-- whole-movie two-layer MP4 export
 
 This keeps "MLT graph problem" and "Flutter integration problem" as separate
 questions during debugging.
@@ -473,24 +542,35 @@ Independent background export graph, MP4, current-frame PNG, PNG sequence,
 progressive output policy, Lanczos PNG scaling, deterministic fixtures, and
 sequence validation.
 
-### POC 10 — tracks and composition — current checkpoint complete through 10.9
+### POC 10 — tracks and composition — hardened three-layer checkpoint
 
-- 10.1 — opaque engine handles
-- 10.2 — tractor + second track
-- 10.3 — playhead-relative track placement
-- 10.4 — opacity
-- 10.5 — Tracks inspector + audio levels
-- 10.6 — still/alpha layer support
-- 10.7 — replacement, visibility, and layer order
-- 10.8 — position / scale / anchors
-- 10.9 — tractor-aware composition export
+The original POC 10 progression established opaque engine handles, a second
+track, playhead-relative placement, opacity, track audio, still/alpha support,
+replacement/visibility/order, geometry, and tractor-aware export.
+
+The hardening and Layer 3 work then added:
+
+- shared preview/export timing helpers
+- export diagnostics and range-state hardening
+- native module split (`bridge`, `composition`, `export`)
+- preview/export parity instrumentation
+- Linux CI for analyzer + smoke/parity
+- MLT 7.22 PTS diagnosis
+- composition-aware Undo/Redo and explicit layer removal
+- macro-alias cleanup
+- no-active-engine guards
+- safe OpenGL texture retirement/deletion
+- indexed three-slot composition snapshots
+- real third tractor track in preview and export
+- Layer 3 Flutter/FFI and Layers inspector controls
+- atomic frame + notification transactions for seamless Layer 3 remove/Undo
 
 ### Next
 
 - export preset / codec selection
 - explicit output frame-rate control
-- more than two tracks
-- richer track timing/edit operations
+- richer layer timing/edit operations
+- broader layer-order/reordering rules
 - blend-mode exploration
 - broader alpha/color policy
 
@@ -511,6 +591,7 @@ embedding MLT rather than only driving it through `melt`:
 
 - [Documentation index](docs/README.md)
 - [Embedding MLT in a Flutter/Linux Desktop Player](docs/embedding-mlt-in-a-flutter-linux-app.md)
+- [POC 9: Export Formats and Hardening](docs/poc-9-export-formats-and-hardening.md)
 - [POC 10: Multitrack, Compositing, and Tractor-Aware Export](docs/poc-10-multitrack-compositing-and-export.md)
 
 ---
@@ -528,8 +609,14 @@ flutter run -d linux
 Dart-only changes normally need only:
 
 ```bash
-flutter test
+flutter analyze
 flutter run -d linux
+```
+
+Native regression pass:
+
+```bash
+tools/smoke.sh
 ```
 
 Common Ubuntu development dependencies include:
