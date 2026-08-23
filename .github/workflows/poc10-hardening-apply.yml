@@ -1,0 +1,438 @@
+name: Apply POC 10 hardening
+
+on:
+  push:
+    branches:
+      - poc10-hardening-1
+    paths:
+      - .github/workflows/poc10-hardening-apply.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: poc10-hardening-1
+          fetch-depth: 0
+
+      - name: Apply surgical hardening edits
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          bridge_path = Path('native/mlt_bridge.c')
+          text = bridge_path.read_text()
+
+          def replace_once(haystack, old, new, label):
+              count = haystack.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected 1 match, found {count}')
+              return haystack.replace(old, new, 1)
+
+          # 1. Replace the export-only base-size implementation with a shared,
+          # profile-driven helper plus shared composite geometry/configuration.
+          start = text.index('static int export_secondary_base_size(')
+          end = text.index('\n/*\n * Build an export-only graph', start)
+          shared_helpers = r'''static int secondary_base_size_for_source(
+              mlt_profile target_profile,
+              mlt_producer source,
+              int source_is_still,
+              double *out_width,
+              double *out_height)
+          {
+              if (target_profile == NULL ||
+                  source == NULL ||
+                  out_width == NULL ||
+                  out_height == NULL ||
+                  target_profile->width <= 0 ||
+                  target_profile->height <= 0) {
+                  return 0;
+              }
+
+              mlt_properties properties =
+                  MLT_PRODUCER_PROPERTIES(source);
+
+              int source_width =
+                  mlt_properties_get_int(
+                      properties,
+                      "meta.media.width"
+                  );
+              int source_height =
+                  mlt_properties_get_int(
+                      properties,
+                      "meta.media.height"
+                  );
+
+              if (source_width <= 0) {
+                  source_width = mlt_properties_get_int(properties, "width");
+              }
+              if (source_height <= 0) {
+                  source_height = mlt_properties_get_int(properties, "height");
+              }
+
+              if (source_width <= 0 || source_height <= 0) {
+                  return 0;
+              }
+
+              double source_sar =
+                  mlt_properties_get_double(
+                      properties,
+                      "aspect_ratio"
+                  );
+              if (!isfinite(source_sar) || source_sar <= 0.0) {
+                  source_sar = 1.0;
+              }
+
+              double output_sar = mlt_profile_sar(target_profile);
+              if (!isfinite(output_sar) || output_sar <= 0.0) {
+                  output_sar = 1.0;
+              }
+
+              double display_width =
+                  (double)source_width * source_sar / output_sar;
+              double display_height = (double)source_height;
+
+              if (!isfinite(display_width) ||
+                  !isfinite(display_height) ||
+                  display_width <= 0.0 ||
+                  display_height <= 0.0) {
+                  return 0;
+              }
+
+              double fit =
+                  (double)target_profile->width / display_width;
+              const double height_fit =
+                  (double)target_profile->height / display_height;
+
+              if (height_fit < fit) {
+                  fit = height_fit;
+              }
+              if (source_is_still && fit > 1.0) {
+                  fit = 1.0;
+              }
+
+              if (!isfinite(fit) || fit <= 0.0) {
+                  return 0;
+              }
+
+              display_width *= fit;
+              display_height *= fit;
+
+              if (display_width < 1.0) {
+                  display_width = 1.0;
+              }
+              if (display_height < 1.0) {
+                  display_height = 1.0;
+              }
+
+              *out_width = display_width;
+              *out_height = display_height;
+              return 1;
+          }
+
+          static int set_composite_geometry(
+              mlt_transition transition,
+              double x,
+              double y,
+              double width,
+              double height,
+              double opacity)
+          {
+              if (transition == NULL ||
+                  !isfinite(x) ||
+                  !isfinite(y) ||
+                  !isfinite(width) ||
+                  !isfinite(height) ||
+                  !isfinite(opacity) ||
+                  width <= 0.0 ||
+                  height <= 0.0 ||
+                  opacity < 0.0 ||
+                  opacity > 1.0) {
+                  return 0;
+              }
+
+              char geometry[160];
+              snprintf(
+                  geometry,
+                  sizeof(geometry),
+                  "%.6f/%.6f:%.6fx%.6f:%.6f",
+                  x,
+                  y,
+                  width,
+                  height,
+                  opacity
+              );
+
+              mlt_properties_set(
+                  MLT_TRANSITION_PROPERTIES(transition),
+                  "geometry",
+                  geometry
+              );
+
+              return 1;
+          }
+
+          static int configure_composite_transition(
+              mlt_transition transition,
+              double x,
+              double y,
+              double width,
+              double height,
+              double opacity)
+          {
+              if (transition == NULL ||
+                  !isfinite(x) ||
+                  !isfinite(y) ||
+                  !isfinite(width) ||
+                  !isfinite(height) ||
+                  !isfinite(opacity) ||
+                  width <= 0.0 ||
+                  height <= 0.0 ||
+                  opacity < 0.0 ||
+                  opacity > 1.0) {
+                  return 0;
+              }
+
+              mlt_properties properties =
+                  MLT_TRANSITION_PROPERTIES(transition);
+
+              mlt_properties_set_int(properties, "always_active", 1);
+              mlt_properties_set_int(properties, "progressive", 1);
+              mlt_properties_set_int(properties, "invert", 0);
+              mlt_properties_set_int(properties, "aligned", 1);
+              mlt_properties_set_int(properties, "fill", 1);
+              mlt_properties_set_int(properties, "distort", 0);
+              mlt_properties_set(properties, "halign", "left");
+              mlt_properties_set(properties, "valign", "top");
+
+              return set_composite_geometry(
+                  transition,
+                  x,
+                  y,
+                  width,
+                  height,
+                  opacity
+              );
+          }
+'''
+          text = text[:start] + shared_helpers + text[end:]
+
+          # 2. Export and preview now call the same sizing helper.
+          text = replace_once(
+              text,
+              'if (!export_secondary_base_size(\n            graph->export_profile,',
+              'if (!secondary_base_size_for_source(\n            graph->export_profile,',
+              'export base-size call',
+          )
+          text = replace_once(
+              text,
+              'if (!secondary_base_size_for_source_locked(\n            pending_secondary,',
+              'if (!secondary_base_size_for_source(\n            profile,\n            pending_secondary,',
+              'preview base-size call',
+          )
+
+          # 3. Remove the old preview-only duplicate sizing implementation.
+          legacy_start = text.index('static int secondary_base_size_for_source_locked(')
+          legacy_end = text.index(
+              '\n/* Call with engine_mutex held. */\nstatic int apply_secondary_geometry_locked',
+              legacy_start,
+          )
+          text = text[:legacy_start] + text[legacy_end + 1:]
+
+          # 4. Export composite construction uses the shared property + geometry writer.
+          export_block_start = text.index(
+              '    mlt_properties composite_properties =\n'
+              '        MLT_TRANSITION_PROPERTIES(graph->export_composite);'
+          )
+          export_block_end = text.index(
+              '\n\n    if (mlt_field_plant_transition(\n'
+              '            field,\n'
+              '            graph->export_composite,',
+              export_block_start,
+          )
+          export_replacement = '''    if (!configure_composite_transition(
+              graph->export_composite,
+              x,
+              y,
+              base_width * scale,
+              base_height * scale,
+              opacity)) {
+          export_set_failure(
+              failure,
+              failure_size,
+              "Could not configure the export video composite."
+          );
+          goto fail;
+      }'''
+          text = text[:export_block_start] + export_replacement + text[export_block_end:]
+
+          # 5. Preview composite construction uses the same shared configuration.
+          preview_block_start = text.index(
+              '    mlt_properties composite_properties =\n'
+              '        MLT_TRANSITION_PROPERTIES(\n'
+              '            pending_composite\n'
+              '        );'
+          )
+          preview_block_end = text.index(
+              '\n\n    if (mlt_field_plant_transition(\n'
+              '            field,\n'
+              '            pending_composite,',
+              preview_block_start,
+          )
+          preview_replacement = '''    /*
+       * Preview and offline export intentionally share one composite
+       * configuration function. New geometry/compositor policy must therefore
+       * land in both paths at once instead of being hand-mirrored.
+       */
+      if (!configure_composite_transition(
+              pending_composite,
+              pending_x,
+              pending_y,
+              pending_base_width,
+              pending_base_height,
+              1.0)) {
+          snprintf(
+              failure,
+              sizeof(failure),
+              "%s",
+              "Could not configure the video composite transition."
+          );
+          goto add_track_cleanup;
+      }'''
+          text = text[:preview_block_start] + preview_replacement + text[preview_block_end:]
+
+          # 6. Live opacity/position/scale updates share the exact same geometry encoder.
+          old_live_geometry = r'''    char geometry[160];
+    snprintf(
+        geometry,
+        sizeof(geometry),
+        "%.6f/%.6f:%.6fx%.6f:%.6f",
+        secondary_x,
+        secondary_y,
+        width,
+        height,
+        secondary_opacity
+    );
+
+    mlt_service_lock(
+        MLT_TRANSITION_SERVICE(
+            video_composite
+        )
+    );
+
+    mlt_properties_set(
+        MLT_TRANSITION_PROPERTIES(
+            video_composite
+        ),
+        "geometry",
+        geometry
+    );
+
+    mlt_service_unlock(
+        MLT_TRANSITION_SERVICE(
+            video_composite
+        )
+    );'''
+          new_live_geometry = r'''    mlt_service_lock(
+        MLT_TRANSITION_SERVICE(
+            video_composite
+        )
+    );
+
+    const int applied =
+        set_composite_geometry(
+            video_composite,
+            secondary_x,
+            secondary_y,
+            width,
+            height,
+            secondary_opacity
+        );
+
+    mlt_service_unlock(
+        MLT_TRANSITION_SERVICE(
+            video_composite
+        )
+    );
+
+    if (!applied) {
+        return 0;
+    }'''
+          text = replace_once(
+              text,
+              old_live_geometry,
+              new_live_geometry,
+              'live geometry writer',
+          )
+
+          # 7. Destroying one engine must preserve whichever other engine the
+          # caller had activated before entering the destroy function.
+          destroy_start = text.index('void mlt_bridge_engine_destroy(\n    MltBridgeEngine *engine)')
+          destroy_end = text.index('\nMLT_BRIDGE_EXPORT\nconst char *mlt_bridge_version', destroy_start)
+          destroy = text[destroy_start:destroy_end]
+          destroy = replace_once(
+              destroy,
+              '    ensure_locks();\n\n    /* Prevent any new Flutter raster callback from claiming this engine. */',
+              '    ensure_locks();\n\n    MltBridgeEngine *caller_engine =\n        current_engine();\n\n    /* Prevent any new Flutter raster callback from claiming this engine. */',
+              'destroy caller snapshot',
+          )
+          old_restore = r'''    if (current_engine() == engine) {
+        activate_engine_local(NULL);
+    }
+
+    g_cond_clear(&engine->e_frame_idle_cond);
+    g_mutex_clear(&engine->e_frame_mutex);
+    g_mutex_clear(&engine->e_mutex);
+
+    g_free(engine);'''
+          new_restore = r'''    g_cond_clear(&engine->e_frame_idle_cond);
+    g_mutex_clear(&engine->e_frame_mutex);
+    g_mutex_clear(&engine->e_mutex);
+
+    if (caller_engine != NULL &&
+        caller_engine != engine) {
+        activate_engine_local(caller_engine);
+    } else {
+        activate_engine_local(NULL);
+    }
+
+    g_free(engine);'''
+          destroy = replace_once(
+              destroy,
+              old_restore,
+              new_restore,
+              'destroy caller restoration',
+          )
+          text = text[:destroy_start] + destroy + text[destroy_end:]
+
+          bridge_path.write_text(text)
+
+          # Shell scripts require the shebang on physical line 1; keep the
+          # project-relative path comment immediately after it.
+          fixture_path = Path('tools/generate_export_fixtures.sh')
+          fixture = fixture_path.read_text()
+          fixture = replace_once(
+              fixture,
+              '# tools/generate_export_fixtures.sh\n#!/usr/bin/env bash\n',
+              '#!/usr/bin/env bash\n# tools/generate_export_fixtures.sh\n',
+              'fixture shebang',
+          )
+          fixture_path.write_text(fixture)
+          PY
+
+          git diff --check
+
+      - name: Commit hardened sources
+        shell: bash
+        run: |
+          rm .github/workflows/poc10-hardening-apply.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add native/mlt_bridge.c tools/generate_export_fixtures.sh .github/workflows/poc10-hardening-apply.yml
+          git commit -m "Harden POC 10 composition helpers"
+          git push origin HEAD:poc10-hardening-1
