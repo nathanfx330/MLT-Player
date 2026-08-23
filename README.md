@@ -12,27 +12,26 @@ The target is deliberately narrow: **recover the practical role of QuickTime
 7 Pro**.
 
 Not an NLE. Not a batch transcoder. Open a file, inspect it closely, make one
-surgical change, save or export it, and close it.
+surgical change, add a layer when needed, export the result, and close it.
 
 ---
 
 ## Current status
 
-Built against **MLT 7.22.0** on Linux.
+Built and tested against **MLT 7.22.0** on Linux.
 
 | Area | State |
 | --- | --- |
 | Flutter Linux application | Done |
 | Native C / Dart FFI bridge | Done |
+| Opaque playback-engine handles | Done |
 | External OpenGL video texture | Done |
 | Audio through `sdl2_audio` | Done |
 | Play, pause, seek and scrub | Done |
 | Exact ±1-frame stepping | Done |
 | J / K / L shuttle, including reverse | Done |
-| Loop | Done |
-| Play All Frames | Done |
-| Generated clip timecode | Done |
-| Embedded source timecode when present | Done |
+| Loop / Play All Frames | Done |
+| Generated + embedded source timecode | Done |
 | Stream / codec inspection | Done |
 | In / Out selection | Done |
 | Play Selection / Loop Selection | Done |
@@ -41,36 +40,46 @@ Built against **MLT 7.22.0** on Linux.
 | Background MP4 export | Done |
 | Current-frame PNG export | Done |
 | PNG image-sequence export | Done |
-| WAV audio-only export | Done |
-| Grouped Export control | Done |
+| WAV audio export | Done |
+| Two-layer MLT tractor | Done |
+| Add to Movie at the playhead | Done |
+| Layer opacity / visibility | Done |
+| Per-track audio levels | Done |
+| Still + alpha-capable overlay layers | Done |
+| Layer replacement / order swap | Done |
+| Layer position / scale / anchors | Done |
+| Tractor-aware composition export | Done |
 | Export preset / codec selection | Next |
 | Explicit output frame-rate control | Next |
-| Multi-track / Add to Movie | Planned |
+| More than two tracks | Planned |
 | MLT XML interchange | Planned |
 
-The POC 9 export family is now proven end-to-end. The current hardening pass
-standardizes output policy, strengthens sequence cleanup/validation, and adds
-deterministic test media before more export options are introduced.
+**POC 10.9 closes the current loop:** the player can preview a real two-layer
+MLT composition and export that composition through a separate background
+tractor graph. Export no longer falls back to rendering only the base source.
+
+Engineering notes live in [`docs/`](docs/README.md).
 
 ---
 
 ## What MLT Player is for
 
-QuickTime 7 Pro was useful because it was not trying to be an editor.
+QuickTime 7 Pro was useful because it was not trying to be a full editor.
 
 It could open quickly, show the file, let you set In and Out, trim, step a
-frame at a time, inspect streams, export a still or image sequence, extract
-or export audio, and write a new movie without requiring a project workflow.
+frame at a time, inspect streams, add media to the movie, export a still or
+image sequence, extract audio, and write a new movie without requiring a
+project workflow.
 
 MLT Player follows that shape:
 
-**open → inspect → do one precise operation → export/save → close**
+**open → inspect → make one precise change → export/save → close**
 
 Deliberate non-goals:
 
 - no bins
 - no giant project workflow
-- no primary editing timeline
+- no conventional NLE timeline
 - no batch-transcoder-centered interface
 - no feature merely because MLT exposes it
 
@@ -123,6 +132,10 @@ Current readouts include:
 - audio channel count
 - audio sample rate
 
+The Tracks inspector also exposes current two-layer composition state such as
+track audio levels, Layer 2 opacity, visibility, alpha interpretation,
+position, and scale.
+
 Color primaries are intentionally not shown yet because the current MLT 7.22
 metadata path used here does not expose an independent source-primaries value
 that this implementation trusts.
@@ -153,28 +166,111 @@ Undo and Redo are application-owned edit history:
 
 ---
 
-## Export
+## Two-layer composition
 
-Export runs on a **separate MLT producer/profile/consumer graph** in a native
-background thread. It does not take over the live playback producer,
-`sdl2_audio` consumer, or Flutter texture.
-
-All range exports follow the same rule:
-
-1. marked In/Out selection, if present
-2. otherwise the current trimmed clip
-3. otherwise the whole active clip
-
-The grouped Export control keeps range-export types together:
+POC 10 promotes the viewer from a single producer to an MLT tractor when a
+second layer is added.
 
 ```text
-Export
- ├── Export Video
- ├── Export Image Sequence
- └── Export Audio (WAV)
+Layer 1 producer -----------\
+                            -> tractor -> preview consumer
+Layer 2 playlist/producer --/
 ```
 
-Current-frame PNG remains a separate snapshot operation.
+### Layer 1
+
+Layer 1 is the timed base movie.
+
+It defines:
+
+- the movie canvas/profile
+- frame zero
+- the overall movie duration
+
+A still image cannot become Layer 1 in the current two-layer model.
+
+### Layer 2
+
+Layer 2 can be timed video or a still image.
+
+Add to Movie places it at the currently parked playhead. Internally, MLT Player
+builds a Layer 2 playlist with a blank lead-in so the added media begins at the
+requested movie frame.
+
+Current Layer 2 controls include:
+
+- opacity
+- show / hide
+- replace source
+- swap layer order when the new base remains timed video
+- per-track audio level
+- alpha interpretation: Auto / Straight / Premultiplied
+- X / Y position
+- uniform scale from 10% to 300%
+- nine-position anchor grid
+
+Still images are held from their insertion frame through the end of Layer 1.
+Small stills keep native display size when they already fit the canvas; larger
+stills scale down to fit.
+
+Video compositing uses MLT's `composite` transition. Audio-bearing layers are
+summed through an MLT `mix` transition after track-local `volume` filters.
+
+---
+
+## Export
+
+Export still runs on a **separate native MLT graph**. The encoder never steals
+or mutates the live preview tractor.
+
+The crucial POC 10 change is that export now snapshots the current composition
+and rebuilds it with fresh objects on the worker thread:
+
+```text
+preview
+  Layer 1 producer
+  Layer 2 playlist
+  tractor
+  composite / mix
+  sdl2_audio consumer
+
+export worker
+  fresh Layer 1 producer
+  fresh Layer 2 playlist
+  fresh tractor
+  fresh composite / mix
+  avformat consumer
+```
+
+The export snapshot carries the second layer's placement, opacity/visibility
+result, position, scale, alpha interpretation, and track audio gains.
+
+### Export range
+
+The grouped Export menu now has an explicit range choice:
+
+```text
+Export Video
+Export Image Sequence
+Export Audio (WAV)
+--------------------
+RANGE
+  Whole Movie
+  In / Out
+```
+
+**Whole Movie is the default.** For a trimmed movie it means the current active
+trim bounds. `In / Out` is available when a valid marked range exists.
+
+This is intentionally no longer an implicit "selection wins if markers happen
+to exist" rule.
+
+### Current export families
+
+- composited MP4 video
+- composited current-frame PNG
+- composited PNG image sequence
+- mixed WAV audio
 
 ### Keyboard shortcuts
 
@@ -192,7 +288,7 @@ The fixed movie preset is currently:
 ```text
 Container:   MP4
 Video:       H.264 / libx264
-Audio:       AAC when source audio exists
+Audio:       AAC when the composition has audio
 Pixel fmt:   yuv420p
 Quality:     CRF 18
 Preset:      medium
@@ -202,26 +298,19 @@ MLT:         real_time = -1
 ```
 
 Interlaced sources are rendered through the same deinterlacing policy used by
-the viewer and PNG exports. Video-only sources do not receive a manufactured
-silent AAC stream.
+the viewer and PNG exports. A composition with no audio does not receive a
+manufactured silent AAC stream.
 
 ### Current-frame PNG
 
-Current-frame capture snapshots the visible source frame before pausing, then
-parks transport on that exact frame before opening the save dialog.
-
-PNG exports are generated from the source graph rather than copied from the
-Flutter texture.
+PNG exports are rendered from the MLT composition graph rather than copied
+from the Flutter texture.
 
 For anamorphic sources, PNG output is written at **display dimensions with
 square pixels**. For example, a 1440×1080 source with 16:9 display aspect is
 written as approximately 1920×1080 rather than as a squeezed 1440×1080 PNG.
 
-Offline PNG scaling uses Lanczos interpolation.
-
-RGBA is currently preserved for PNG output so real source alpha is not lost.
-Alpha interpretation will be handled explicitly as part of the track/
-compositing work rather than guessed from codec-name strings.
+Offline PNG scaling uses Lanczos interpolation and preserves RGBA.
 
 ### PNG image sequence
 
@@ -235,46 +324,89 @@ movie_frames/
   ...
 ```
 
-The native bridge refuses to start a sequence export unless the supplied
-destination directory exists and is empty. That makes cancellation cleanup a
-native invariant rather than a Dart-only convention.
+The native bridge requires the destination directory to exist and be empty.
+Completion validation checks the expected frame count, numbering range, and
+that every owned PNG is non-empty.
 
-Completion validation checks the final producer position and scans the output
-directory to verify:
-
-- the expected number of owned PNG files exists
-- numbering begins at 1
-- numbering ends at the expected final frame
-- every owned PNG is non-empty
-
-Because directory entries are unique, matching count + minimum + maximum
-proves there is no gap in the sequence.
-
-Cancelled or failed sequence exports remove only filenames owned by the
-export and remove the directory only if it becomes empty.
+Cancelled or failed sequence exports remove only filenames owned by the export
+and remove the directory only if it becomes empty.
 
 ### WAV audio export
 
-The fixed audio-only interchange preset is:
+The fixed audio interchange preset is:
 
 ```text
 Container:  WAV
 Codec:      PCM signed 24-bit little-endian
 Video:      disabled
-Rate:       preserve selected source rate when available
-Channels:   preserve selected source channel count when available
+Rate:       preserve an audio-bearing source rate when available
+Channels:   preserve an audio-bearing source channel count when available
 ```
 
-MLT renders audio as signed 32-bit integer internally for this path and FFmpeg
-writes the final `pcm_s24le` samples. MLT does not have a 24-bit internal
-render-buffer format.
+With two audio tracks this is now a **composition mixdown**, not merely a copy
+of Layer 1 audio. Track gains and the tractor mix are rendered into the WAV.
 
 ---
 
-## Deterministic export fixtures
+## Architecture
 
-`tools/generate_export_fixtures.sh` creates a small local regression set using
-FFmpeg:
+```text
+Flutter UI
+    |
+    +-- PlayerEngine
+    |      +-- transport
+    |      +-- selection / trim / history
+    |      +-- Layer 2 composition state
+    |      +-- export range / status
+    |
+    +-- Dart FFI ---------------------> libmlt_bridge.so
+    |                                      |
+    +-- MethodChannel -> GTK runner        |
+                                           v
+                                    opaque MLT engine
+                                           |
+                     +---------------------+---------------------+
+                     |                                           |
+                  preview                                      export
+                     |                                           |
+          Layer 1 + Layer 2 playlist                 composition snapshot
+                     |                                           |
+                  tractor                              fresh worker tractor
+             composite + mix                           composite + mix
+                     |                                           |
+             sdl2_audio consumer                         avformat consumer
+                     |
+              render threads + RGBA
+                     |
+              triple frame buffer
+                     |
+             OpenGL external texture
+                     |
+                  Flutter
+```
+
+Important architecture rules:
+
+- MLT factory/repository lifetime is process-wide.
+- Playback state lives in opaque `MltBridgeEngine` handles.
+- Dart resolves the bridge with `DynamicLibrary.process()`.
+- The GTK runner links the same bridge into the application process.
+- The Flutter texture registrar is process-wide, with one engine selected as
+  its current texture source.
+- The MLT frame callback never takes the main engine mutex.
+- Video frame transfer uses three buffers so producer and Flutter raster
+  threads can own buffers independently.
+- Scaling, deinterlacing, and image conversion happen on MLT render threads.
+- The visible `producer` is the primary source for one track and the tractor
+  producer after Add to Movie.
+- Preview and export represent the same composition but share no live
+  producer/playlist/tractor objects.
+
+---
+
+## Deterministic testing
+
+`tools/generate_export_fixtures.sh` creates a local regression set with FFmpeg:
 
 ```text
 progressive_av.mp4
@@ -290,84 +422,24 @@ Run:
 bash tools/generate_export_fixtures.sh
 ```
 
-or choose a destination directory:
+The native smoke test also exercises the bridge without Flutter. POC 10 checks
+now cover:
 
-```bash
-bash tools/generate_export_fixtures.sh /tmp/mlt-player-fixtures
-```
+- independent opaque engines
+- second-layer insertion at an exact frame
+- blank lead-in seeks
+- tractor playhead preservation
+- opacity and scale clamps
+- position / scale round-trips
+- anchors
+- per-track audio levels
+- still-image overlays
+- alpha detection and interpretation
+- held stills through the end of Layer 1
+- whole-movie two-layer MP4 export
 
-The script prints an `ffprobe` summary after generation.
-
-Useful POC 9 hardening checks:
-
-```bash
-# Video-only MP4 export should contain no audio stream.
-ffprobe -v error -select_streams a \
-  -show_entries stream=index,codec_name \
-  -of default=noprint_wrappers=1 exported_video_only.mp4
-
-# Interlaced input should produce progressive MP4 output.
-ffprobe -v error -select_streams v:0 \
-  -show_entries stream=field_order \
-  -of default=noprint_wrappers=1 exported_interlaced.mp4
-
-# Anamorphic current-frame PNG should be display-sized (expected 1920x1080
-# for the included 1440x1080 / SAR 4:3 fixture).
-ffprobe -v error -select_streams v:0 \
-  -show_entries stream=width,height \
-  -of default=noprint_wrappers=1 exported_frame.png
-
-# WAV export should be 24-bit PCM.
-ffprobe -v error -select_streams a:0 \
-  -show_entries stream=codec_name,sample_fmt,bits_per_raw_sample,sample_rate,channels \
-  -of default=noprint_wrappers=1 exported_audio.wav
-```
-
-Also verify manually that `Ctrl+Alt+E` performs a sequence export without
-changing the selected mode shown on the grouped Export control.
-
----
-
-## Architecture
-
-```text
-Flutter UI
-    │
-    ├── PlayerEngine
-    │      ├── transport
-    │      ├── selection / trim / history
-    │      └── export state
-    │
-    ├── Dart FFI ───────────────► process-linked libmlt_bridge.so
-    │                                  │
-    └── MethodChannel ─► GTK runner    │
-                                       ▼
-                                      MLT
-                                       │
-                ┌──────────────────────┴──────────────────────┐
-                │                                             │
-          playback graph                                export graph
-                │                                             │
-       render threads + RGBA                    independent producer/profile
-                │                                + avformat consumer
-       triple frame buffer                              │
-                │                                       ├── MP4
-       OpenGL external texture                          ├── PNG
-                │                                       └── WAV
-              Flutter
-```
-
-Important current architecture rules:
-
-- Dart resolves the bridge with `DynamicLibrary.process()`.
-- The GTK runner links the same bridge into the application process.
-- Playback bridge state is currently process-global.
-- One playback engine per process is intentional through POC 9.
-- Export owns an entirely separate MLT graph.
-- The MLT frame callback never takes the main engine mutex.
-- Video frame transfer uses three buffers so producer and Flutter raster
-  threads can own buffers independently.
-- Scaling, deinterlacing, and image conversion happen on MLT render threads.
+This keeps "MLT graph problem" and "Flutter integration problem" as separate
+questions during debugging.
 
 ---
 
@@ -375,108 +447,52 @@ Important current architecture rules:
 
 ### POC 0–5 — playback foundation — complete
 
-- Flutter Linux shell
-- MLT lifecycle
-- media open/reopen
-- external OpenGL texture
-- audio
-- seek/scrub
-- fullscreen
-- drag/drop
-- still images
-- audio-only playback
-- anamorphic display handling
-- smoke testing
+Flutter shell, MLT lifecycle, media open/reopen, OpenGL texture, audio,
+seek/scrub, fullscreen, drag/drop, stills, audio-only playback, anamorphic
+display handling, and smoke testing.
 
 ### POC 6 — precise transport — complete
 
-- exact frame stepping
-- J/K/L shuttle
-- reverse playback
-- Loop
-- Play All Frames
-- generated timecode
-- embedded source timecode
+Exact frame stepping, J/K/L shuttle, reverse playback, Loop, Play All Frames,
+generated timecode, and embedded source timecode.
 
 ### POC 7 — inspection — complete
 
-- codecs and streams
-- frame geometry
-- rate / duration / frame count
-- data size / average data rate
-- pixel format
-- colorspace
-- transfer characteristic
-- color range
-- source timecode
+Codec/stream topology, geometry, rate/duration/frame count, data size, pixel
+format, colorspace, transfer characteristic, color range, and source timecode.
 
 ### POC 8 — selection and trim — complete
 
-- In / Out
-- Play Selection
-- Loop Selection
-- Undo / Redo
-- non-destructive trim
-- nested trims
-- trim-aware transport
+In/Out, Play Selection, Loop Selection, Undo/Redo, non-destructive trim,
+nested trims, and trim-aware transport.
 
-### POC 9 — export — feature set complete, hardening in progress
+### POC 9 — export foundation — complete
 
-Proven:
+Independent background export graph, MP4, current-frame PNG, PNG sequence,
+24-bit PCM WAV, progress/cancel, partial-output cleanup, grouped Export UI,
+progressive output policy, Lanczos PNG scaling, deterministic fixtures, and
+sequence validation.
 
-- independent background export graph
-- MP4 export
-- current-frame PNG
-- PNG image sequence
-- WAV audio-only export
-- range export from selection / trim / whole clip
-- progress
-- cancel
-- partial-output cleanup
-- grouped Export UI
+### POC 10 — tracks and composition — current checkpoint complete through 10.9
 
-Hardening now covers:
+- 10.1 — opaque engine handles
+- 10.2 — tractor + second track
+- 10.3 — playhead-relative track placement
+- 10.4 — opacity
+- 10.5 — Tracks inspector + audio levels
+- 10.6 — still/alpha layer support
+- 10.7 — replacement, visibility, and layer order
+- 10.8 — position / scale / anchors
+- 10.9 — tractor-aware composition export
 
-- progressive/deinterlaced MP4 policy
-- no manufactured audio track for video-only MP4
-- Lanczos PNG resampling
-- 24-bit PCM WAV output
-- one-shot image-sequence shortcut semantics
-- native empty-directory sequence ownership
-- complete sequence validation
-- deterministic fixture generation
+### Next
 
-Next export slices:
-
-- output preset / codec selection
+- export preset / codec selection
 - explicit output frame-rate control
-
-### Pre-POC 10 bridge hardening
-
-Before track work:
-
-- replace borrowed returned strings with safe ownership/copy-out APIs
-- add native frame seek / frame position API
-- handle GL texture destruction only when it can be done with the correct GL
-  context
-
-### POC 10 — tracks
-
-Planned:
-
-- opaque engine handles
-- tractor / multitrack
-- second track
-- time offsets
-- layer order
-- blend mode
-- opacity
-- Add to Movie
-- explicit alpha interpretation
-
-MLT RGBA is straight alpha while Flutter expects premultiplied compositing.
-That needs to be solved deliberately before track compositing is considered
-complete.
+- more than two tracks
+- richer track timing/edit operations
+- blend-mode exploration
+- broader alpha/color policy
 
 ### POC 11 — interchange
 
@@ -485,6 +501,17 @@ Planned:
 - save MLT XML
 - open MLT XML
 - open image sequences at a chosen frame rate
+
+---
+
+## Engineering notes
+
+The implementation notes are intentionally written as field notes for people
+embedding MLT rather than only driving it through `melt`:
+
+- [Documentation index](docs/README.md)
+- [Embedding MLT in a Flutter/Linux Desktop Player](docs/embedding-mlt-in-a-flutter-linux-app.md)
+- [POC 10: Multitrack, Compositing, and Tractor-Aware Export](docs/poc-10-multitrack-compositing-and-export.md)
 
 ---
 
@@ -519,30 +546,6 @@ build-essential
 ```
 
 `libmlt-data` matters because MLT service dictionaries are loaded at runtime.
-
----
-
-## Known technical questions
-
-### Borrowed C string lifetimes
-
-Several current bridge getters return pointers into shared bridge-owned storage
-after releasing their mutex. Dart consumes them immediately, but the API
-contract should be made explicit and safe before opaque handles and multiple
-engine instances are introduced.
-
-### OpenGL texture destruction
-
-The external GL texture currently lives for essentially the process lifetime.
-Cleanup should eventually call `glDeleteTextures`, but only from a path where
-the correct GL context is known to be current.
-
-### Alpha
-
-PNG exports currently preserve RGBA to avoid destroying real alpha. Reliable
-source-alpha detection and straight/premultiplied interpretation are deferred
-to the track/compositing milestone, where the distinction becomes part of the
-actual editing model.
 
 ---
 
