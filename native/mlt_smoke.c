@@ -164,9 +164,17 @@ static void check_engine_isolation(void)
         "second engine does not move primary playhead"
     );
 
-    mlt_bridge_engine_activate(secondary);
+    /*
+     * Destroy is allowed to operate on an engine other than the caller's
+     * currently activated engine. It must restore the caller activation when
+     * it finishes instead of leaving the TLS slot NULL.
+     */
     mlt_bridge_engine_destroy(secondary);
-    mlt_bridge_engine_activate(primary);
+
+    check(
+        mlt_bridge_position_frame() == primary_position,
+        "destroying an inactive engine preserves caller activation"
+    );
 }
 
 static gboolean run_step(

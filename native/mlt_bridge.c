@@ -2454,19 +2454,19 @@ static int export_attach_alpha_interpretation(
     return attached;
 }
 
-static int export_secondary_base_size(
-    mlt_profile export_profile,
+static int secondary_base_size_for_source(
+    mlt_profile target_profile,
     mlt_producer source,
     int source_is_still,
     double *out_width,
     double *out_height)
 {
-    if (export_profile == NULL ||
+    if (target_profile == NULL ||
         source == NULL ||
         out_width == NULL ||
         out_height == NULL ||
-        export_profile->width <= 0 ||
-        export_profile->height <= 0) {
+        target_profile->width <= 0 ||
+        target_profile->height <= 0) {
         return 0;
     }
 
@@ -2485,10 +2485,18 @@ static int export_secondary_base_size(
         );
 
     if (source_width <= 0) {
-        source_width = mlt_properties_get_int(properties, "width");
+        source_width =
+            mlt_properties_get_int(
+                properties,
+                "width"
+            );
     }
     if (source_height <= 0) {
-        source_height = mlt_properties_get_int(properties, "height");
+        source_height =
+            mlt_properties_get_int(
+                properties,
+                "height"
+            );
     }
 
     if (source_width <= 0 || source_height <= 0) {
@@ -2504,14 +2512,18 @@ static int export_secondary_base_size(
         source_sar = 1.0;
     }
 
-    double output_sar = mlt_profile_sar(export_profile);
+    double output_sar =
+        mlt_profile_sar(target_profile);
     if (!isfinite(output_sar) || output_sar <= 0.0) {
         output_sar = 1.0;
     }
 
     double display_width =
-        (double)source_width * source_sar / output_sar;
-    double display_height = (double)source_height;
+        (double)source_width *
+        source_sar /
+        output_sar;
+    double display_height =
+        (double)source_height;
 
     if (!isfinite(display_width) ||
         !isfinite(display_height) ||
@@ -2520,14 +2532,20 @@ static int export_secondary_base_size(
         return 0;
     }
 
+    const double canvas_width =
+        (double)target_profile->width;
+    const double canvas_height =
+        (double)target_profile->height;
+
     double fit =
-        (double)export_profile->width / display_width;
+        canvas_width / display_width;
     const double height_fit =
-        (double)export_profile->height / display_height;
+        canvas_height / display_height;
 
     if (height_fit < fit) {
         fit = height_fit;
     }
+
     if (source_is_still && fit > 1.0) {
         fit = 1.0;
     }
@@ -2549,6 +2567,92 @@ static int export_secondary_base_size(
     *out_width = display_width;
     *out_height = display_height;
     return 1;
+}
+
+/*
+ * Encode the composite rectangle in exactly one place. Preview mutations and
+ * offline export both call this helper, so adding a future transform cannot
+ * silently fork the two render paths.
+ */
+static int set_composite_geometry(
+    mlt_transition transition,
+    double x,
+    double y,
+    double width,
+    double height,
+    double opacity)
+{
+    if (transition == NULL ||
+        !isfinite(x) ||
+        !isfinite(y) ||
+        !isfinite(width) ||
+        !isfinite(height) ||
+        !isfinite(opacity) ||
+        width <= 0.0 ||
+        height <= 0.0 ||
+        opacity < 0.0 ||
+        opacity > 1.0) {
+        return 0;
+    }
+
+    char geometry[160];
+    snprintf(
+        geometry,
+        sizeof(geometry),
+        "%.6f/%.6f:%.6fx%.6f:%.6f",
+        x,
+        y,
+        width,
+        height,
+        opacity
+    );
+
+    mlt_properties_set(
+        MLT_TRANSITION_PROPERTIES(transition),
+        "geometry",
+        geometry
+    );
+
+    return 1;
+}
+
+/*
+ * Static composite policy is also shared. The live preview and the export
+ * worker still own separate MLT transitions; they now share the rules used to
+ * configure those transitions.
+ */
+static int configure_composite_transition(
+    mlt_transition transition,
+    double x,
+    double y,
+    double width,
+    double height,
+    double opacity)
+{
+    if (transition == NULL) {
+        return 0;
+    }
+
+    mlt_properties properties =
+        MLT_TRANSITION_PROPERTIES(transition);
+
+    mlt_properties_set_int(properties, "always_active", 1);
+    mlt_properties_set_int(properties, "progressive", 1);
+    mlt_properties_set_int(properties, "invert", 0);
+    mlt_properties_set_int(properties, "aligned", 1);
+    mlt_properties_set_int(properties, "fill", 1);
+    mlt_properties_set_int(properties, "distort", 0);
+    mlt_properties_set(properties, "halign", "left");
+    mlt_properties_set(properties, "valign", "top");
+
+    return set_composite_geometry(
+        transition,
+        x,
+        y,
+        width,
+        height,
+        opacity
+    );
 }
 
 /*
@@ -2923,7 +3027,7 @@ static int export_prepare_source_graph(
     double base_width = 0.0;
     double base_height = 0.0;
 
-    if (!export_secondary_base_size(
+    if (!secondary_base_size_for_source(
             graph->export_profile,
             graph->export_secondary,
             job->export_secondary_is_still,
@@ -2950,34 +3054,20 @@ static int export_prepare_source_graph(
             ? CLAMP(job->export_secondary_opacity, 0.0, 1.0)
             : 1.0;
 
-    mlt_properties composite_properties =
-        MLT_TRANSITION_PROPERTIES(graph->export_composite);
-
-    mlt_properties_set_int(composite_properties, "always_active", 1);
-    mlt_properties_set_int(composite_properties, "progressive", 1);
-    mlt_properties_set_int(composite_properties, "invert", 0);
-    mlt_properties_set_int(composite_properties, "aligned", 1);
-    mlt_properties_set_int(composite_properties, "fill", 1);
-    mlt_properties_set_int(composite_properties, "distort", 0);
-    mlt_properties_set(composite_properties, "halign", "left");
-    mlt_properties_set(composite_properties, "valign", "top");
-
-    char geometry[160];
-    snprintf(
-        geometry,
-        sizeof(geometry),
-        "%.6f/%.6f:%.6fx%.6f:%.6f",
-        x,
-        y,
-        base_width * scale,
-        base_height * scale,
-        opacity
-    );
-    mlt_properties_set(
-        composite_properties,
-        "geometry",
-        geometry
-    );
+    if (!configure_composite_transition(
+            graph->export_composite,
+            x,
+            y,
+            base_width * scale,
+            base_height * scale,
+            opacity)) {
+        export_set_failure(
+            failure,
+            failure_size,
+            "Could not configure the export video composite."
+        );
+        goto fail;
+    }
 
     if (mlt_field_plant_transition(
             field,
@@ -4020,6 +4110,9 @@ void mlt_bridge_engine_destroy(
 
     ensure_locks();
 
+    MltBridgeEngine *caller_engine =
+        current_engine();
+
     /* Prevent any new Flutter raster callback from claiming this engine. */
     g_mutex_lock(&texture_mutex);
     if (texture_engine == engine) {
@@ -4047,13 +4140,16 @@ void mlt_bridge_engine_destroy(
     /* Wait for a raster upload that claimed the engine before detachment. */
     release_slots();
 
-    if (current_engine() == engine) {
-        activate_engine_local(NULL);
-    }
-
     g_cond_clear(&engine->e_frame_idle_cond);
     g_mutex_clear(&engine->e_frame_mutex);
     g_mutex_clear(&engine->e_mutex);
+
+    if (caller_engine != NULL &&
+        caller_engine != engine) {
+        activate_engine_local(caller_engine);
+    } else {
+        activate_engine_local(NULL);
+    }
 
     g_free(engine);
 
@@ -4653,129 +4749,6 @@ static int still_source_is_composite_ready_locked(
 }
 
 
-/*
- * POC 10.8 derives an explicit 100% presentation rectangle for Layer 2.
- *
- * Timed video keeps the previous "fit to base frame" behavior, including
- * upscaling smaller video to the largest contained size. Still images keep
- * native display size when they already fit and only scale down when they
- * would exceed the base canvas. The math mirrors core/composite's aligned
- * aspect-preserving path, including source/profile sample aspect ratio.
- */
-static int secondary_base_size_for_source_locked(
-    mlt_producer source,
-    int source_is_still,
-    double *out_width,
-    double *out_height)
-{
-    if (source == NULL ||
-        profile == NULL ||
-        out_width == NULL ||
-        out_height == NULL ||
-        profile->width <= 0 ||
-        profile->height <= 0) {
-        return 0;
-    }
-
-    mlt_properties properties =
-        MLT_PRODUCER_PROPERTIES(source);
-
-    int source_width =
-        mlt_properties_get_int(
-            properties,
-            "meta.media.width"
-        );
-    int source_height =
-        mlt_properties_get_int(
-            properties,
-            "meta.media.height"
-        );
-
-    if (source_width <= 0) {
-        source_width =
-            mlt_properties_get_int(
-                properties,
-                "width"
-            );
-    }
-    if (source_height <= 0) {
-        source_height =
-            mlt_properties_get_int(
-                properties,
-                "height"
-            );
-    }
-
-    if (source_width <= 0 || source_height <= 0) {
-        return 0;
-    }
-
-    double source_sar =
-        mlt_properties_get_double(
-            properties,
-            "aspect_ratio"
-        );
-    if (!isfinite(source_sar) || source_sar <= 0.0) {
-        source_sar = 1.0;
-    }
-
-    double output_sar =
-        mlt_profile_sar(profile);
-    if (!isfinite(output_sar) || output_sar <= 0.0) {
-        output_sar = 1.0;
-    }
-
-    double display_width =
-        (double)source_width *
-        source_sar /
-        output_sar;
-    double display_height =
-        (double)source_height;
-
-    if (!isfinite(display_width) ||
-        !isfinite(display_height) ||
-        display_width <= 0.0 ||
-        display_height <= 0.0) {
-        return 0;
-    }
-
-    const double canvas_width =
-        (double)profile->width;
-    const double canvas_height =
-        (double)profile->height;
-
-    double fit =
-        canvas_width / display_width;
-    const double height_fit =
-        canvas_height / display_height;
-
-    if (height_fit < fit) {
-        fit = height_fit;
-    }
-
-    if (source_is_still && fit > 1.0) {
-        fit = 1.0;
-    }
-
-    if (!isfinite(fit) || fit <= 0.0) {
-        return 0;
-    }
-
-    display_width *= fit;
-    display_height *= fit;
-
-    if (display_width < 1.0) {
-        display_width = 1.0;
-    }
-    if (display_height < 1.0) {
-        display_height = 1.0;
-    }
-
-    *out_width = display_width;
-    *out_height = display_height;
-    return 1;
-}
-
 /* Call with engine_mutex held. */
 static int apply_secondary_geometry_locked(void)
 {
@@ -4804,37 +4777,31 @@ static int apply_secondary_geometry_locked(void)
         return 0;
     }
 
-    char geometry[160];
-    snprintf(
-        geometry,
-        sizeof(geometry),
-        "%.6f/%.6f:%.6fx%.6f:%.6f",
-        secondary_x,
-        secondary_y,
-        width,
-        height,
-        secondary_opacity
-    );
-
     mlt_service_lock(
         MLT_TRANSITION_SERVICE(
             video_composite
         )
     );
 
-    mlt_properties_set(
-        MLT_TRANSITION_PROPERTIES(
-            video_composite
-        ),
-        "geometry",
-        geometry
-    );
+    const int applied =
+        set_composite_geometry(
+            video_composite,
+            secondary_x,
+            secondary_y,
+            width,
+            height,
+            secondary_opacity
+        );
 
     mlt_service_unlock(
         MLT_TRANSITION_SERVICE(
             video_composite
         )
     );
+
+    if (!applied) {
+        return 0;
+    }
 
     invalidate_frames();
     refresh_locked();
@@ -5772,7 +5739,8 @@ int mlt_bridge_add_track(
         goto add_track_cleanup;
     }
 
-    if (!secondary_base_size_for_source_locked(
+    if (!secondary_base_size_for_source(
+            profile,
             pending_secondary,
             secondary_still,
             &pending_base_width,
@@ -6029,81 +5997,26 @@ int mlt_bridge_add_track(
         goto add_track_cleanup;
     }
 
-    mlt_properties composite_properties =
-        MLT_TRANSITION_PROPERTIES(
-            pending_composite
-        );
-
     /*
      * Track 0 is the base movie and Track 1 is an explicitly positioned
-     * overlay rectangle. POC 10.8 converts the previous implicit centred
-     * fit into concrete base-frame pixel geometry so position and scale can
-     * be changed live without rebuilding the tractor.
+     * overlay rectangle. Preview and export intentionally share one
+     * configuration function so compositor policy cannot drift.
      */
-    mlt_properties_set_int(
-        composite_properties,
-        "always_active",
-        1
-    );
-    mlt_properties_set_int(
-        composite_properties,
-        "progressive",
-        1
-    );
-    mlt_properties_set_int(
-        composite_properties,
-        "invert",
-        0
-    );
-    /*
-     * The explicit rectangle already encodes the 100% presentation size.
-     * Keep the compositor aspect-preserving and align the source to the
-     * rectangle's top-left so x/y remain literal base-frame coordinates.
-     * fill=1 is now safe for stills because their rectangle is their native
-     * size (or the fit-down size when oversized), not the whole canvas.
-     */
-    mlt_properties_set_int(
-        composite_properties,
-        "aligned",
-        1
-    );
-    mlt_properties_set_int(
-        composite_properties,
-        "fill",
-        1
-    );
-    mlt_properties_set_int(
-        composite_properties,
-        "distort",
-        0
-    );
-    mlt_properties_set(
-        composite_properties,
-        "halign",
-        "left"
-    );
-    mlt_properties_set(
-        composite_properties,
-        "valign",
-        "top"
-    );
-
-    char initial_geometry[160];
-    snprintf(
-        initial_geometry,
-        sizeof(initial_geometry),
-        "%.6f/%.6f:%.6fx%.6f:1.000000",
-        pending_x,
-        pending_y,
-        pending_base_width,
-        pending_base_height
-    );
-
-    mlt_properties_set(
-        composite_properties,
-        "geometry",
-        initial_geometry
-    );
+    if (!configure_composite_transition(
+            pending_composite,
+            pending_x,
+            pending_y,
+            pending_base_width,
+            pending_base_height,
+            1.0)) {
+        snprintf(
+            failure,
+            sizeof(failure),
+            "%s",
+            "Could not configure the video composite transition."
+        );
+        goto add_track_cleanup;
+    }
 
     if (mlt_field_plant_transition(
             field,
