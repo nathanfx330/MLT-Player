@@ -48,6 +48,9 @@ class PlayerEngine extends ChangeNotifier {
     _poll = Timer.periodic(const Duration(milliseconds: 100), (_) => _tick());
   }
 
+  static const String _invalidInOutExportError =
+      'In/Out export requires both an In point and an Out point.';
+
   final MltBridge bridge;
   final bool initialized;
 
@@ -153,19 +156,32 @@ class PlayerEngine extends ChangeNotifier {
   bool get hasExportStatus =>
       _exporting || _exportSucceeded || _exportError != null;
 
-  ExportRangeMode get exportRangeMode =>
-      _exportRangeMode == ExportRangeMode.inOut && hasSelection
-          ? ExportRangeMode.inOut
-          : ExportRangeMode.wholeMovie;
+  // Export mode is an explicit user choice. Never silently substitute Whole
+  // Movie when In/Out is selected but its markers are missing or invalid.
+  ExportRangeMode get exportRangeMode => _exportRangeMode;
 
-  int get exportInFrame =>
-      exportRangeMode == ExportRangeMode.inOut ? _inFrame! : _trimInFrame;
-  int get exportOutFrame =>
-      exportRangeMode == ExportRangeMode.inOut ? _outFrame! : _trimOutFrame;
+  int get exportInFrame {
+    if (_exportRangeMode == ExportRangeMode.inOut) {
+      return hasSelection ? _inFrame! : -1;
+    }
+    return _trimInFrame;
+  }
+
+  int get exportOutFrame {
+    if (_exportRangeMode == ExportRangeMode.inOut) {
+      return hasSelection ? _outFrame! : -1;
+    }
+    return _trimOutFrame;
+  }
+
   int get exportFrameCount {
+    if (_exportRangeMode == ExportRangeMode.inOut && !hasSelection) {
+      return 0;
+    }
+
     final start = exportInFrame;
     final end = exportOutFrame;
-    return end >= start ? end - start + 1 : 0;
+    return start >= 0 && end >= start ? end - start + 1 : 0;
   }
 
   int? get inFrame => _inFrame;
@@ -712,23 +728,58 @@ class PlayerEngine extends ChangeNotifier {
   }
 
   void setExportRangeMode(ExportRangeMode mode) {
-    final requested =
-        mode == ExportRangeMode.inOut && !hasSelection
-            ? ExportRangeMode.wholeMovie
-            : mode;
-
-    if (_exportRangeMode == requested) {
+    if (_exportRangeMode == mode) {
       return;
     }
 
-    _exportRangeMode = requested;
+    _exportRangeMode = mode;
+    _normalizeExportRangeMode();
     notifyListeners();
   }
 
+  // Preserve the requested export mode. If In/Out becomes invalid, report
+  // that state; never convert the request into Whole Movie behind the user's
+  // back. A valid selection clears only this specific range error.
   void _normalizeExportRangeMode() {
     if (_exportRangeMode == ExportRangeMode.inOut && !hasSelection) {
-      _exportRangeMode = ExportRangeMode.wholeMovie;
+      _exportError = _invalidInOutExportError;
+      return;
     }
+
+    if (_exportError == _invalidInOutExportError) {
+      _exportError = null;
+    }
+  }
+
+  bool _validateRequestedExportRange(String outputPath) {
+    if (_exportRangeMode == ExportRangeMode.inOut && !hasSelection) {
+      _exporting = false;
+      _exportSucceeded = false;
+      _exportProgress = 0.0;
+      _exportPath = outputPath;
+      _exportError = _invalidInOutExportError;
+      notifyListeners();
+      return false;
+    }
+
+    final media = _media;
+    final start = exportInFrame;
+    final end = exportOutFrame;
+
+    if (media == null ||
+        start < 0 ||
+        end < start ||
+        end >= media.frames) {
+      _exporting = false;
+      _exportSucceeded = false;
+      _exportProgress = 0.0;
+      _exportPath = outputPath;
+      _exportError = 'The requested export range is invalid.';
+      notifyListeners();
+      return false;
+    }
+
+    return true;
   }
 
   int? captureCurrentSourceFrame() {
@@ -793,6 +844,24 @@ class PlayerEngine extends ChangeNotifier {
     required int kind,
     required String fallbackError,
   }) {
+    final media = _media;
+
+    // Last line of defense before crossing the FFI boundary. The Dart layer
+    // must never hand native code a negative, reversed, or out-of-source
+    // range, regardless of which export command reached this method.
+    if (media == null ||
+        inFrame < 0 ||
+        outFrame < inFrame ||
+        outFrame >= media.frames) {
+      _exporting = false;
+      _exportSucceeded = false;
+      _exportProgress = 0.0;
+      _exportPath = outputPath;
+      _exportError = 'The requested export range is invalid.';
+      notifyListeners();
+      return false;
+    }
+
     _exportSucceeded = false;
     _exportError = null;
     _exportProgress = 0.0;
@@ -849,8 +918,11 @@ class PlayerEngine extends ChangeNotifier {
         media.isStill ||
         !media.hasVideo ||
         media.frames <= 0 ||
-        exportFrameCount <= 0 ||
         _exporting) {
+      return false;
+    }
+
+    if (!_validateRequestedExportRange(outputDirectory)) {
       return false;
     }
 
@@ -871,8 +943,11 @@ class PlayerEngine extends ChangeNotifier {
         media.isStill ||
         !exportHasAudio ||
         media.frames <= 0 ||
-        exportFrameCount <= 0 ||
         _exporting) {
+      return false;
+    }
+
+    if (!_validateRequestedExportRange(outputPath)) {
       return false;
     }
 
@@ -893,8 +968,11 @@ class PlayerEngine extends ChangeNotifier {
         media.isStill ||
         !media.hasVideo ||
         media.frames <= 0 ||
-        exportFrameCount <= 0 ||
         _exporting) {
+      return false;
+    }
+
+    if (!_validateRequestedExportRange(outputPath)) {
       return false;
     }
 
@@ -2082,6 +2160,12 @@ class PlayerEngine extends ChangeNotifier {
     if (_outFrame != null && _outFrame! < frame) {
       _outFrame = null;
     }
+
+    // Completing a valid marked selection makes In/Out the active export
+    // range. Whole Movie remains available as an explicit user override.
+    if (hasSelection) {
+      _exportRangeMode = ExportRangeMode.inOut;
+    }
     _normalizeExportRangeMode();
 
     final after = _captureEditState();
@@ -2117,6 +2201,12 @@ class PlayerEngine extends ChangeNotifier {
     // clears that stale In point and leaves the newly placed marker intact.
     if (_inFrame != null && _inFrame! > frame) {
       _inFrame = null;
+    }
+
+    // Completing a valid marked selection makes In/Out the active export
+    // range. Whole Movie remains available as an explicit user override.
+    if (hasSelection) {
+      _exportRangeMode = ExportRangeMode.inOut;
     }
     _normalizeExportRangeMode();
 
