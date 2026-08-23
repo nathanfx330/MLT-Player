@@ -59,6 +59,7 @@ class PlayerEngine extends ChangeNotifier {
   String? _secondaryTrackPath;
   int? _secondaryTrackStartFrame;
   double _secondaryTrackOpacity = 1.0;
+  bool _secondaryTrackVisible = true;
   bool _secondaryTrackIsStill = false;
   bool _secondaryTrackHasAlpha = false;
   int _secondaryTrackAlphaMode = 0;
@@ -109,6 +110,7 @@ class PlayerEngine extends ChangeNotifier {
   String? get secondaryTrackPath => _secondaryTrackPath;
   int? get secondaryTrackStartFrame => _secondaryTrackStartFrame;
   double get secondaryTrackOpacity => _secondaryTrackOpacity;
+  bool get secondaryTrackVisible => _secondaryTrackVisible;
   bool get secondaryTrackIsStill => _secondaryTrackIsStill;
   bool get secondaryTrackHasAlpha => _secondaryTrackHasAlpha;
   int get secondaryTrackAlphaMode => _secondaryTrackAlphaMode;
@@ -973,6 +975,7 @@ class PlayerEngine extends ChangeNotifier {
     _secondaryTrackPath = null;
     _secondaryTrackStartFrame = null;
     _secondaryTrackOpacity = 1.0;
+    _secondaryTrackVisible = true;
     _secondaryTrackIsStill = false;
     _secondaryTrackHasAlpha = false;
     _secondaryTrackAlphaMode = 0;
@@ -1192,6 +1195,7 @@ class PlayerEngine extends ChangeNotifier {
         nativeStartFrame >= 0 ? nativeStartFrame : clampedStart;
     _secondaryTrackOpacity =
         bridge.secondaryOpacity.clamp(0.0, 1.0).toDouble();
+    _secondaryTrackVisible = true;
     _secondaryTrackIsStill = bridge.secondaryIsStill;
     _secondaryTrackHasAlpha = bridge.secondaryHasAlpha;
     _secondaryTrackAlphaMode =
@@ -1267,6 +1271,7 @@ class PlayerEngine extends ChangeNotifier {
     final currentFrame = bridge.positionFrame;
     final startFrame = _secondaryTrackStartFrame ?? 0;
     final opacity = _secondaryTrackOpacity;
+    final visible = _secondaryTrackVisible;
     final alphaMode = _secondaryTrackAlphaMode;
     final primaryGain = _primaryTrackAudioGain;
     final secondaryGain = _secondaryTrackAudioGain;
@@ -1280,6 +1285,7 @@ class PlayerEngine extends ChangeNotifier {
       primaryGain: primaryGain,
       secondaryGain: secondaryGain,
       secondaryOpacity: opacity,
+      secondaryVisible: visible,
       // Alpha interpretation belongs to the asset, not the layer slot. A new
       // source therefore starts in Auto even though placement/opacity/gain
       // remain layer properties.
@@ -1303,6 +1309,7 @@ class PlayerEngine extends ChangeNotifier {
       primaryGain: primaryGain,
       secondaryGain: secondaryGain,
       secondaryOpacity: opacity,
+      secondaryVisible: visible,
       secondaryAlphaMode: alphaMode,
       editState: editState,
       undoState: undoState,
@@ -1351,6 +1358,7 @@ class PlayerEngine extends ChangeNotifier {
         ? oldPlayheadFrame / oldMedia.fps
         : 0.0;
     final opacity = _secondaryTrackOpacity;
+    final visible = _secondaryTrackVisible;
     final alphaMode = _secondaryTrackAlphaMode;
     final primaryGain = _primaryTrackAudioGain;
     final secondaryGain = _secondaryTrackAudioGain;
@@ -1374,6 +1382,7 @@ class PlayerEngine extends ChangeNotifier {
         primaryGain: primaryGain,
         secondaryGain: secondaryGain,
         secondaryOpacity: opacity,
+        secondaryVisible: visible,
         secondaryAlphaMode: alphaMode,
         editState: oldEditState,
         undoState: oldUndoState,
@@ -1403,6 +1412,7 @@ class PlayerEngine extends ChangeNotifier {
         primaryGain: primaryGain,
         secondaryGain: secondaryGain,
         secondaryOpacity: opacity,
+        secondaryVisible: visible,
         secondaryAlphaMode: alphaMode,
       );
 
@@ -1416,6 +1426,7 @@ class PlayerEngine extends ChangeNotifier {
           primaryGain: primaryGain,
           secondaryGain: secondaryGain,
           secondaryOpacity: opacity,
+          secondaryVisible: visible,
           secondaryAlphaMode: alphaMode,
           editState: oldEditState,
           undoState: oldUndoState,
@@ -1438,6 +1449,141 @@ class PlayerEngine extends ChangeNotifier {
     return true;
   }
 
+  /// POC 10.7: exchange the media in the BASE and OVERLAY slots.
+  ///
+  /// This is deliberately a layer-order operation, not timeline editing.
+  /// Layer 1 remains the timed base slot at frame zero; Layer 2 keeps its
+  /// existing insertion time, opacity, visibility, and audio-gain controls.
+  /// A still image cannot be swapped into Layer 1.
+  Future<bool> swapLayerOrder() async {
+    final oldMedia = _media;
+    final oldSecondaryPath = _secondaryTrackPath;
+
+    if (!initialized ||
+        oldMedia == null ||
+        oldMedia.isStill ||
+        !oldMedia.hasVideo ||
+        oldSecondaryPath == null ||
+        _secondaryTrackIsStill ||
+        _opening ||
+        _addingTrack ||
+        _exporting) {
+      if (_secondaryTrackIsStill) {
+        _error = 'A still image cannot become the base layer.';
+        notifyListeners();
+      }
+      return false;
+    }
+
+    if (!await _parkPlaybackForLayerChange()) {
+      return false;
+    }
+
+    final oldBasePath = oldMedia.path;
+    final oldStartFrame = _secondaryTrackStartFrame ?? 0;
+    final oldStartSeconds = oldMedia.fps > 0
+        ? oldStartFrame / oldMedia.fps
+        : 0.0;
+    final oldPlayheadFrame = bridge.positionFrame;
+    final oldPlayheadSeconds = oldMedia.fps > 0
+        ? oldPlayheadFrame / oldMedia.fps
+        : 0.0;
+
+    final oldEditState = _captureEditState();
+    final oldUndoState = List<_ClipEditState>.from(_undoStack);
+    final oldRedoState = List<_ClipEditState>.from(_redoStack);
+
+    final opacity = _secondaryTrackOpacity;
+    final visible = _secondaryTrackVisible;
+    final oldAlphaMode = _secondaryTrackAlphaMode;
+    final primaryGain = _primaryTrackAudioGain;
+    final secondaryGain = _secondaryTrackAudioGain;
+
+    // Probe the would-be base through the normal open path. This gives us its
+    // authoritative frame rate and defensively rejects anything that MLT does
+    // not classify as a timed video source.
+    final opened = await open(oldSecondaryPath);
+    final newBase = _media;
+
+    if (!opened ||
+        newBase == null ||
+        newBase.isStill ||
+        !newBase.hasVideo) {
+      final swapError = !opened
+          ? _error
+          : 'Only a timed video can become the base layer.';
+
+      await _rebuildLayerPair(
+        primaryPath: oldBasePath,
+        secondaryPath: oldSecondaryPath,
+        secondaryStartFrame: oldStartFrame,
+        playheadFrame: oldPlayheadFrame,
+        primaryGain: primaryGain,
+        secondaryGain: secondaryGain,
+        secondaryOpacity: opacity,
+        secondaryVisible: visible,
+        secondaryAlphaMode: oldAlphaMode,
+        editState: oldEditState,
+        undoState: oldUndoState,
+        redoState: oldRedoState,
+      );
+
+      _error = swapError ?? 'The layer order could not be changed.';
+      notifyListeners();
+      return false;
+    }
+
+    final newFps = newBase.fps;
+    final newStartFrame = newFps > 0
+        ? (oldStartSeconds * newFps).round()
+        : 0;
+    final newPlayheadFrame = newFps > 0
+        ? (oldPlayheadSeconds * newFps).round()
+        : 0;
+
+    final swapped = await _rebuildLayerPair(
+      primaryPath: oldSecondaryPath,
+      secondaryPath: oldBasePath,
+      secondaryStartFrame: newStartFrame,
+      playheadFrame: newPlayheadFrame,
+      primaryGain: primaryGain,
+      secondaryGain: secondaryGain,
+      secondaryOpacity: opacity,
+      secondaryVisible: visible,
+      // Alpha interpretation belongs to the asset. The old base is a new
+      // overlay source, so begin conservatively in Auto.
+      secondaryAlphaMode: 0,
+    );
+
+    if (swapped) {
+      _error = null;
+      notifyListeners();
+      return true;
+    }
+
+    final swapError = _error;
+    final rolledBack = await _rebuildLayerPair(
+      primaryPath: oldBasePath,
+      secondaryPath: oldSecondaryPath,
+      secondaryStartFrame: oldStartFrame,
+      playheadFrame: oldPlayheadFrame,
+      primaryGain: primaryGain,
+      secondaryGain: secondaryGain,
+      secondaryOpacity: opacity,
+      secondaryVisible: visible,
+      secondaryAlphaMode: oldAlphaMode,
+      editState: oldEditState,
+      undoState: oldUndoState,
+      redoState: oldRedoState,
+    );
+
+    _error = rolledBack
+        ? (swapError ?? 'The layer order could not be changed.')
+        : 'Layer swap failed and the previous composition could not be restored.';
+    notifyListeners();
+    return false;
+  }
+
   Future<bool> _rebuildLayerPair({
     required String primaryPath,
     required String? secondaryPath,
@@ -1446,6 +1592,7 @@ class PlayerEngine extends ChangeNotifier {
     required double primaryGain,
     required double secondaryGain,
     required double secondaryOpacity,
+    required bool secondaryVisible,
     required int secondaryAlphaMode,
     _ClipEditState? editState,
     List<_ClipEditState>? undoState,
@@ -1480,6 +1627,9 @@ class PlayerEngine extends ChangeNotifier {
 
     if (secondaryPath != null && hasSecondaryTrack) {
       setSecondaryTrackOpacity(secondaryOpacity);
+      if (!secondaryVisible) {
+        setSecondaryTrackVisible(false);
+      }
       setSecondaryTrackAlphaMode(secondaryAlphaMode);
       if (trackHasAudio(1)) {
         setTrackAudioGain(1, secondaryGain);
@@ -1524,9 +1674,11 @@ class PlayerEngine extends ChangeNotifier {
     }
   }
 
-  /// POC 10.4: update track 2's video opacity in place without rebuilding
-  /// the tractor or changing audio gain. The native bridge refreshes a paused
-  /// preview frame immediately, so this is safe to drive directly from Slider.
+  /// POC 10.4: update Layer 2 video opacity without rebuilding the tractor.
+  ///
+  /// POC 10.7 keeps visibility independent from opacity. While the layer is
+  /// hidden, slider changes are remembered locally and applied the next time
+  /// the eye control makes the layer visible.
   void setSecondaryTrackOpacity(double value) {
     if (!hasSecondaryTrack) {
       return;
@@ -1534,9 +1686,16 @@ class PlayerEngine extends ChangeNotifier {
 
     final requested = value.clamp(0.0, 1.0).toDouble();
 
+    if (!_secondaryTrackVisible) {
+      _secondaryTrackOpacity = requested;
+      _error = null;
+      notifyListeners();
+      return;
+    }
+
     if (!bridge.setSecondaryOpacity(requested)) {
       _error = bridge.lastError.isEmpty
-          ? 'MLT could not change track 2 opacity.'
+          ? 'MLT could not change Layer 2 opacity.'
           : bridge.lastError;
       _secondaryTrackOpacity =
           bridge.secondaryOpacity.clamp(0.0, 1.0).toDouble();
@@ -1548,6 +1707,33 @@ class PlayerEngine extends ChangeNotifier {
         bridge.secondaryOpacity.clamp(0.0, 1.0).toDouble();
     _error = null;
     notifyListeners();
+  }
+
+  /// POC 10.7: show or hide Layer 2 without destroying its opacity setting.
+  /// Native opacity zero is used only as the render switch; the inspector's
+  /// requested opacity remains stored in _secondaryTrackOpacity.
+  void setSecondaryTrackVisible(bool visible) {
+    if (!hasSecondaryTrack || visible == _secondaryTrackVisible) {
+      return;
+    }
+
+    final effectiveOpacity = visible ? _secondaryTrackOpacity : 0.0;
+
+    if (!bridge.setSecondaryOpacity(effectiveOpacity)) {
+      _error = bridge.lastError.isEmpty
+          ? 'MLT could not change Layer 2 visibility.'
+          : bridge.lastError;
+      notifyListeners();
+      return;
+    }
+
+    _secondaryTrackVisible = visible;
+    _error = null;
+    notifyListeners();
+  }
+
+  void toggleSecondaryTrackVisible() {
+    setSecondaryTrackVisible(!_secondaryTrackVisible);
   }
 
   /// POC 10.6: interpret layer 2 alpha without rebuilding the tractor.

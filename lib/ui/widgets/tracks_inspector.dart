@@ -18,12 +18,16 @@ class TracksInspector extends StatelessWidget {
     required this.primaryAudioGain,
     required this.secondaryAudioGain,
     required this.secondaryOpacity,
+    required this.secondaryVisible,
+    required this.canSwapLayers,
     required this.onPrimaryAudioChanged,
     required this.onSecondaryAudioChanged,
     required this.onSecondaryOpacityChanged,
     required this.onSecondaryAlphaModeChanged,
     required this.onReplacePrimarySource,
     required this.onReplaceSecondarySource,
+    required this.onToggleSecondaryVisible,
+    required this.onSwapLayers,
     required this.onClose,
   });
 
@@ -40,6 +44,8 @@ class TracksInspector extends StatelessWidget {
   final double primaryAudioGain;
   final double secondaryAudioGain;
   final double secondaryOpacity;
+  final bool secondaryVisible;
+  final bool canSwapLayers;
 
   final ValueChanged<double> onPrimaryAudioChanged;
   final ValueChanged<double> onSecondaryAudioChanged;
@@ -47,6 +53,8 @@ class TracksInspector extends StatelessWidget {
   final ValueChanged<int> onSecondaryAlphaModeChanged;
   final VoidCallback onReplacePrimarySource;
   final VoidCallback onReplaceSecondarySource;
+  final VoidCallback onToggleSecondaryVisible;
+  final VoidCallback onSwapLayers;
   final VoidCallback onClose;
 
   @override
@@ -86,6 +94,7 @@ class TracksInspector extends StatelessWidget {
               badge: secondaryIsStill ? 'STILL' : 'VIDEO',
               start: secondaryStart,
               videoOpacity: secondaryOpacity,
+              videoVisible: secondaryVisible,
               sizeLabel: secondaryIsStill
                   ? 'NATIVE SIZE • FIT IF LARGER'
                   : 'FIT TO BASE FRAME',
@@ -97,6 +106,7 @@ class TracksInspector extends StatelessWidget {
               onAudioChanged: onSecondaryAudioChanged,
               onAlphaModeChanged: onSecondaryAlphaModeChanged,
               onReplaceSource: onReplaceSecondarySource,
+              onToggleVideoVisible: onToggleSecondaryVisible,
             ),
           ],
         ),
@@ -135,7 +145,23 @@ class TracksInspector extends StatelessWidget {
                 fontFeatures: [ui.FontFeature.tabularFigures()],
               ),
             ),
-            const SizedBox(width: 6),
+            const SizedBox(width: 4),
+            Tooltip(
+              message: canSwapLayers
+                  ? 'Swap Layer 1 and Layer 2'
+                  : 'A still image cannot become the base layer',
+              child: IconButton(
+                visualDensity: VisualDensity.compact,
+                iconSize: 17,
+                onPressed: canSwapLayers ? onSwapLayers : null,
+                icon: Icon(
+                  Icons.swap_vert,
+                  color: canSwapLayers
+                      ? const Color(0xFFE8A33D)
+                      : Colors.white24,
+                ),
+              ),
+            ),
             IconButton(
               tooltip: 'Close Layers Inspector',
               visualDensity: VisualDensity.compact,
@@ -161,11 +187,13 @@ class _LayerSection extends StatelessWidget {
     required this.audioGain,
     required this.onAudioChanged,
     this.videoOpacity,
+    this.videoVisible = true,
     this.sizeLabel,
     this.alphaMode,
     this.hasAlpha,
     this.onVideoOpacityChanged,
     this.onAlphaModeChanged,
+    this.onToggleVideoVisible,
     required this.onReplaceSource,
   });
 
@@ -175,6 +203,7 @@ class _LayerSection extends StatelessWidget {
   final String start;
   final String? videoLabel;
   final double? videoOpacity;
+  final bool videoVisible;
   final String? sizeLabel;
   final bool audioEnabled;
   final double audioGain;
@@ -183,6 +212,7 @@ class _LayerSection extends StatelessWidget {
   final ValueChanged<double> onAudioChanged;
   final ValueChanged<double>? onVideoOpacityChanged;
   final ValueChanged<int>? onAlphaModeChanged;
+  final VoidCallback? onToggleVideoVisible;
   final VoidCallback onReplaceSource;
 
   @override
@@ -222,6 +252,23 @@ class _LayerSection extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: 4),
+                if (onToggleVideoVisible != null)
+                  IconButton(
+                    tooltip: videoVisible
+                        ? 'Hide Layer $number'
+                        : 'Show Layer $number',
+                    visualDensity: VisualDensity.compact,
+                    iconSize: 16,
+                    onPressed: onToggleVideoVisible,
+                    icon: Icon(
+                      videoVisible
+                          ? Icons.visibility_outlined
+                          : Icons.visibility_off_outlined,
+                      color: videoVisible
+                          ? const Color(0xFFE8A33D)
+                          : Colors.white30,
+                    ),
+                  ),
                 IconButton(
                   tooltip: 'Replace Layer $number source',
                   visualDensity: VisualDensity.compact,
@@ -298,8 +345,11 @@ class _LayerSection extends StatelessWidget {
                 )
               : _LevelControl(
                   value: videoOpacity!,
-                  icon: Icons.opacity,
+                  icon: videoVisible
+                      ? Icons.opacity
+                      : Icons.visibility_off_outlined,
                   enabled: true,
+                  subdued: !videoVisible,
                   onChanged: onVideoOpacityChanged!,
                 ),
         ),
@@ -479,12 +529,14 @@ class _LevelControl extends StatelessWidget {
     required this.value,
     required this.icon,
     required this.enabled,
+    this.subdued = false,
     required this.onChanged,
   });
 
   final double value;
   final IconData icon;
   final bool enabled;
+  final bool subdued;
   final ValueChanged<double> onChanged;
 
   @override
@@ -508,7 +560,11 @@ class _LevelControl extends StatelessWidget {
 
     return Row(
       children: [
-        Icon(icon, size: 14, color: Colors.white54),
+        Icon(
+          icon,
+          size: 14,
+          color: subdued ? Colors.white30 : Colors.white54,
+        ),
         const SizedBox(width: 4),
         Expanded(
           child: SliderTheme(
@@ -516,7 +572,8 @@ class _LevelControl extends StatelessWidget {
               trackHeight: 3,
               thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5),
               overlayShape: const RoundSliderOverlayShape(overlayRadius: 11),
-              inactiveTrackColor: Colors.white24,
+              inactiveTrackColor:
+                  subdued ? Colors.white12 : Colors.white24,
             ),
             child: Slider(
               min: 0,
@@ -531,10 +588,10 @@ class _LevelControl extends StatelessWidget {
           child: Text(
             '$percent%',
             textAlign: TextAlign.right,
-            style: const TextStyle(
+            style: TextStyle(
               fontSize: 10,
-              color: Colors.white70,
-              fontFeatures: [ui.FontFeature.tabularFigures()],
+              color: subdued ? Colors.white38 : Colors.white70,
+              fontFeatures: const [ui.FontFeature.tabularFigures()],
             ),
           ),
         ),

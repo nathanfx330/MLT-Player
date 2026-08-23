@@ -422,6 +422,26 @@ class _PlayerPageState extends State<PlayerPage>
     }
   }
 
+  Future<void> _swapLayerOrder() async {
+    if (!_engine.hasSecondaryTrack ||
+        _engine.secondaryTrackIsStill ||
+        _engine.opening ||
+        _engine.addingTrack ||
+        _engine.exporting) {
+      return;
+    }
+
+    _showOverlay();
+    await _engine.swapLayerOrder();
+
+    if (mounted) {
+      setState(() {
+        _tracksOpen = _engine.hasSecondaryTrack;
+      });
+      _showOverlay();
+    }
+  }
+
   Future<void> _openPath(String path) async {
     // A new file starts closed, whatever the previous one was doing.
     if (_infoOpen || _tracksOpen) {
@@ -1211,6 +1231,8 @@ class _PlayerPageState extends State<PlayerPage>
             primaryAudioGain: _engine.primaryTrackAudioGain,
             secondaryAudioGain: _engine.secondaryTrackAudioGain,
             secondaryOpacity: _engine.secondaryTrackOpacity,
+            secondaryVisible: _engine.secondaryTrackVisible,
+            canSwapLayers: !_engine.secondaryTrackIsStill,
             onPrimaryAudioChanged: (value) =>
                 _engine.setTrackAudioGain(0, value),
             onSecondaryAudioChanged: (value) =>
@@ -1221,6 +1243,9 @@ class _PlayerPageState extends State<PlayerPage>
                 _engine.setSecondaryTrackAlphaMode,
             onReplacePrimarySource: _replacePrimaryLayerSource,
             onReplaceSecondarySource: _replaceSecondaryLayerSource,
+            onToggleSecondaryVisible:
+                _engine.toggleSecondaryTrackVisible,
+            onSwapLayers: _swapLayerOrder,
             onClose: _toggleTracksInspector,
           ),
         ),
