@@ -55,6 +55,9 @@ class PlayerEngine extends ChangeNotifier {
   String? _error;
 
   bool _opening = false;
+  bool _addingTrack = false;
+  String? _secondaryTrackPath;
+
   bool _playing = false;
   bool _playingSelection = false;
   bool _eof = false;
@@ -94,6 +97,12 @@ class PlayerEngine extends ChangeNotifier {
   MediaInfo? get media => _media;
   String? get error => _error;
   bool get opening => _opening;
+  bool get addingTrack => _addingTrack;
+  String? get secondaryTrackPath => _secondaryTrackPath;
+  bool get hasSecondaryTrack => _secondaryTrackPath != null;
+  int get trackCount => _media == null ? 0 : (hasSecondaryTrack ? 2 : 1);
+  bool get sourceOnlyExportsAvailable => !hasSecondaryTrack;
+
   bool get playing => _playing;
   bool get playingSelection => _playingSelection;
   bool get eof => _eof;
@@ -723,6 +732,17 @@ class PlayerEngine extends ChangeNotifier {
   bool startFrameExport(String outputPath, {required int sourceFrame}) {
     final media = _media;
 
+    if (hasSecondaryTrack) {
+      _exportSucceeded = false;
+      _exportError =
+          'Composite export is not enabled yet; remove/reopen the movie '
+          'to return to the one-track exporter.';
+      _exportPath = null;
+      _exportProgress = 0.0;
+      notifyListeners();
+      return false;
+    }
+
     if (!initialized ||
         media == null ||
         media.isStill ||
@@ -760,6 +780,17 @@ class PlayerEngine extends ChangeNotifier {
 
   bool startImageSequenceExport(String outputDirectory) {
     final media = _media;
+
+    if (hasSecondaryTrack) {
+      _exportSucceeded = false;
+      _exportError =
+          'Composite export is not enabled yet; remove/reopen the movie '
+          'to return to the one-track exporter.';
+      _exportPath = null;
+      _exportProgress = 0.0;
+      notifyListeners();
+      return false;
+    }
 
     if (!initialized ||
         media == null ||
@@ -799,6 +830,17 @@ class PlayerEngine extends ChangeNotifier {
   bool startAudioExport(String outputPath) {
     final media = _media;
 
+    if (hasSecondaryTrack) {
+      _exportSucceeded = false;
+      _exportError =
+          'Composite export is not enabled yet; remove/reopen the movie '
+          'to return to the one-track exporter.';
+      _exportPath = null;
+      _exportProgress = 0.0;
+      notifyListeners();
+      return false;
+    }
+
     if (!initialized ||
         media == null ||
         media.isStill ||
@@ -836,6 +878,17 @@ class PlayerEngine extends ChangeNotifier {
 
   bool startExport(String outputPath) {
     final media = _media;
+
+    if (hasSecondaryTrack) {
+      _exportSucceeded = false;
+      _exportError =
+          'Composite export is not enabled yet; remove/reopen the movie '
+          'to return to the one-track exporter.';
+      _exportPath = null;
+      _exportProgress = 0.0;
+      notifyListeners();
+      return false;
+    }
 
     if (!initialized ||
         media == null ||
@@ -900,6 +953,8 @@ class PlayerEngine extends ChangeNotifier {
     }
 
     _opening = true;
+    _addingTrack = false;
+    _secondaryTrackPath = null;
     _playingSelection = false;
     _inFrame = null;
     _outFrame = null;
@@ -1017,6 +1072,78 @@ class PlayerEngine extends ChangeNotifier {
     // assuming, so the slider always shows what the engine actually has.
     _volume = bridge.volume;
     _muted = _volume <= 0.0;
+
+    notifyListeners();
+    return true;
+  }
+
+  /// POC 10.2: align one additional timed video source at frame zero and
+  /// promote the native viewer graph to a two-track tractor.
+  Future<bool> addTrack(String path) async {
+    final media = _media;
+
+    if (!initialized ||
+        media == null ||
+        media.isStill ||
+        !media.hasVideo ||
+        _opening ||
+        _addingTrack ||
+        _exporting ||
+        hasSecondaryTrack) {
+      return false;
+    }
+
+    if (_playing) {
+      if (!bridge.pause()) {
+        _error = bridge.lastError.isEmpty
+            ? 'MLT could not pause before Add to Movie.'
+            : bridge.lastError;
+        notifyListeners();
+        return false;
+      }
+
+      _playing = false;
+      _playingSelection = false;
+      _speed = 0.0;
+      _positionMs = bridge.positionMs;
+    }
+
+    _addingTrack = true;
+    _error = null;
+    notifyListeners();
+
+    bool added;
+    try {
+      added = await addTrackOnHelperIsolate(path, bridge.engineAddress);
+    } catch (error) {
+      _addingTrack = false;
+      _error = error.toString();
+      notifyListeners();
+      return false;
+    }
+
+    _addingTrack = false;
+
+    if (!added) {
+      _error = bridge.lastError.isEmpty
+          ? 'MLT could not add that movie as a second track.'
+          : bridge.lastError;
+      notifyListeners();
+      return false;
+    }
+
+    _secondaryTrackPath = path;
+    _exportSucceeded = false;
+    _exportError = null;
+    _exportPath = null;
+    _exportProgress = 0.0;
+
+    _playing = false;
+    _playingSelection = false;
+    _speed = 0.0;
+    _positionMs = bridge.positionMs;
+    _eof = false;
+    _error = null;
 
     notifyListeners();
     return true;

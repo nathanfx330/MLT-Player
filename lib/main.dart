@@ -286,6 +286,43 @@ class _PlayerPageState extends State<PlayerPage>
     await _openPath(file.path);
   }
 
+  Future<void> _pickSecondTrack() async {
+    final media = _engine.media;
+    if (media == null ||
+        media.isStill ||
+        !media.hasVideo ||
+        _engine.addingTrack ||
+        _engine.exporting ||
+        _engine.hasSecondaryTrack) {
+      return;
+    }
+
+    _showOverlay();
+
+    final typeGroup = XTypeGroup(
+      label: 'Video',
+      extensions: <String>[
+        'mp4', 'mov', 'mkv', 'avi', 'webm', 'm4v', 'mxf', 'mpg', 'mpeg',
+        'wmv', 'ts', 'm2ts', 'dv', 'flv', 'ogv',
+      ],
+    );
+
+    final file = await openFile(
+      confirmButtonText: 'Add to Movie',
+      acceptedTypeGroups: <XTypeGroup>[typeGroup],
+    );
+
+    if (file == null) {
+      return;
+    }
+
+    await _engine.addTrack(file.path);
+
+    if (mounted) {
+      _showOverlay();
+    }
+  }
+
   Future<void> _openPath(String path) async {
     // A new file starts closed, whatever the previous one was doing.
     if (_infoOpen) {
@@ -345,7 +382,10 @@ class _PlayerPageState extends State<PlayerPage>
 
   Future<void> _exportActiveClip() async {
     final media = _engine.media;
-    if (media == null || media.isStill || _engine.exporting) {
+    if (media == null ||
+        media.isStill ||
+        !_engine.sourceOnlyExportsAvailable ||
+        _engine.exporting) {
       return;
     }
 
@@ -384,6 +424,7 @@ class _PlayerPageState extends State<PlayerPage>
     if (media == null ||
         media.isStill ||
         !media.hasVideo ||
+        !_engine.sourceOnlyExportsAvailable ||
         _engine.exporting) {
       return;
     }
@@ -436,6 +477,7 @@ class _PlayerPageState extends State<PlayerPage>
     if (media == null ||
         media.isStill ||
         !media.hasVideo ||
+        !_engine.sourceOnlyExportsAvailable ||
         _engine.exporting) {
       return;
     }
@@ -497,6 +539,7 @@ class _PlayerPageState extends State<PlayerPage>
     if (media == null ||
         media.isStill ||
         !media.hasAudio ||
+        !_engine.sourceOnlyExportsAvailable ||
         _engine.exporting) {
       return;
     }
@@ -556,6 +599,10 @@ class _PlayerPageState extends State<PlayerPage>
   }
 
   String _exportModeTooltip(MediaInfo media) {
+    if (!_engine.sourceOnlyExportsAvailable) {
+      return 'Composite export comes after the tractor preview proof';
+    }
+
     switch (_exportMode) {
       case _ExportMode.video:
         return _engine.hasSelection
@@ -1465,6 +1512,21 @@ class _PlayerPageState extends State<PlayerPage>
                 _engine.canTrimSelection ? _engine.trimSelection : null,
           ),
           const SizedBox(width: 2),
+          _ModeButton(
+            label: _engine.addingTrack
+                ? 'ADDING…'
+                : (_engine.hasSecondaryTrack ? '2 TRACKS' : 'ADD MOVIE'),
+            tooltip: _engine.hasSecondaryTrack
+                ? 'Two-track tractor preview is active'
+                : 'Add another video as track 2',
+            active: _engine.hasSecondaryTrack,
+            onPressed: !_engine.addingTrack &&
+                    !_engine.hasSecondaryTrack &&
+                    !_engine.exporting
+                ? _pickSecondTrack
+                : null,
+          ),
+          const SizedBox(width: 2),
           _ExportSplitButton(
             mode: _exportMode,
             exporting: _engine.exporting,
@@ -1475,7 +1537,8 @@ class _PlayerPageState extends State<PlayerPage>
             audioEnabled: media.hasAudio,
             onPressed: _engine.exporting
                 ? _engine.cancelExport
-                : ((_exportMode == _ExportMode.imageSequence && !media.hasVideo) ||
+                : (!_engine.sourceOnlyExportsAvailable ||
+                        (_exportMode == _ExportMode.imageSequence && !media.hasVideo) ||
                         (_exportMode == _ExportMode.audio && !media.hasAudio)
                     ? null
                     : _exportSelectedMode),
@@ -1485,7 +1548,9 @@ class _PlayerPageState extends State<PlayerPage>
           _OverlayButton(
             icon: Icons.photo_camera_outlined,
             tooltip: 'Export current frame as display-size PNG (Ctrl+Shift+E)',
-            onPressed: !_engine.exporting && media.hasVideo
+            onPressed: !_engine.exporting &&
+                    media.hasVideo &&
+                    _engine.sourceOnlyExportsAvailable
                 ? _exportCurrentFrame
                 : null,
           ),

@@ -186,6 +186,28 @@ static gboolean run_step(
 
         check_engine_isolation();
 
+        printf("tractor\n");
+
+        check(
+            mlt_bridge_track_count() == 1,
+            "primary movie starts as one track"
+        );
+
+        check(
+            mlt_bridge_add_track(media_path),
+            "second movie can be added to the tractor"
+        );
+
+        check(
+            mlt_bridge_track_count() == 2,
+            "tractor reports two tracks"
+        );
+
+        check(
+            mlt_bridge_position_frame() == 0,
+            "tractor rebuild preserves the parked playhead"
+        );
+
         break;
 
     case 1:
@@ -386,6 +408,11 @@ static gboolean run_step(
         check(
             !mlt_bridge_is_playing(),
             "reopen leaves the player paused"
+        );
+
+        check(
+            mlt_bridge_track_count() == 1,
+            "opening a new movie resets the tractor to one track"
         );
 
         break;

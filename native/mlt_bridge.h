@@ -165,6 +165,21 @@ mlt_bridge_open(
     const char *path
 );
 
+/*
+ * POC 10.2 Add to Movie: align one additional timed video source at frame 0,
+ * promote the viewer graph to a two-track tractor, composite track 1 above
+ * track 0, and mix track 1 audio when present. The primary movie remains the
+ * duration/profile/inspection authority. Exactly one secondary track is
+ * supported in this proof.
+ */
+MLT_BRIDGE_EXPORT int
+mlt_bridge_add_track(
+    const char *path
+);
+
+MLT_BRIDGE_EXPORT int
+mlt_bridge_track_count(void);
+
 MLT_BRIDGE_EXPORT void
 mlt_bridge_close_media(void);
 

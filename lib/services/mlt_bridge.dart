@@ -130,6 +130,10 @@ class MltBridge {
         .lookupFunction<_Int64Native, _Int64Dart>('mlt_bridge_texture_id');
 
     _open = _library.lookupFunction<_OpenNative, _OpenDart>('mlt_bridge_open');
+    _addTrack =
+        _library.lookupFunction<_OpenNative, _OpenDart>('mlt_bridge_add_track');
+    _trackCount = _library.lookupFunction<_IntNative, _IntDart>(
+        'mlt_bridge_track_count');
     _closeMedia = _library
         .lookupFunction<_VoidNative, _VoidDart>('mlt_bridge_close_media');
 
@@ -265,6 +269,8 @@ class MltBridge {
   late final _CopyStringDart _lastError;
   late final _Int64Dart _textureId;
   late final _OpenDart _open;
+  late final _OpenDart _addTrack;
+  late final _IntDart _trackCount;
   late final _VoidDart _closeMedia;
   late final _IntDart _play;
   late final _IntDart _pause;
@@ -452,6 +458,21 @@ class MltBridge {
     }
   }
 
+  bool addTrack(String path) {
+    if (!_activate()) {
+      return false;
+    }
+
+    final nativePath = path.toNativeUtf8(allocator: malloc);
+    try {
+      return _addTrack(nativePath) != 0;
+    } finally {
+      malloc.free(nativePath);
+    }
+  }
+
+  int get trackCount => _withEngine(0, _trackCount);
+
   void closeMedia() => _withEngineVoid(_closeMedia);
 
   bool startExport({
@@ -637,5 +658,17 @@ Future<bool> openMediaOnHelperIsolate(
   return Isolate.run(() {
     final bridge = MltBridge.attach(engineAddress);
     return bridge.open(path);
+  });
+}
+
+/// Adds the POC 10.2 secondary track away from Flutter's frame pump. Native
+/// engine locking serializes the graph rebuild with transport/property reads.
+Future<bool> addTrackOnHelperIsolate(
+  String path,
+  int engineAddress,
+) {
+  return Isolate.run(() {
+    final bridge = MltBridge.attach(engineAddress);
+    return bridge.addTrack(path);
   });
 }

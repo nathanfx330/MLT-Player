@@ -65,6 +65,18 @@ struct _MltBridgeEngine {
     mlt_producer e_producer;
     mlt_consumer e_consumer;
 
+    /*
+     * POC 10.2 keeps source ownership separate from the top-level producer.
+     * e_producer is what transport/preview sees: the primary producer for a
+     * one-track movie, or the tractor producer after Add to Movie.
+     */
+    mlt_producer e_primary_producer;
+    mlt_producer e_secondary_producer;
+    mlt_tractor e_tractor;
+    mlt_transition e_video_composite;
+    mlt_transition e_audio_mix;
+    int e_track_count;
+
     int e_has_video;
     int e_has_audio;
     int e_is_still;
@@ -133,6 +145,12 @@ static void activate_engine_local(MltBridgeEngine *engine)
 #define profile (current_engine()->e_profile)
 #define producer (current_engine()->e_producer)
 #define consumer (current_engine()->e_consumer)
+#define primary_producer (current_engine()->e_primary_producer)
+#define secondary_producer (current_engine()->e_secondary_producer)
+#define tractor (current_engine()->e_tractor)
+#define video_composite (current_engine()->e_video_composite)
+#define audio_mix (current_engine()->e_audio_mix)
+#define track_count (current_engine()->e_track_count)
 #define has_video (current_engine()->e_has_video)
 #define has_audio (current_engine()->e_has_audio)
 #define is_still (current_engine()->e_is_still)
@@ -1091,11 +1109,44 @@ static void close_producer_locked(void)
 {
     close_consumer_locked();
 
-    if (producer != NULL) {
-        mlt_producer_close(producer);
+    /*
+     * e_producer is a borrowed alias: either e_primary_producer or the
+     * tractor's embedded producer. Source and graph objects are closed
+     * explicitly below so no object is released twice.
+     */
+    producer = NULL;
 
-        producer = NULL;
+    if (tractor != NULL) {
+        mlt_tractor_close(tractor);
+        tractor = NULL;
     }
+
+    /*
+     * The field/tractor graph holds its own references to planted
+     * transitions. Our engine retains the factory references so later POC 10
+     * slices can mutate opacity/blend properties without searching the graph.
+     */
+    if (video_composite != NULL) {
+        mlt_transition_close(video_composite);
+        video_composite = NULL;
+    }
+
+    if (audio_mix != NULL) {
+        mlt_transition_close(audio_mix);
+        audio_mix = NULL;
+    }
+
+    if (secondary_producer != NULL) {
+        mlt_producer_close(secondary_producer);
+        secondary_producer = NULL;
+    }
+
+    if (primary_producer != NULL) {
+        mlt_producer_close(primary_producer);
+        primary_producer = NULL;
+    }
+
+    track_count = 0;
 
     has_video = 0;
     has_audio = 0;
@@ -1209,6 +1260,70 @@ static MediaKind classify_producer_locked(
     }
 
     return MEDIA_UNSUPPORTED;
+}
+
+static int producer_has_stream_locked(
+    mlt_producer candidate,
+    const char *index_property,
+    const char *stream_type)
+{
+    if (candidate == NULL ||
+        index_property == NULL ||
+        stream_type == NULL) {
+        return 0;
+    }
+
+    mlt_properties properties =
+        MLT_PRODUCER_PROPERTIES(candidate);
+
+    if (mlt_properties_get(
+            properties,
+            index_property) != NULL) {
+        return mlt_properties_get_int(
+                   properties,
+                   index_property) >= 0;
+    }
+
+    /*
+     * Some producers omit video_index/audio_index but still publish the
+     * absolute stream topology. Prefer that evidence before falling back to
+     * the historic "stream may exist" behavior.
+     */
+    if (mlt_properties_get(
+            properties,
+            "meta.media.nb_streams") != NULL) {
+        const int count =
+            mlt_properties_get_int(
+                properties,
+                "meta.media.nb_streams"
+            );
+
+        for (int index = 0; index < count; index++) {
+            char key[128];
+
+            snprintf(
+                key,
+                sizeof(key),
+                "meta.media.%d.stream.type",
+                index
+            );
+
+            const char *type =
+                mlt_properties_get(
+                    properties,
+                    key
+                );
+
+            if (type != NULL &&
+                strcmp(type, stream_type) == 0) {
+                return 1;
+            }
+        }
+
+        return 0;
+    }
+
+    return 1;
 }
 
 /*
@@ -3520,12 +3635,14 @@ int mlt_bridge_open(
     mlt_profile_from_producer(profile, probe_producer);
     mlt_producer_close(probe_producer);
 
-    producer =
+    primary_producer =
         mlt_factory_producer(
             profile,
             NULL,
             path
         );
+
+    producer = primary_producer;
 
     if (producer == NULL) {
         set_error(
@@ -3774,6 +3891,8 @@ int mlt_bridge_open(
         return 0;
     }
 
+    track_count = 1;
+
     g_atomic_int_set(
         &target_width,
         profile->width
@@ -3824,6 +3943,570 @@ int mlt_bridge_open(
     invalidate_frames();
 
     return 1;
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_add_track(
+    const char *path)
+{
+    ensure_locks();
+
+    g_mutex_lock(&engine_mutex);
+
+    if (repository == NULL ||
+        path == NULL ||
+        path[0] == '\0') {
+        set_error(
+            "MLT is not initialized "
+            "or the track path is invalid."
+        );
+        g_mutex_unlock(&engine_mutex);
+        return 0;
+    }
+
+    if (primary_producer == NULL ||
+        producer == NULL ||
+        track_count != 1 ||
+        is_still ||
+        !has_video) {
+        set_error(
+            "Add to Movie requires one timed "
+            "video movie to already be open."
+        );
+        g_mutex_unlock(&engine_mutex);
+        return 0;
+    }
+
+    const int primary_has_audio = has_audio;
+
+    const mlt_position primary_length =
+        mlt_producer_get_length(
+            primary_producer
+        );
+
+    if (primary_length <= 0) {
+        set_error("The primary movie has no usable duration.");
+        g_mutex_unlock(&engine_mutex);
+        return 0;
+    }
+
+    /*
+     * Park at the viewer-visible frame before the graph is rebuilt. The new
+     * tractor starts paused at the same frame; Add to Movie is an edit, not a
+     * transport command.
+     */
+    mlt_position saved_position =
+        mlt_producer_position(
+            producer
+        );
+
+    if (consumer != NULL &&
+        !mlt_consumer_is_stopped(consumer) &&
+        mlt_producer_get_speed(producer) != 0.0) {
+        const double speed =
+            mlt_producer_get_speed(
+                producer
+            );
+
+        saved_position =
+            mlt_consumer_position(
+                consumer
+            );
+
+        if (speed > 0.0) {
+            saved_position += 1;
+        } else if (speed < 0.0) {
+            saved_position -= 1;
+        }
+    }
+
+    if (saved_position < 0) {
+        saved_position = 0;
+    }
+
+    if (saved_position >= primary_length) {
+        saved_position = primary_length - 1;
+    }
+
+    mlt_producer_set_speed(
+        producer,
+        0.0
+    );
+
+    close_consumer_locked();
+
+    mlt_producer pending_secondary = NULL;
+    mlt_tractor pending_tractor = NULL;
+    mlt_transition pending_composite = NULL;
+    mlt_transition pending_mix = NULL;
+
+    int secondary_has_audio = 0;
+    int succeeded = 0;
+    char failure[512] = "";
+
+    pending_secondary =
+        mlt_factory_producer(
+            profile,
+            NULL,
+            path
+        );
+
+    if (pending_secondary == NULL) {
+        snprintf(
+            failure,
+            sizeof(failure),
+            "%s",
+            "MLT could not open the second movie."
+        );
+        goto add_track_cleanup;
+    }
+
+    mlt_producer_probe(
+        pending_secondary
+    );
+
+    const MediaKind secondary_kind =
+        classify_producer_locked(
+            pending_secondary
+        );
+
+    if (secondary_kind != MEDIA_TIMED ||
+        !producer_has_stream_locked(
+            pending_secondary,
+            "video_index",
+            "video")) {
+        snprintf(
+            failure,
+            sizeof(failure),
+            "%s",
+            "The second track must be timed video media."
+        );
+        goto add_track_cleanup;
+    }
+
+    const mlt_position secondary_length =
+        mlt_producer_get_length(
+            pending_secondary
+        );
+
+    if (secondary_length <= 0) {
+        snprintf(
+            failure,
+            sizeof(failure),
+            "%s",
+            "The second movie reports no usable duration."
+        );
+        goto add_track_cleanup;
+    }
+
+    /*
+     * POC 10.2 aligns the second track at frame zero and keeps the primary
+     * movie's duration authoritative. A longer second source is clipped to
+     * the primary duration; a shorter source naturally becomes blank after
+     * its own out point under the multitrack's eof=continue behavior.
+     */
+    const mlt_position secondary_out =
+        secondary_length < primary_length
+            ? secondary_length - 1
+            : primary_length - 1;
+
+    mlt_producer_set_in_and_out(
+        pending_secondary,
+        0,
+        secondary_out
+    );
+    mlt_producer_set_speed(
+        pending_secondary,
+        0.0
+    );
+    mlt_producer_seek(
+        pending_secondary,
+        0
+    );
+
+    secondary_has_audio =
+        producer_has_stream_locked(
+            pending_secondary,
+            "audio_index",
+            "audio"
+        );
+
+    pending_tractor =
+        mlt_tractor_new();
+
+    if (pending_tractor == NULL) {
+        snprintf(
+            failure,
+            sizeof(failure),
+            "%s",
+            "Could not create the MLT tractor."
+        );
+        goto add_track_cleanup;
+    }
+
+    /*
+     * mlt_tractor_new() is profile-less by itself. MLT++'s
+     * Tractor(Profile&) immediately applies the caller's profile; do the same
+     * here so tractor FPS/geometry agree with the already-open primary movie.
+     */
+    mlt_service_set_profile(
+        MLT_TRACTOR_SERVICE(
+            pending_tractor
+        ),
+        profile
+    );
+
+    if (mlt_tractor_set_track(
+            pending_tractor,
+            primary_producer,
+            0) != 0 ||
+        mlt_tractor_set_track(
+            pending_tractor,
+            pending_secondary,
+            1) != 0) {
+        snprintf(
+            failure,
+            sizeof(failure),
+            "%s",
+            "Could not connect both movies to the tractor."
+        );
+        goto add_track_cleanup;
+    }
+
+    mlt_field field =
+        mlt_tractor_field(
+            pending_tractor
+        );
+
+    if (field == NULL) {
+        snprintf(
+            failure,
+            sizeof(failure),
+            "%s",
+            "The tractor did not provide an MLT field."
+        );
+        goto add_track_cleanup;
+    }
+
+    pending_composite =
+        mlt_factory_transition(
+            profile,
+            "composite",
+            NULL
+        );
+
+    if (pending_composite == NULL) {
+        snprintf(
+            failure,
+            sizeof(failure),
+            "%s",
+            "MLT's core composite transition is unavailable."
+        );
+        goto add_track_cleanup;
+    }
+
+    mlt_properties composite_properties =
+        MLT_TRANSITION_PROPERTIES(
+            pending_composite
+        );
+
+    /*
+     * Track 0 is the original movie. Track 1 is composited above it over the
+     * full viewer rectangle while preserving the second source's aspect.
+     * A different-aspect source therefore reveals the base movie around it,
+     * which makes the two-track proof visible without adding geometry UI yet.
+     */
+    mlt_properties_set_int(
+        composite_properties,
+        "always_active",
+        1
+    );
+    mlt_properties_set_int(
+        composite_properties,
+        "progressive",
+        1
+    );
+    mlt_properties_set_int(
+        composite_properties,
+        "invert",
+        0
+    );
+    mlt_properties_set_int(
+        composite_properties,
+        "fill",
+        1
+    );
+    mlt_properties_set_int(
+        composite_properties,
+        "distort",
+        0
+    );
+    mlt_properties_set(
+        composite_properties,
+        "halign",
+        "centre"
+    );
+    mlt_properties_set(
+        composite_properties,
+        "valign",
+        "middle"
+    );
+    mlt_properties_set(
+        composite_properties,
+        "geometry",
+        "0%/0%:100%x100%"
+    );
+
+    if (mlt_field_plant_transition(
+            field,
+            pending_composite,
+            0,
+            1) != 0) {
+        snprintf(
+            failure,
+            sizeof(failure),
+            "%s",
+            "Could not plant the video composite transition."
+        );
+        goto add_track_cleanup;
+    }
+
+    if (secondary_has_audio) {
+        pending_mix =
+            mlt_factory_transition(
+                profile,
+                "mix",
+                NULL
+            );
+
+        if (pending_mix == NULL) {
+            snprintf(
+                failure,
+                sizeof(failure),
+                "%s",
+                "MLT's core audio mix transition is unavailable."
+            );
+            goto add_track_cleanup;
+        }
+
+        mlt_properties mix_properties =
+            MLT_TRANSITION_PROPERTIES(
+                pending_mix
+            );
+
+        mlt_properties_set_int(
+            mix_properties,
+            "always_active",
+            1
+        );
+        mlt_properties_set_double(
+            mix_properties,
+            "start",
+            1.0
+        );
+        mlt_properties_set_double(
+            mix_properties,
+            "end",
+            1.0
+        );
+        /*
+         * The default mix algorithm crossfades: mix=1.0 means B only.
+         * Add to Movie needs both tracks at full level, so use MLT's sum
+         * mode where mix=1.0 means A + B. Per-track gain/limiting comes
+         * later with the track controls.
+         */
+        mlt_properties_set_int(
+            mix_properties,
+            "sum",
+            1
+        );
+
+        if (mlt_field_plant_transition(
+                field,
+                pending_mix,
+                0,
+                1) != 0) {
+            snprintf(
+                failure,
+                sizeof(failure),
+                "%s",
+                "Could not plant the audio mix transition."
+            );
+            goto add_track_cleanup;
+        }
+    }
+
+    mlt_tractor_refresh(
+        pending_tractor
+    );
+
+    mlt_producer pending_top =
+        mlt_tractor_producer(
+            pending_tractor
+        );
+
+    if (pending_top == NULL) {
+        snprintf(
+            failure,
+            sizeof(failure),
+            "%s",
+            "The tractor did not expose a producer."
+        );
+        goto add_track_cleanup;
+    }
+
+    /*
+     * Keep the primary movie authoritative even though mlt_multitrack_refresh
+     * normally reports the longest connected track.
+     */
+    mlt_producer_set_in_and_out(
+        pending_top,
+        0,
+        primary_length - 1
+    );
+    mlt_producer_set_speed(
+        pending_top,
+        0.0
+    );
+    mlt_producer_seek(
+        pending_top,
+        saved_position
+    );
+
+    producer = pending_top;
+
+    if (g_atomic_int_get(
+            &current_engine()->e_preview_enabled)) {
+        if (!create_consumer_locked()) {
+            snprintf(
+                failure,
+                sizeof(failure),
+                "%s",
+                last_error[0] != '\0'
+                    ? last_error
+                    : "Could not create preview for the tractor."
+            );
+            producer = primary_producer;
+            goto add_track_cleanup;
+        }
+
+        if (mlt_consumer_start(consumer) != 0) {
+            snprintf(
+                failure,
+                sizeof(failure),
+                "%s",
+                "MLT could not start tractor preview."
+            );
+            close_consumer_locked();
+            producer = primary_producer;
+            goto add_track_cleanup;
+        }
+
+        refresh_locked();
+    }
+
+    secondary_producer = pending_secondary;
+    tractor = pending_tractor;
+    video_composite = pending_composite;
+    audio_mix = pending_mix;
+    track_count = 2;
+    has_audio = primary_has_audio || secondary_has_audio;
+
+    pending_secondary = NULL;
+    pending_tractor = NULL;
+    pending_composite = NULL;
+    pending_mix = NULL;
+
+    set_error(NULL);
+    succeeded = 1;
+
+add_track_cleanup:
+    if (!succeeded) {
+        close_consumer_locked();
+
+        producer = primary_producer;
+
+        if (pending_tractor != NULL) {
+            mlt_tractor_close(
+                pending_tractor
+            );
+            pending_tractor = NULL;
+        }
+
+        if (pending_composite != NULL) {
+            mlt_transition_close(
+                pending_composite
+            );
+            pending_composite = NULL;
+        }
+
+        if (pending_mix != NULL) {
+            mlt_transition_close(
+                pending_mix
+            );
+            pending_mix = NULL;
+        }
+
+        if (pending_secondary != NULL) {
+            mlt_producer_close(
+                pending_secondary
+            );
+            pending_secondary = NULL;
+        }
+
+        if (primary_producer != NULL) {
+            mlt_producer_set_speed(
+                primary_producer,
+                0.0
+            );
+            mlt_producer_seek(
+                primary_producer,
+                saved_position
+            );
+        }
+
+        /*
+         * Restore the pre-edit viewer graph. Failure to restore preview is
+         * secondary to the original Add to Movie failure, so preserve that
+         * message for Dart.
+         */
+        if (g_atomic_int_get(
+                &current_engine()->e_preview_enabled) &&
+            primary_producer != NULL) {
+            if (create_consumer_locked()) {
+                if (mlt_consumer_start(consumer) == 0) {
+                    refresh_locked();
+                } else {
+                    close_consumer_locked();
+                }
+            }
+        }
+
+        set_error(
+            failure[0] != '\0'
+                ? failure
+                : "Add to Movie failed."
+        );
+        has_audio = primary_has_audio;
+    }
+
+    g_mutex_unlock(&engine_mutex);
+
+    invalidate_frames();
+
+    return succeeded;
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_track_count(void)
+{
+    ensure_locks();
+
+    g_mutex_lock(&engine_mutex);
+    const int result = track_count;
+    g_mutex_unlock(&engine_mutex);
+
+    return result;
 }
 
 MLT_BRIDGE_EXPORT
