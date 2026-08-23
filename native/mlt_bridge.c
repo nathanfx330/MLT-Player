@@ -259,12 +259,43 @@ typedef enum _ExportKind {
 } ExportKind;
 
 typedef struct _ExportJob {
-    char *source_path;
-    char *output_path;
-    int64_t in_frame;
-    int64_t out_frame;
-    ExportKind kind;
+    char *export_source_path;
+    char *export_secondary_path;
+    char *export_output_path;
+    int64_t export_in_frame;
+    int64_t export_out_frame;
+    int64_t export_secondary_start_frame;
+    int export_has_secondary;
+    int export_snapshot_valid;
+    int export_primary_has_audio;
+    int export_secondary_has_audio;
+    int export_secondary_is_still;
+    int export_secondary_alpha_mode;
+    double export_primary_audio_gain;
+    double export_secondary_audio_gain;
+    double export_secondary_opacity;
+    double export_secondary_x;
+    double export_secondary_y;
+    double export_secondary_scale;
+    ExportKind export_kind;
 } ExportJob;
+
+typedef struct _ExportGraph {
+    mlt_profile export_profile;
+    mlt_producer export_primary;
+    mlt_producer export_secondary;
+    mlt_playlist export_secondary_playlist;
+    mlt_tractor export_tractor;
+    mlt_transition export_composite;
+    mlt_transition export_mix;
+    mlt_producer export_top;
+} ExportGraph;
+
+/* Defined with the layer-alpha helpers below; export reuses the same filter. */
+static mlt_frame alpha_interpret_process(
+    mlt_filter filter,
+    mlt_frame frame
+);
 
 /* ------------------------------------------------------------------------- */
 /* Flutter texture state                                                     */
@@ -2179,12 +2210,12 @@ static void export_remove_partial_output(
         return;
     }
 
-    if (job->kind == EXPORT_KIND_PNG_SEQUENCE) {
-        export_remove_sequence_outputs(job->output_path);
+    if (job->export_kind == EXPORT_KIND_PNG_SEQUENCE) {
+        export_remove_sequence_outputs(job->export_output_path);
         return;
     }
 
-    remove(job->output_path);
+    remove(job->export_output_path);
 }
 
 static void export_job_free(ExportJob *job)
@@ -2193,8 +2224,9 @@ static void export_job_free(ExportJob *job)
         return;
     }
 
-    g_free(job->source_path);
-    g_free(job->output_path);
+    g_free(job->export_source_path);
+    g_free(job->export_secondary_path);
+    g_free(job->export_output_path);
     g_free(job);
 }
 
@@ -2221,9 +2253,9 @@ static int export_prepare_destination(
     char *failure,
     size_t failure_size)
 {
-    if (job->kind == EXPORT_KIND_PNG_SEQUENCE) {
+    if (job->export_kind == EXPORT_KIND_PNG_SEQUENCE) {
         if (!g_file_test(
-                job->output_path,
+                job->export_output_path,
                 G_FILE_TEST_IS_DIR)) {
             export_set_failure(
                 failure,
@@ -2238,7 +2270,7 @@ static int export_prepare_destination(
          * a sequence export only starts in a fresh, empty directory. This
          * makes cancellation cleanup safe even for callers outside Flutter.
          */
-        if (!export_directory_is_empty(job->output_path)) {
+        if (!export_directory_is_empty(job->export_output_path)) {
             export_set_failure(
                 failure,
                 failure_size,
@@ -2255,7 +2287,7 @@ static int export_prepare_destination(
      * Remove the destination immediately before encoding so avformat always
      * receives a fresh target.
      */
-    remove(job->output_path);
+    remove(job->export_output_path);
 
     return 1;
 }
@@ -2267,22 +2299,288 @@ static int export_prepare_destination(
  * that profile, constrained to the requested absolute source-frame range,
  * then rebased so producer position zero is the first export frame.
  */
+static void export_graph_close(ExportGraph *graph)
+{
+    if (graph == NULL) {
+        return;
+    }
+
+    graph->export_top = NULL;
+
+    if (graph->export_tractor != NULL) {
+        mlt_tractor_close(graph->export_tractor);
+        graph->export_tractor = NULL;
+    }
+
+    if (graph->export_composite != NULL) {
+        mlt_transition_close(graph->export_composite);
+        graph->export_composite = NULL;
+    }
+
+    if (graph->export_mix != NULL) {
+        mlt_transition_close(graph->export_mix);
+        graph->export_mix = NULL;
+    }
+
+    if (graph->export_secondary_playlist != NULL) {
+        mlt_playlist_close(graph->export_secondary_playlist);
+        graph->export_secondary_playlist = NULL;
+    }
+
+    if (graph->export_secondary != NULL) {
+        mlt_producer_close(graph->export_secondary);
+        graph->export_secondary = NULL;
+    }
+
+    if (graph->export_primary != NULL) {
+        mlt_producer_close(graph->export_primary);
+        graph->export_primary = NULL;
+    }
+
+    if (graph->export_profile != NULL) {
+        mlt_profile_close(graph->export_profile);
+        graph->export_profile = NULL;
+    }
+}
+
+static int export_attach_audio_gain(
+    mlt_profile export_profile,
+    mlt_producer target,
+    double gain)
+{
+    if (export_profile == NULL || target == NULL) {
+        return 0;
+    }
+
+    mlt_filter filter =
+        mlt_factory_filter(
+            export_profile,
+            "volume",
+            NULL
+        );
+
+    if (filter == NULL) {
+        return 0;
+    }
+
+    mlt_properties_set_double(
+        MLT_FILTER_PROPERTIES(filter),
+        "gain",
+        gain
+    );
+
+    const int attached =
+        mlt_producer_attach(
+            target,
+            filter
+        ) == 0;
+
+    mlt_filter_close(filter);
+    return attached;
+}
+
+static int export_attach_still_converter(
+    mlt_profile export_profile,
+    mlt_producer target)
+{
+    if (export_profile == NULL || target == NULL) {
+        return 0;
+    }
+
+    mlt_filter filter =
+        mlt_factory_filter(
+            export_profile,
+            "avcolor_space",
+            NULL
+        );
+
+    if (filter == NULL) {
+        filter =
+            mlt_factory_filter(
+                export_profile,
+                "imageconvert",
+                NULL
+            );
+    }
+
+    if (filter == NULL) {
+        return 0;
+    }
+
+    const int attached =
+        mlt_producer_attach(
+            target,
+            filter
+        ) == 0;
+
+    mlt_filter_close(filter);
+    return attached;
+}
+
+static int export_attach_alpha_interpretation(
+    mlt_producer target,
+    int mode)
+{
+    if (target == NULL || mode < 0 || mode > 2) {
+        return 0;
+    }
+
+    mlt_filter filter = mlt_filter_new();
+
+    if (filter == NULL) {
+        return 0;
+    }
+
+    filter->process = alpha_interpret_process;
+
+    mlt_properties_set_int(
+        MLT_FILTER_PROPERTIES(filter),
+        "mlt_player_alpha_mode",
+        mode
+    );
+    mlt_properties_set_int(
+        MLT_FILTER_PROPERTIES(filter),
+        "disable",
+        mode == 2 ? 0 : 1
+    );
+
+    const int attached =
+        mlt_producer_attach(
+            target,
+            filter
+        ) == 0;
+
+    mlt_filter_close(filter);
+    return attached;
+}
+
+static int export_secondary_base_size(
+    mlt_profile export_profile,
+    mlt_producer source,
+    int source_is_still,
+    double *out_width,
+    double *out_height)
+{
+    if (export_profile == NULL ||
+        source == NULL ||
+        out_width == NULL ||
+        out_height == NULL ||
+        export_profile->width <= 0 ||
+        export_profile->height <= 0) {
+        return 0;
+    }
+
+    mlt_properties properties =
+        MLT_PRODUCER_PROPERTIES(source);
+
+    int source_width =
+        mlt_properties_get_int(
+            properties,
+            "meta.media.width"
+        );
+    int source_height =
+        mlt_properties_get_int(
+            properties,
+            "meta.media.height"
+        );
+
+    if (source_width <= 0) {
+        source_width = mlt_properties_get_int(properties, "width");
+    }
+    if (source_height <= 0) {
+        source_height = mlt_properties_get_int(properties, "height");
+    }
+
+    if (source_width <= 0 || source_height <= 0) {
+        return 0;
+    }
+
+    double source_sar =
+        mlt_properties_get_double(
+            properties,
+            "aspect_ratio"
+        );
+    if (!isfinite(source_sar) || source_sar <= 0.0) {
+        source_sar = 1.0;
+    }
+
+    double output_sar = mlt_profile_sar(export_profile);
+    if (!isfinite(output_sar) || output_sar <= 0.0) {
+        output_sar = 1.0;
+    }
+
+    double display_width =
+        (double)source_width * source_sar / output_sar;
+    double display_height = (double)source_height;
+
+    if (!isfinite(display_width) ||
+        !isfinite(display_height) ||
+        display_width <= 0.0 ||
+        display_height <= 0.0) {
+        return 0;
+    }
+
+    double fit =
+        (double)export_profile->width / display_width;
+    const double height_fit =
+        (double)export_profile->height / display_height;
+
+    if (height_fit < fit) {
+        fit = height_fit;
+    }
+    if (source_is_still && fit > 1.0) {
+        fit = 1.0;
+    }
+
+    if (!isfinite(fit) || fit <= 0.0) {
+        return 0;
+    }
+
+    display_width *= fit;
+    display_height *= fit;
+
+    if (display_width < 1.0) {
+        display_width = 1.0;
+    }
+    if (display_height < 1.0) {
+        display_height = 1.0;
+    }
+
+    *out_width = display_width;
+    *out_height = display_height;
+    return 1;
+}
+
+/*
+ * Build an export-only graph from a snapshot of the open movie. With one
+ * layer this remains the original source-only path. With two layers it
+ * recreates the preview tractor using fresh producers so the export worker
+ * never shares live MLT objects with preview playback.
+ */
 static int export_prepare_source_graph(
     const ExportJob *job,
-    mlt_profile *profile_out,
-    mlt_producer *producer_out,
+    ExportGraph *graph,
     int64_t *in_frame_out,
     int64_t *out_frame_out,
     char *failure,
     size_t failure_size)
 {
-    mlt_profile source_profile = NULL;
     mlt_producer probe_producer = NULL;
-    mlt_producer source_producer = NULL;
 
-    source_profile = mlt_profile_init(NULL);
+    if (job == NULL || graph == NULL) {
+        export_set_failure(
+            failure,
+            failure_size,
+            "The export graph request is invalid."
+        );
+        return 0;
+    }
 
-    if (source_profile == NULL) {
+    memset(graph, 0, sizeof(*graph));
+
+    graph->export_profile = mlt_profile_init(NULL);
+
+    if (graph->export_profile == NULL) {
         export_set_failure(
             failure,
             failure_size,
@@ -2293,59 +2591,57 @@ static int export_prepare_source_graph(
 
     probe_producer =
         mlt_factory_producer(
-            source_profile,
+            graph->export_profile,
             NULL,
-            job->source_path
+            job->export_source_path
         );
 
     if (probe_producer == NULL) {
         export_set_failure(
             failure,
             failure_size,
-            "MLT could not open the source for export."
+            "MLT could not open the base source for export."
         );
         goto fail;
     }
 
     mlt_producer_probe(probe_producer);
-    mlt_profile_from_producer(source_profile, probe_producer);
+    mlt_profile_from_producer(graph->export_profile, probe_producer);
     mlt_producer_close(probe_producer);
     probe_producer = NULL;
 
-    source_producer =
+    graph->export_primary =
         mlt_factory_producer(
-            source_profile,
+            graph->export_profile,
             NULL,
-            job->source_path
+            job->export_source_path
         );
 
-    if (source_producer == NULL) {
+    if (graph->export_primary == NULL) {
         export_set_failure(
             failure,
             failure_size,
-            "MLT could not reopen the source for export."
+            "MLT could not reopen the base source for export."
         );
         goto fail;
     }
 
-    mlt_producer_probe(source_producer);
+    mlt_producer_probe(graph->export_primary);
 
     const int64_t source_length =
-        (int64_t)mlt_producer_get_length(source_producer);
+        (int64_t)mlt_producer_get_length(graph->export_primary);
 
-    int64_t in_frame = job->in_frame;
-    int64_t out_frame = job->out_frame;
+    int64_t in_frame = job->export_in_frame;
+    int64_t out_frame = job->export_out_frame;
 
     if (in_frame < 0) {
         in_frame = 0;
     }
-
     if (out_frame >= source_length) {
         out_frame = source_length - 1;
     }
 
-    if (source_length <= 0 ||
-        out_frame < in_frame) {
+    if (source_length <= 0 || out_frame < in_frame) {
         export_set_failure(
             failure,
             failure_size,
@@ -2354,37 +2650,421 @@ static int export_prepare_source_graph(
         goto fail;
     }
 
+    if (job->export_snapshot_valid &&
+        job->export_primary_has_audio &&
+        !export_attach_audio_gain(
+            graph->export_profile,
+            graph->export_primary,
+            job->export_primary_audio_gain)) {
+        export_set_failure(
+            failure,
+            failure_size,
+            "Could not apply Layer 1 audio level to export."
+        );
+        goto fail;
+    }
+
+    if (!job->export_has_secondary) {
+        if (mlt_producer_set_in_and_out(
+                graph->export_primary,
+                (mlt_position)in_frame,
+                (mlt_position)out_frame) != 0 ||
+            mlt_producer_seek(graph->export_primary, 0) != 0 ||
+            mlt_producer_set_speed(graph->export_primary, 1.0) != 0) {
+            export_set_failure(
+                failure,
+                failure_size,
+                "MLT could not initialize the export range."
+            );
+            goto fail;
+        }
+
+        graph->export_top = graph->export_primary;
+        *in_frame_out = in_frame;
+        *out_frame_out = out_frame;
+        return 1;
+    }
+
+    if (job->export_secondary_path == NULL ||
+        job->export_secondary_path[0] == '\0') {
+        export_set_failure(
+            failure,
+            failure_size,
+            "Layer 2 has no exportable source path."
+        );
+        goto fail;
+    }
+
+    if (job->export_secondary_is_still) {
+        graph->export_secondary =
+            mlt_factory_producer(
+                graph->export_profile,
+                "pixbuf",
+                job->export_secondary_path
+            );
+
+        if (graph->export_secondary == NULL) {
+            graph->export_secondary =
+                mlt_factory_producer(
+                    graph->export_profile,
+                    "avformat",
+                    job->export_secondary_path
+                );
+        }
+    } else {
+        graph->export_secondary =
+            mlt_factory_producer(
+                graph->export_profile,
+                NULL,
+                job->export_secondary_path
+            );
+    }
+
+    if (graph->export_secondary == NULL) {
+        export_set_failure(
+            failure,
+            failure_size,
+            "MLT could not open Layer 2 for export."
+        );
+        goto fail;
+    }
+
+    if (job->export_secondary_is_still &&
+        !export_attach_still_converter(
+            graph->export_profile,
+            graph->export_secondary)) {
+        export_set_failure(
+            failure,
+            failure_size,
+            "Could not install Layer 2 still-image conversion for export."
+        );
+        goto fail;
+    }
+
+    mlt_producer_probe(graph->export_secondary);
+
+    mlt_position secondary_start =
+        (mlt_position)job->export_secondary_start_frame;
+
+    if (secondary_start < 0) {
+        secondary_start = 0;
+    }
+    if (secondary_start >= source_length) {
+        secondary_start = source_length - 1;
+    }
+
+    const mlt_position available_length =
+        (mlt_position)source_length - secondary_start;
+    const mlt_position secondary_length =
+        job->export_secondary_is_still
+            ? 0
+            : mlt_producer_get_length(graph->export_secondary);
+    const mlt_position secondary_playtime =
+        job->export_secondary_is_still
+            ? available_length
+            : (secondary_length < available_length
+                   ? secondary_length
+                   : available_length);
+
+    if (secondary_playtime <= 0) {
+        export_set_failure(
+            failure,
+            failure_size,
+            "Layer 2 has no frames inside the base movie."
+        );
+        goto fail;
+    }
+
+    const mlt_position secondary_out =
+        secondary_playtime - 1;
+
+    if (job->export_secondary_is_still) {
+        mlt_properties_set_position(
+            MLT_PRODUCER_PROPERTIES(graph->export_secondary),
+            "length",
+            secondary_playtime
+        );
+    }
+
     if (mlt_producer_set_in_and_out(
-            source_producer,
+            graph->export_secondary,
+            0,
+            secondary_out) != 0 ||
+        mlt_producer_seek(graph->export_secondary, 0) != 0 ||
+        mlt_producer_set_speed(graph->export_secondary, 0.0) != 0) {
+        export_set_failure(
+            failure,
+            failure_size,
+            "MLT could not initialize Layer 2 for export."
+        );
+        goto fail;
+    }
+
+    graph->export_secondary_playlist =
+        mlt_playlist_new(graph->export_profile);
+
+    if (graph->export_secondary_playlist == NULL) {
+        export_set_failure(
+            failure,
+            failure_size,
+            "Could not create the Layer 2 export playlist."
+        );
+        goto fail;
+    }
+
+    if (secondary_start > 0 &&
+        mlt_playlist_blank(
+            graph->export_secondary_playlist,
+            secondary_start - 1) != 0) {
+        export_set_failure(
+            failure,
+            failure_size,
+            "Could not create the Layer 2 export lead-in."
+        );
+        goto fail;
+    }
+
+    if (mlt_playlist_append_io(
+            graph->export_secondary_playlist,
+            graph->export_secondary,
+            0,
+            secondary_out) != 0) {
+        export_set_failure(
+            failure,
+            failure_size,
+            "Could not place Layer 2 in the export composition."
+        );
+        goto fail;
+    }
+
+    if (job->export_secondary_has_audio &&
+        !export_attach_audio_gain(
+            graph->export_profile,
+            mlt_playlist_producer(graph->export_secondary_playlist),
+            job->export_secondary_audio_gain)) {
+        export_set_failure(
+            failure,
+            failure_size,
+            "Could not apply Layer 2 audio level to export."
+        );
+        goto fail;
+    }
+
+    if (!export_attach_alpha_interpretation(
+            graph->export_secondary,
+            job->export_secondary_alpha_mode)) {
+        export_set_failure(
+            failure,
+            failure_size,
+            "Could not apply Layer 2 alpha interpretation to export."
+        );
+        goto fail;
+    }
+
+    graph->export_tractor = mlt_tractor_new();
+
+    if (graph->export_tractor == NULL) {
+        export_set_failure(
+            failure,
+            failure_size,
+            "Could not create the export tractor."
+        );
+        goto fail;
+    }
+
+    mlt_service_set_profile(
+        MLT_TRACTOR_SERVICE(graph->export_tractor),
+        graph->export_profile
+    );
+
+    if (mlt_tractor_set_track(
+            graph->export_tractor,
+            graph->export_primary,
+            0) != 0 ||
+        mlt_tractor_set_track(
+            graph->export_tractor,
+            mlt_playlist_producer(graph->export_secondary_playlist),
+            1) != 0) {
+        export_set_failure(
+            failure,
+            failure_size,
+            "Could not connect both layers to the export tractor."
+        );
+        goto fail;
+    }
+
+    mlt_field field = mlt_tractor_field(graph->export_tractor);
+
+    if (field == NULL) {
+        export_set_failure(
+            failure,
+            failure_size,
+            "The export tractor did not provide an MLT field."
+        );
+        goto fail;
+    }
+
+    graph->export_composite =
+        mlt_factory_transition(
+            graph->export_profile,
+            "composite",
+            NULL
+        );
+
+    if (graph->export_composite == NULL) {
+        export_set_failure(
+            failure,
+            failure_size,
+            "MLT's composite transition is unavailable for export."
+        );
+        goto fail;
+    }
+
+    double base_width = 0.0;
+    double base_height = 0.0;
+
+    if (!export_secondary_base_size(
+            graph->export_profile,
+            graph->export_secondary,
+            job->export_secondary_is_still,
+            &base_width,
+            &base_height)) {
+        export_set_failure(
+            failure,
+            failure_size,
+            "Layer 2 has invalid export geometry."
+        );
+        goto fail;
+    }
+
+    const double scale =
+        isfinite(job->export_secondary_scale)
+            ? CLAMP(job->export_secondary_scale, 0.10, 3.0)
+            : 1.0;
+    const double x =
+        isfinite(job->export_secondary_x) ? job->export_secondary_x : 0.0;
+    const double y =
+        isfinite(job->export_secondary_y) ? job->export_secondary_y : 0.0;
+    const double opacity =
+        isfinite(job->export_secondary_opacity)
+            ? CLAMP(job->export_secondary_opacity, 0.0, 1.0)
+            : 1.0;
+
+    mlt_properties composite_properties =
+        MLT_TRANSITION_PROPERTIES(graph->export_composite);
+
+    mlt_properties_set_int(composite_properties, "always_active", 1);
+    mlt_properties_set_int(composite_properties, "progressive", 1);
+    mlt_properties_set_int(composite_properties, "invert", 0);
+    mlt_properties_set_int(composite_properties, "aligned", 1);
+    mlt_properties_set_int(composite_properties, "fill", 1);
+    mlt_properties_set_int(composite_properties, "distort", 0);
+    mlt_properties_set(composite_properties, "halign", "left");
+    mlt_properties_set(composite_properties, "valign", "top");
+
+    char geometry[160];
+    snprintf(
+        geometry,
+        sizeof(geometry),
+        "%.6f/%.6f:%.6fx%.6f:%.6f",
+        x,
+        y,
+        base_width * scale,
+        base_height * scale,
+        opacity
+    );
+    mlt_properties_set(
+        composite_properties,
+        "geometry",
+        geometry
+    );
+
+    if (mlt_field_plant_transition(
+            field,
+            graph->export_composite,
+            0,
+            1) != 0) {
+        export_set_failure(
+            failure,
+            failure_size,
+            "Could not plant the export video composite."
+        );
+        goto fail;
+    }
+
+    if (job->export_secondary_has_audio) {
+        graph->export_mix =
+            mlt_factory_transition(
+                graph->export_profile,
+                "mix",
+                NULL
+            );
+
+        if (graph->export_mix == NULL) {
+            export_set_failure(
+                failure,
+                failure_size,
+                "MLT's audio mix transition is unavailable for export."
+            );
+            goto fail;
+        }
+
+        mlt_properties mix_properties =
+            MLT_TRANSITION_PROPERTIES(graph->export_mix);
+
+        mlt_properties_set_int(mix_properties, "always_active", 1);
+        mlt_properties_set_double(mix_properties, "start", 1.0);
+        mlt_properties_set_double(mix_properties, "end", 1.0);
+        mlt_properties_set_int(mix_properties, "sum", 1);
+
+        if (mlt_field_plant_transition(
+                field,
+                graph->export_mix,
+                0,
+                1) != 0) {
+            export_set_failure(
+                failure,
+                failure_size,
+                "Could not plant the export audio mix."
+            );
+            goto fail;
+        }
+    }
+
+    mlt_tractor_refresh(graph->export_tractor);
+    graph->export_top = mlt_tractor_producer(graph->export_tractor);
+
+    if (graph->export_top == NULL) {
+        export_set_failure(
+            failure,
+            failure_size,
+            "The export tractor did not expose a producer."
+        );
+        goto fail;
+    }
+
+    mlt_producer_set_in_and_out(
+        graph->export_top,
+        0,
+        (mlt_position)source_length - 1
+    );
+
+    if (mlt_producer_set_in_and_out(
+            graph->export_top,
             (mlt_position)in_frame,
-            (mlt_position)out_frame) != 0) {
+            (mlt_position)out_frame) != 0 ||
+        mlt_producer_seek(graph->export_top, 0) != 0 ||
+        mlt_producer_set_speed(graph->export_top, 1.0) != 0) {
         export_set_failure(
             failure,
             failure_size,
-            "MLT could not set the export In/Out range."
+            "MLT could not initialize the composite export range."
         );
         goto fail;
     }
 
-    /*
-     * Producer position is relative to its In point after set_in_and_out(),
-     * so position zero is exactly the first requested export frame.
-     */
-    if (mlt_producer_seek(source_producer, 0) != 0 ||
-        mlt_producer_set_speed(source_producer, 1.0) != 0) {
-        export_set_failure(
-            failure,
-            failure_size,
-            "MLT could not initialize the export transport."
-        );
-        goto fail;
-    }
-
-    *profile_out = source_profile;
-    *producer_out = source_producer;
     *in_frame_out = in_frame;
     *out_frame_out = out_frame;
-
     return 1;
 
 fail:
@@ -2392,14 +3072,7 @@ fail:
         mlt_producer_close(probe_producer);
     }
 
-    if (source_producer != NULL) {
-        mlt_producer_close(source_producer);
-    }
-
-    if (source_profile != NULL) {
-        mlt_profile_close(source_profile);
-    }
-
+    export_graph_close(graph);
     return 0;
 }
 
@@ -2565,7 +3238,7 @@ static int export_source_has_audio(
 
 static void export_configure_mp4_consumer(
     mlt_properties properties,
-    mlt_producer source_producer)
+    int source_has_audio)
 {
     /*
      * Fixed POC 9 delivery preset. Match the progressive/deinterlaced image
@@ -2595,7 +3268,7 @@ static void export_configure_mp4_consumer(
         1
     );
 
-    if (export_source_has_audio(source_producer)) {
+    if (source_has_audio) {
         mlt_properties_set(
             properties,
             "acodec",
@@ -2747,17 +3420,23 @@ static void export_configure_png_sequence_consumer(
 }
 
 static int export_configure_consumer(
-    ExportKind kind,
+    const ExportJob *job,
     mlt_properties properties,
     mlt_producer source_producer,
     char *failure,
     size_t failure_size)
 {
+    const ExportKind kind = job->export_kind;
+    const int composition_has_audio =
+        job->export_snapshot_valid
+            ? (job->export_primary_has_audio || job->export_secondary_has_audio)
+            : export_source_has_audio(source_producer);
+
     switch (kind) {
         case EXPORT_KIND_MP4:
             export_configure_mp4_consumer(
                 properties,
-                source_producer
+                composition_has_audio
             );
             break;
 
@@ -2868,14 +3547,14 @@ static int export_output_completed(
     char *failure,
     size_t failure_size)
 {
-    switch (job->kind) {
+    switch (job->export_kind) {
         case EXPORT_KIND_PNG_FRAME:
             /*
              * A one-frame producer has no meaningful terminal-position check:
              * frame zero is both its start and end. The output file itself is
              * the useful completion signal for this export kind.
              */
-            if (output_file_has_data(job->output_path)) {
+            if (output_file_has_data(job->export_output_path)) {
                 return 1;
             }
 
@@ -2892,7 +3571,7 @@ static int export_output_completed(
 
             if (final_position >= total_frames - 1 &&
                 export_sequence_outputs_complete(
-                    job->output_path,
+                    job->export_output_path,
                     total_frames)) {
                 return 1;
             }
@@ -2911,7 +3590,7 @@ static int export_output_completed(
                 (int64_t)mlt_producer_position(source_producer);
 
             if (final_position >= total_frames - 1 &&
-                output_file_has_data(job->output_path)) {
+                output_file_has_data(job->export_output_path)) {
                 return 1;
             }
 
@@ -2937,10 +3616,11 @@ static gpointer export_worker(gpointer data)
 {
     ExportJob *job = (ExportJob *)data;
 
-    mlt_profile export_profile = NULL;
+    ExportGraph graph;
+    memset(&graph, 0, sizeof(graph));
+
     mlt_profile owned_consumer_profile = NULL;
     mlt_profile consumer_profile = NULL;
-    mlt_producer export_producer = NULL;
     mlt_consumer export_consumer = NULL;
 
     char *owned_consumer_target = NULL;
@@ -2956,8 +3636,7 @@ static gpointer export_worker(gpointer data)
 
     if (!export_prepare_source_graph(
             job,
-            &export_profile,
-            &export_producer,
+            &graph,
             &in_frame,
             &out_frame,
             failure,
@@ -2965,8 +3644,11 @@ static gpointer export_worker(gpointer data)
         goto cleanup;
     }
 
+    mlt_producer export_producer = graph.export_top;
+    mlt_profile export_profile = graph.export_profile;
+
     if (!export_prepare_consumer_profile(
-            job->kind,
+            job->export_kind,
             export_profile,
             &owned_consumer_profile,
             &consumer_profile,
@@ -2975,10 +3657,10 @@ static gpointer export_worker(gpointer data)
         goto cleanup;
     }
 
-    if (job->kind == EXPORT_KIND_PNG_SEQUENCE) {
+    if (job->export_kind == EXPORT_KIND_PNG_SEQUENCE) {
         owned_consumer_target =
             export_sequence_consumer_target(
-                job->output_path
+                job->export_output_path
             );
 
         if (owned_consumer_target == NULL) {
@@ -2992,7 +3674,7 @@ static gpointer export_worker(gpointer data)
 
         consumer_target = owned_consumer_target;
     } else {
-        consumer_target = job->output_path;
+        consumer_target = job->export_output_path;
     }
 
     export_consumer =
@@ -3014,10 +3696,18 @@ static gpointer export_worker(gpointer data)
     mlt_properties properties =
         MLT_CONSUMER_PROPERTIES(export_consumer);
 
+    mlt_producer metadata_source = graph.export_primary;
+    if (job->export_snapshot_valid &&
+        !job->export_primary_has_audio &&
+        job->export_secondary_has_audio &&
+        graph.export_secondary != NULL) {
+        metadata_source = graph.export_secondary;
+    }
+
     if (!export_configure_consumer(
-            job->kind,
+            job,
             properties,
-            export_producer,
+            metadata_source,
             failure,
             sizeof(failure))) {
         goto cleanup;
@@ -3105,20 +3795,12 @@ cleanup:
         export_consumer = NULL;
     }
 
-    if (export_producer != NULL) {
-        mlt_producer_close(export_producer);
-        export_producer = NULL;
-    }
-
     if (owned_consumer_profile != NULL) {
         mlt_profile_close(owned_consumer_profile);
         owned_consumer_profile = NULL;
     }
 
-    if (export_profile != NULL) {
-        mlt_profile_close(export_profile);
-        export_profile = NULL;
-    }
+    export_graph_close(&graph);
 
     g_free(owned_consumer_target);
     owned_consumer_target = NULL;
@@ -3450,24 +4132,20 @@ void mlt_bridge_shutdown(void)
 /* Export                                                                    */
 /* ------------------------------------------------------------------------- */
 
-static int start_export_job(
-    const char *source_path,
-    const char *output_path,
-    int64_t in_frame,
-    int64_t out_frame,
-    ExportKind kind)
+static int launch_export_job(ExportJob *job)
 {
     ensure_locks();
 
-    if (source_path == NULL ||
-        source_path[0] == '\0' ||
-        output_path == NULL ||
-        output_path[0] == '\0' ||
-        out_frame < in_frame) {
+    if (job == NULL ||
+        job->export_source_path == NULL ||
+        job->export_source_path[0] == '\0' ||
+        job->export_output_path == NULL ||
+        job->export_output_path[0] == '\0' ||
+        job->export_out_frame < job->export_in_frame) {
+        export_job_free(job);
         g_mutex_lock(&export_mutex);
         export_set_error_locked("Invalid export request.");
         g_mutex_unlock(&export_mutex);
-
         return 0;
     }
 
@@ -3476,10 +4154,10 @@ static int start_export_job(
     g_mutex_unlock(&factory_mutex);
 
     if (!initialized) {
+        export_job_free(job);
         g_mutex_lock(&export_mutex);
         export_set_error_locked("MLT is not initialized.");
         g_mutex_unlock(&export_mutex);
-
         return 0;
     }
 
@@ -3487,36 +4165,10 @@ static int start_export_job(
 
     g_mutex_lock(&export_mutex);
 
-    if (export_running ||
-        export_thread != NULL) {
+    if (export_running || export_thread != NULL) {
+        export_job_free(job);
         export_set_error_locked("An export is already running.");
         g_mutex_unlock(&export_mutex);
-
-        return 0;
-    }
-
-    ExportJob *job =
-        g_new0(ExportJob, 1);
-
-    if (job == NULL) {
-        export_set_error_locked("Could not allocate the export job.");
-        g_mutex_unlock(&export_mutex);
-
-        return 0;
-    }
-
-    job->source_path = g_strdup(source_path);
-    job->output_path = g_strdup(output_path);
-    job->in_frame = in_frame;
-    job->out_frame = out_frame;
-    job->kind = kind;
-
-    if (job->source_path == NULL ||
-        job->output_path == NULL) {
-        export_job_free(job);
-        export_set_error_locked("Could not copy the export paths.");
-        g_mutex_unlock(&export_mutex);
-
         return 0;
     }
 
@@ -3538,13 +4190,168 @@ static int start_export_job(
         export_job_free(job);
         export_set_error_locked("Could not start the export worker.");
         g_mutex_unlock(&export_mutex);
-
         return 0;
     }
 
     g_mutex_unlock(&export_mutex);
-
     return 1;
+}
+
+static int start_export_job(
+    const char *source_path,
+    const char *output_path,
+    int64_t in_frame,
+    int64_t out_frame,
+    ExportKind kind)
+{
+    ExportJob *job = g_new0(ExportJob, 1);
+
+    if (job == NULL) {
+        ensure_locks();
+        g_mutex_lock(&export_mutex);
+        export_set_error_locked("Could not allocate the export job.");
+        g_mutex_unlock(&export_mutex);
+        return 0;
+    }
+
+    job->export_source_path = g_strdup(source_path);
+    job->export_output_path = g_strdup(output_path);
+    job->export_in_frame = in_frame;
+    job->export_out_frame = out_frame;
+    job->export_primary_audio_gain = 1.0;
+    job->export_secondary_audio_gain = 1.0;
+    job->export_secondary_opacity = 1.0;
+    job->export_secondary_scale = 1.0;
+    job->export_kind = kind;
+
+    return launch_export_job(job);
+}
+
+/*
+ * POC 10.9 snapshots the open layered movie and exports from a completely
+ * independent graph. kind uses ExportKind's stable 0..3 values.
+ */
+MLT_BRIDGE_EXPORT
+int mlt_bridge_export_composition_start(
+    const char *output_path,
+    int64_t in_frame,
+    int64_t out_frame,
+    int kind)
+{
+    ensure_locks();
+
+    if (output_path == NULL ||
+        output_path[0] == '\0' ||
+        out_frame < in_frame ||
+        kind < (int)EXPORT_KIND_MP4 ||
+        kind > (int)EXPORT_KIND_WAV_AUDIO ||
+        current_engine() == NULL) {
+        g_mutex_lock(&export_mutex);
+        export_set_error_locked("Invalid composition export request.");
+        g_mutex_unlock(&export_mutex);
+        return 0;
+    }
+
+    ExportJob *job = g_new0(ExportJob, 1);
+
+    if (job == NULL) {
+        g_mutex_lock(&export_mutex);
+        export_set_error_locked("Could not allocate the export snapshot.");
+        g_mutex_unlock(&export_mutex);
+        return 0;
+    }
+
+    g_mutex_lock(&engine_mutex);
+
+    if (primary_producer == NULL ||
+        producer == NULL ||
+        track_count < 1 ||
+        is_still ||
+        !has_video) {
+        g_mutex_unlock(&engine_mutex);
+        export_job_free(job);
+        g_mutex_lock(&export_mutex);
+        export_set_error_locked("The open movie cannot be exported.");
+        g_mutex_unlock(&export_mutex);
+        return 0;
+    }
+
+    const char *primary_resource =
+        mlt_properties_get(
+            MLT_PRODUCER_PROPERTIES(primary_producer),
+            "resource"
+        );
+
+    if (primary_resource == NULL || primary_resource[0] == '\0') {
+        g_mutex_unlock(&engine_mutex);
+        export_job_free(job);
+        g_mutex_lock(&export_mutex);
+        export_set_error_locked("The base layer has no exportable source path.");
+        g_mutex_unlock(&export_mutex);
+        return 0;
+    }
+
+    job->export_source_path = g_strdup(primary_resource);
+    job->export_output_path = g_strdup(output_path);
+    job->export_in_frame = in_frame;
+    job->export_out_frame = out_frame;
+    job->export_kind = (ExportKind)kind;
+    job->export_snapshot_valid = 1;
+    job->export_primary_has_audio = track_has_audio[0] ? 1 : 0;
+    job->export_primary_audio_gain =
+        CLAMP(track_audio_gain[0], 0.0, 1.0);
+    job->export_secondary_audio_gain = 1.0;
+    job->export_secondary_opacity = 1.0;
+    job->export_secondary_scale = 1.0;
+
+    if (track_count >= 2 &&
+        secondary_producer != NULL &&
+        secondary_playlist != NULL &&
+        video_composite != NULL) {
+        const char *secondary_resource =
+            mlt_properties_get(
+                MLT_PRODUCER_PROPERTIES(secondary_producer),
+                "resource"
+            );
+
+        if (secondary_resource == NULL || secondary_resource[0] == '\0') {
+            g_mutex_unlock(&engine_mutex);
+            export_job_free(job);
+            g_mutex_lock(&export_mutex);
+            export_set_error_locked("Layer 2 has no exportable source path.");
+            g_mutex_unlock(&export_mutex);
+            return 0;
+        }
+
+        job->export_secondary_path = g_strdup(secondary_resource);
+        job->export_has_secondary = 1;
+        job->export_secondary_start_frame = secondary_start_frame;
+        job->export_secondary_has_audio = track_has_audio[1] ? 1 : 0;
+        job->export_secondary_is_still = secondary_is_still ? 1 : 0;
+        job->export_secondary_alpha_mode = secondary_alpha_mode;
+        job->export_secondary_audio_gain =
+            CLAMP(track_audio_gain[1], 0.0, 1.0);
+        job->export_secondary_opacity =
+            CLAMP(secondary_opacity, 0.0, 1.0);
+        job->export_secondary_x = secondary_x;
+        job->export_secondary_y = secondary_y;
+        job->export_secondary_scale =
+            CLAMP(secondary_scale, 0.10, 3.0);
+    }
+
+    g_mutex_unlock(&engine_mutex);
+
+    if (job->export_source_path == NULL ||
+        job->export_output_path == NULL ||
+        (job->export_has_secondary && job->export_secondary_path == NULL)) {
+        export_job_free(job);
+        g_mutex_lock(&export_mutex);
+        export_set_error_locked("Could not copy the composition export snapshot.");
+        g_mutex_unlock(&export_mutex);
+        return 0;
+    }
+
+    return launch_export_job(job);
 }
 
 MLT_BRIDGE_EXPORT

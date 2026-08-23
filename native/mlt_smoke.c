@@ -30,6 +30,7 @@ static const char *media_path = NULL;
 static const char *junk_path = NULL;
 static const char *still_path = NULL;
 static const char *alpha_video_path = NULL;
+static char composition_export_path[1024] = "";
 
 static GMainLoop *loop = NULL;
 static MltBridgeEngine *engine = NULL;
@@ -71,6 +72,37 @@ static void check(
     if (!condition) {
         failures++;
     }
+}
+
+static int file_has_data(const char *path)
+{
+    if (path == NULL || path[0] == '\0') {
+        return 0;
+    }
+
+    FILE *file = fopen(path, "rb");
+    if (file == NULL) {
+        return 0;
+    }
+
+    const int seeked = fseek(file, 0, SEEK_END) == 0;
+    const long size = seeked ? ftell(file) : -1;
+    fclose(file);
+
+    return size > 0;
+}
+
+static int wait_for_export_completion(int timeout_ms)
+{
+    const gint64 deadline =
+        g_get_monotonic_time() + ((gint64)timeout_ms * 1000);
+
+    while (mlt_bridge_export_is_running() &&
+           g_get_monotonic_time() < deadline) {
+        g_usleep(50000);
+    }
+
+    return !mlt_bridge_export_is_running();
 }
 
 static void check_engine_isolation(void)
@@ -734,6 +766,61 @@ static gboolean run_step(
                 "PNG alpha can return to Auto"
             );
 
+            check(
+                mlt_bridge_set_secondary_geometry(48.0, 24.0, 0.5),
+                "PNG layer can be positioned and scaled before export"
+            );
+
+            check(
+                mlt_bridge_set_secondary_opacity(0.6),
+                "PNG layer opacity can be set before export"
+            );
+
+            if (duration_frames > 0 &&
+                composition_export_path[0] != '\0') {
+                printf("layered export\n");
+                remove(composition_export_path);
+
+                const int export_started =
+                    mlt_bridge_export_composition_start(
+                        composition_export_path,
+                        0,
+                        duration_frames - 1,
+                        0
+                    );
+
+                check(
+                    export_started,
+                    "whole-movie layered MP4 export starts without I/O points"
+                );
+
+                if (export_started) {
+                    check(
+                        wait_for_export_completion(30000),
+                        "whole-movie layered MP4 export completes"
+                    );
+
+                    if (!mlt_bridge_export_succeeded()) {
+                        char export_error[512] = "";
+                        mlt_bridge_export_error_copy(
+                            export_error,
+                            (int)sizeof(export_error)
+                        );
+                        printf("  export error: %s\n", export_error);
+                    }
+
+                    check(
+                        mlt_bridge_export_succeeded(),
+                        "whole-movie layered MP4 export reports success"
+                    );
+
+                    check(
+                        file_has_data(composition_export_path),
+                        "whole-movie layered MP4 export writes output"
+                    );
+                }
+            }
+
             if (duration_frames > 0) {
                 const int64_t final_frame =
                     duration_frames - 1;
@@ -903,6 +990,10 @@ static gboolean run_step(
         engine = NULL;
         mlt_bridge_shutdown();
 
+        if (composition_export_path[0] != '\0') {
+            remove(composition_export_path);
+        }
+
         printf(
             "\n%s (%d failures)\n",
             failures == 0 ? "PASS" : "FAIL",
@@ -940,6 +1031,15 @@ int main(
     junk_path = argc > 2 ? argv[2] : NULL;
     still_path = argc > 3 ? argv[3] : NULL;
     alpha_video_path = argc > 4 ? argv[4] : NULL;
+
+    snprintf(
+        composition_export_path,
+        sizeof(composition_export_path),
+        "%s/mlt-player-smoke-composition-%08x.mp4",
+        g_get_tmp_dir(),
+        g_random_int()
+    );
+    remove(composition_export_path);
 
     if (!mlt_bridge_init()) {
         char error[512];

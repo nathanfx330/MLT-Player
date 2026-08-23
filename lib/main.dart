@@ -76,6 +76,14 @@ enum _ExportMode {
   audio,
 }
 
+enum _ExportMenuChoice {
+  video,
+  imageSequence,
+  audio,
+  wholeMovie,
+  inOut,
+}
+
 class PlayerPage extends StatefulWidget {
   const PlayerPage({
     super.key,
@@ -506,7 +514,7 @@ class _PlayerPageState extends State<PlayerPage>
     final media = _engine.media;
     if (media == null ||
         media.isStill ||
-        !_engine.sourceOnlyExportsAvailable ||
+        !_engine.exportsAvailable ||
         _engine.exporting) {
       return;
     }
@@ -514,7 +522,7 @@ class _PlayerPageState extends State<PlayerPage>
     _showOverlay();
 
     final stem = _mediaStem(media.name);
-    final suffix = _engine.hasSelection
+    final suffix = _engine.exportRangeMode == ExportRangeMode.inOut
         ? 'selection'
         : (_engine.isTrimmed ? 'trimmed' : 'export');
 
@@ -546,7 +554,7 @@ class _PlayerPageState extends State<PlayerPage>
     if (media == null ||
         media.isStill ||
         !media.hasVideo ||
-        !_engine.sourceOnlyExportsAvailable ||
+        !_engine.exportsAvailable ||
         _engine.exporting) {
       return;
     }
@@ -599,7 +607,7 @@ class _PlayerPageState extends State<PlayerPage>
     if (media == null ||
         media.isStill ||
         !media.hasVideo ||
-        !_engine.sourceOnlyExportsAvailable ||
+        !_engine.exportsAvailable ||
         _engine.exporting) {
       return;
     }
@@ -615,7 +623,7 @@ class _PlayerPageState extends State<PlayerPage>
     }
 
     final stem = _mediaStem(media.name);
-    final suffix = _engine.hasSelection
+    final suffix = _engine.exportRangeMode == ExportRangeMode.inOut
         ? 'selection_frames'
         : (_engine.isTrimmed ? 'trimmed_frames' : 'frames');
 
@@ -660,8 +668,8 @@ class _PlayerPageState extends State<PlayerPage>
     final media = _engine.media;
     if (media == null ||
         media.isStill ||
-        !media.hasAudio ||
-        !_engine.sourceOnlyExportsAvailable ||
+        !_engine.exportHasAudio ||
+        !_engine.exportsAvailable ||
         _engine.exporting) {
       return;
     }
@@ -669,7 +677,7 @@ class _PlayerPageState extends State<PlayerPage>
     _showOverlay();
 
     final stem = _mediaStem(media.name);
-    final suffix = _engine.hasSelection
+    final suffix = _engine.exportRangeMode == ExportRangeMode.inOut
         ? 'selection'
         : (_engine.isTrimmed ? 'trimmed' : 'audio');
 
@@ -720,36 +728,29 @@ class _PlayerPageState extends State<PlayerPage>
     _showOverlay();
   }
 
+  void _selectExportRange(ExportRangeMode mode) {
+    _engine.setExportRangeMode(mode);
+    _showOverlay();
+  }
+
   String _exportModeTooltip(MediaInfo media) {
-    if (!_engine.sourceOnlyExportsAvailable) {
-      return 'Composite export comes after the tractor preview proof';
-    }
+    final rangeLabel = _engine.exportRangeMode == ExportRangeMode.inOut
+        ? 'In / Out'
+        : 'Whole Movie';
 
     switch (_exportMode) {
       case _ExportMode.video:
-        return _engine.hasSelection
-            ? 'Export marked selection as MP4 (Ctrl+E)'
-            : (_engine.isTrimmed
-                ? 'Export trimmed clip as MP4 (Ctrl+E)'
-                : 'Export active clip as MP4 (Ctrl+E)');
+        return 'Export $rangeLabel as composited MP4 (Ctrl+E)';
       case _ExportMode.imageSequence:
         if (!media.hasVideo) {
           return 'Image sequence unavailable for this media — hold or use ▾ to change export mode';
         }
-        return _engine.hasSelection
-            ? 'Export marked selection as PNG frames (Ctrl+E)'
-            : (_engine.isTrimmed
-                ? 'Export trimmed clip as PNG frames (Ctrl+E)'
-                : 'Export active clip as PNG frames (Ctrl+E)');
+        return 'Export $rangeLabel as composited PNG frames (Ctrl+E)';
       case _ExportMode.audio:
-        if (!media.hasAudio) {
-          return 'Audio export unavailable for this media — hold or use ▾ to change export mode';
+        if (!_engine.exportHasAudio) {
+          return 'Audio export unavailable for this composition — hold or use ▾ to change export mode';
         }
-        return _engine.hasSelection
-            ? 'Export marked selection as WAV audio (Ctrl+E)'
-            : (_engine.isTrimmed
-                ? 'Export trimmed clip as WAV audio (Ctrl+E)'
-                : 'Export active clip as WAV audio (Ctrl+E)');
+        return 'Export $rangeLabel as mixed WAV audio (Ctrl+E)';
     }
   }
 
@@ -1728,20 +1729,23 @@ class _PlayerPageState extends State<PlayerPage>
           const SizedBox(width: 2),
           _ExportSplitButton(
             mode: _exportMode,
+            rangeMode: _engine.exportRangeMode,
+            hasInOutRange: _engine.hasSelection,
             exporting: _engine.exporting,
             tooltip: _engine.exporting
                 ? 'Cancel export (Ctrl+E)'
                 : _exportModeTooltip(media),
             imageSequenceEnabled: media.hasVideo,
-            audioEnabled: media.hasAudio,
+            audioEnabled: _engine.exportHasAudio,
             onPressed: _engine.exporting
                 ? _engine.cancelExport
-                : (!_engine.sourceOnlyExportsAvailable ||
+                : (!_engine.exportsAvailable ||
                         (_exportMode == _ExportMode.imageSequence && !media.hasVideo) ||
-                        (_exportMode == _ExportMode.audio && !media.hasAudio)
+                        (_exportMode == _ExportMode.audio && !_engine.exportHasAudio)
                     ? null
                     : _exportSelectedMode),
             onModeSelected: _selectExportMode,
+            onRangeSelected: _selectExportRange,
           ),
           const SizedBox(width: 2),
           _OverlayButton(
@@ -1749,7 +1753,7 @@ class _PlayerPageState extends State<PlayerPage>
             tooltip: 'Export current frame as display-size PNG (Ctrl+Shift+E)',
             onPressed: !_engine.exporting &&
                     media.hasVideo &&
-                    _engine.sourceOnlyExportsAvailable
+                    _engine.exportsAvailable
                 ? _exportCurrentFrame
                 : null,
           ),
@@ -2024,21 +2028,27 @@ class _ModeButton extends StatelessWidget {
 class _ExportSplitButton extends StatefulWidget {
   const _ExportSplitButton({
     required this.mode,
+    required this.rangeMode,
+    required this.hasInOutRange,
     required this.exporting,
     required this.tooltip,
     required this.imageSequenceEnabled,
     required this.audioEnabled,
     required this.onPressed,
     required this.onModeSelected,
+    required this.onRangeSelected,
   });
 
   final _ExportMode mode;
+  final ExportRangeMode rangeMode;
+  final bool hasInOutRange;
   final bool exporting;
   final String tooltip;
   final bool imageSequenceEnabled;
   final bool audioEnabled;
   final VoidCallback? onPressed;
   final ValueChanged<_ExportMode> onModeSelected;
+  final ValueChanged<ExportRangeMode> onRangeSelected;
 
   @override
   State<_ExportSplitButton> createState() => _ExportSplitButtonState();
@@ -2066,7 +2076,7 @@ class _ExportSplitButtonState extends State<_ExportSplitButton> {
       ancestor: overlayObject,
     );
 
-    final selected = await showMenu<_ExportMode>(
+    final selected = await showMenu<_ExportMenuChoice>(
       context: context,
       color: const Color(0xFF202020),
       elevation: 12,
@@ -2079,23 +2089,48 @@ class _ExportSplitButtonState extends State<_ExportSplitButton> {
         ),
         Offset.zero & overlayObject.size,
       ),
-      items: <PopupMenuEntry<_ExportMode>>[
-        CheckedPopupMenuItem<_ExportMode>(
-          value: _ExportMode.video,
+      items: <PopupMenuEntry<_ExportMenuChoice>>[
+        CheckedPopupMenuItem<_ExportMenuChoice>(
+          value: _ExportMenuChoice.video,
           checked: widget.mode == _ExportMode.video,
           child: const Text('Export Video'),
         ),
-        CheckedPopupMenuItem<_ExportMode>(
-          value: _ExportMode.imageSequence,
+        CheckedPopupMenuItem<_ExportMenuChoice>(
+          value: _ExportMenuChoice.imageSequence,
           checked: widget.mode == _ExportMode.imageSequence,
           enabled: widget.imageSequenceEnabled,
           child: const Text('Export Image Sequence'),
         ),
-        CheckedPopupMenuItem<_ExportMode>(
-          value: _ExportMode.audio,
+        CheckedPopupMenuItem<_ExportMenuChoice>(
+          value: _ExportMenuChoice.audio,
           checked: widget.mode == _ExportMode.audio,
           enabled: widget.audioEnabled,
           child: const Text('Export Audio (WAV)'),
+        ),
+        const PopupMenuDivider(),
+        const PopupMenuItem<_ExportMenuChoice>(
+          enabled: false,
+          height: 28,
+          child: Text(
+            'RANGE',
+            style: TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 1.1,
+              color: Colors.white38,
+            ),
+          ),
+        ),
+        CheckedPopupMenuItem<_ExportMenuChoice>(
+          value: _ExportMenuChoice.wholeMovie,
+          checked: widget.rangeMode == ExportRangeMode.wholeMovie,
+          child: const Text('Whole Movie'),
+        ),
+        CheckedPopupMenuItem<_ExportMenuChoice>(
+          value: _ExportMenuChoice.inOut,
+          checked: widget.rangeMode == ExportRangeMode.inOut,
+          enabled: widget.hasInOutRange,
+          child: const Text('In / Out'),
         ),
       ],
     );
@@ -2104,7 +2139,23 @@ class _ExportSplitButtonState extends State<_ExportSplitButton> {
       return;
     }
 
-    widget.onModeSelected(selected);
+    switch (selected) {
+      case _ExportMenuChoice.video:
+        widget.onModeSelected(_ExportMode.video);
+        return;
+      case _ExportMenuChoice.imageSequence:
+        widget.onModeSelected(_ExportMode.imageSequence);
+        return;
+      case _ExportMenuChoice.audio:
+        widget.onModeSelected(_ExportMode.audio);
+        return;
+      case _ExportMenuChoice.wholeMovie:
+        widget.onRangeSelected(ExportRangeMode.wholeMovie);
+        return;
+      case _ExportMenuChoice.inOut:
+        widget.onRangeSelected(ExportRangeMode.inOut);
+        return;
+    }
   }
 
   @override

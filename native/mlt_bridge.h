@@ -91,6 +91,19 @@ mlt_bridge_texture_id(void);
 /* ------------------------------------------------------------------------- */
 
 /*
+ * POC 10.9: export the currently open movie composition using a fresh
+ * background graph. kind: 0 MP4, 1 PNG frame, 2 PNG sequence, 3 WAV.
+ * In/out are absolute Layer-1 frame numbers and are inclusive.
+ */
+MLT_BRIDGE_EXPORT int
+mlt_bridge_export_composition_start(
+    const char *output_path,
+    int64_t in_frame,
+    int64_t out_frame,
+    int kind
+);
+
+/*
  * Start a background MP4 export using a separate MLT graph. In/out are
  * absolute source frame numbers and are inclusive.
  */

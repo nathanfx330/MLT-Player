@@ -10,6 +10,8 @@ import 'mlt_bridge.dart';
 
 enum PlaybackRepeatMode { off, loop }
 
+enum ExportRangeMode { wholeMovie, inOut }
+
 /// Immutable snapshot of the editable clip state.
 ///
 /// POC 8 keeps selection markers and non-destructive trim bounds together
@@ -83,6 +85,7 @@ class PlayerEngine extends ChangeNotifier {
   double _exportProgress = 0.0;
   String? _exportPath;
   String? _exportError;
+  ExportRangeMode _exportRangeMode = ExportRangeMode.wholeMovie;
 
   // POC 8 selection state is frame-based. Milliseconds remain a transport
   // concern, but edit boundaries need to survive fractional frame rates
@@ -125,7 +128,11 @@ class PlayerEngine extends ChangeNotifier {
   bool get secondaryTrackHasAudio => _secondaryTrackHasAudio;
   bool get hasSecondaryTrack => _secondaryTrackPath != null;
   int get trackCount => _media == null ? 0 : (hasSecondaryTrack ? 2 : 1);
-  bool get sourceOnlyExportsAvailable => !hasSecondaryTrack;
+  bool get exportsAvailable =>
+      _media != null && !_media!.isStill && _media!.frames > 0;
+  bool get exportHasAudio =>
+      (_media?.hasAudio ?? false) ||
+      (hasSecondaryTrack && _secondaryTrackHasAudio);
 
   bool get playing => _playing;
   bool get playingSelection => _playingSelection;
@@ -146,10 +153,15 @@ class PlayerEngine extends ChangeNotifier {
   bool get hasExportStatus =>
       _exporting || _exportSucceeded || _exportError != null;
 
+  ExportRangeMode get exportRangeMode =>
+      _exportRangeMode == ExportRangeMode.inOut && hasSelection
+          ? ExportRangeMode.inOut
+          : ExportRangeMode.wholeMovie;
+
   int get exportInFrame =>
-      hasSelection ? _inFrame! : _trimInFrame;
+      exportRangeMode == ExportRangeMode.inOut ? _inFrame! : _trimInFrame;
   int get exportOutFrame =>
-      hasSelection ? _outFrame! : _trimOutFrame;
+      exportRangeMode == ExportRangeMode.inOut ? _outFrame! : _trimOutFrame;
   int get exportFrameCount {
     final start = exportInFrame;
     final end = exportOutFrame;
@@ -233,6 +245,7 @@ class PlayerEngine extends ChangeNotifier {
     _trimOutFrame = state.trimOutFrame;
     _inFrame = state.inFrame;
     _outFrame = state.outFrame;
+    _normalizeExportRangeMode();
 
     if (boundsChanged) {
       _constrainSourcePositionToTrim();
@@ -698,6 +711,26 @@ class PlayerEngine extends ChangeNotifier {
     return true;
   }
 
+  void setExportRangeMode(ExportRangeMode mode) {
+    final requested =
+        mode == ExportRangeMode.inOut && !hasSelection
+            ? ExportRangeMode.wholeMovie
+            : mode;
+
+    if (_exportRangeMode == requested) {
+      return;
+    }
+
+    _exportRangeMode = requested;
+    notifyListeners();
+  }
+
+  void _normalizeExportRangeMode() {
+    if (_exportRangeMode == ExportRangeMode.inOut && !hasSelection) {
+      _exportRangeMode = ExportRangeMode.wholeMovie;
+    }
+  }
+
   int? captureCurrentSourceFrame() {
     final media = _media;
     if (_opening ||
@@ -753,19 +786,40 @@ class PlayerEngine extends ChangeNotifier {
     return frame;
   }
 
-  bool startFrameExport(String outputPath, {required int sourceFrame}) {
-    final media = _media;
+  bool _startCompositionExport({
+    required String outputPath,
+    required int inFrame,
+    required int outFrame,
+    required int kind,
+    required String fallbackError,
+  }) {
+    _exportSucceeded = false;
+    _exportError = null;
+    _exportProgress = 0.0;
+    _exportPath = outputPath;
 
-    if (hasSecondaryTrack) {
-      _exportSucceeded = false;
+    final started = bridge.startCompositionExport(
+      outputPath: outputPath,
+      inFrame: inFrame,
+      outFrame: outFrame,
+      kind: kind,
+    );
+
+    if (!started) {
+      _exporting = false;
       _exportError =
-          'Composite export is not enabled yet; remove/reopen the movie '
-          'to return to the one-track exporter.';
-      _exportPath = null;
-      _exportProgress = 0.0;
+          bridge.exportError.isEmpty ? fallbackError : bridge.exportError;
       notifyListeners();
       return false;
     }
+
+    _exporting = true;
+    notifyListeners();
+    return true;
+  }
+
+  bool startFrameExport(String outputPath, {required int sourceFrame}) {
+    final media = _media;
 
     if (!initialized ||
         media == null ||
@@ -778,43 +832,17 @@ class PlayerEngine extends ChangeNotifier {
       return false;
     }
 
-    _exportSucceeded = false;
-    _exportError = null;
-    _exportProgress = 0.0;
-    _exportPath = outputPath;
-
-    final started = bridge.startFrameExport(
-      sourcePath: media.path,
+    return _startCompositionExport(
       outputPath: outputPath,
-      frame: sourceFrame,
+      inFrame: sourceFrame,
+      outFrame: sourceFrame,
+      kind: 1,
+      fallbackError: 'MLT could not start composited frame export.',
     );
-
-    if (!started) {
-      _exportError = bridge.exportError.isEmpty
-          ? 'MLT could not start frame export.'
-          : bridge.exportError;
-      notifyListeners();
-      return false;
-    }
-
-    _exporting = true;
-    notifyListeners();
-    return true;
   }
 
   bool startImageSequenceExport(String outputDirectory) {
     final media = _media;
-
-    if (hasSecondaryTrack) {
-      _exportSucceeded = false;
-      _exportError =
-          'Composite export is not enabled yet; remove/reopen the movie '
-          'to return to the one-track exporter.';
-      _exportPath = null;
-      _exportProgress = 0.0;
-      notifyListeners();
-      return false;
-    }
 
     if (!initialized ||
         media == null ||
@@ -826,127 +854,57 @@ class PlayerEngine extends ChangeNotifier {
       return false;
     }
 
-    _exportSucceeded = false;
-    _exportError = null;
-    _exportProgress = 0.0;
-    _exportPath = outputDirectory;
-
-    final started = bridge.startPngSequenceExport(
-      sourcePath: media.path,
-      outputDirectory: outputDirectory,
+    return _startCompositionExport(
+      outputPath: outputDirectory,
       inFrame: exportInFrame,
       outFrame: exportOutFrame,
+      kind: 2,
+      fallbackError: 'MLT could not start composited image-sequence export.',
     );
-
-    if (!started) {
-      _exportError = bridge.exportError.isEmpty
-          ? 'MLT could not start image-sequence export.'
-          : bridge.exportError;
-      notifyListeners();
-      return false;
-    }
-
-    _exporting = true;
-    notifyListeners();
-    return true;
   }
 
   bool startAudioExport(String outputPath) {
     final media = _media;
 
-    if (hasSecondaryTrack) {
-      _exportSucceeded = false;
-      _exportError =
-          'Composite export is not enabled yet; remove/reopen the movie '
-          'to return to the one-track exporter.';
-      _exportPath = null;
-      _exportProgress = 0.0;
-      notifyListeners();
-      return false;
-    }
-
     if (!initialized ||
         media == null ||
         media.isStill ||
-        !media.hasAudio ||
+        !exportHasAudio ||
         media.frames <= 0 ||
         exportFrameCount <= 0 ||
         _exporting) {
       return false;
     }
 
-    _exportSucceeded = false;
-    _exportError = null;
-    _exportProgress = 0.0;
-    _exportPath = outputPath;
-
-    final started = bridge.startAudioExport(
-      sourcePath: media.path,
+    return _startCompositionExport(
       outputPath: outputPath,
       inFrame: exportInFrame,
       outFrame: exportOutFrame,
+      kind: 3,
+      fallbackError: 'MLT could not start composited audio export.',
     );
-
-    if (!started) {
-      _exportError = bridge.exportError.isEmpty
-          ? 'MLT could not start audio export.'
-          : bridge.exportError;
-      notifyListeners();
-      return false;
-    }
-
-    _exporting = true;
-    notifyListeners();
-    return true;
   }
 
   bool startExport(String outputPath) {
     final media = _media;
 
-    if (hasSecondaryTrack) {
-      _exportSucceeded = false;
-      _exportError =
-          'Composite export is not enabled yet; remove/reopen the movie '
-          'to return to the one-track exporter.';
-      _exportPath = null;
-      _exportProgress = 0.0;
-      notifyListeners();
-      return false;
-    }
-
     if (!initialized ||
         media == null ||
         media.isStill ||
+        !media.hasVideo ||
         media.frames <= 0 ||
         exportFrameCount <= 0 ||
         _exporting) {
       return false;
     }
 
-    _exportSucceeded = false;
-    _exportError = null;
-    _exportProgress = 0.0;
-    _exportPath = outputPath;
-
-    final started = bridge.startExport(
-      sourcePath: media.path,
+    return _startCompositionExport(
       outputPath: outputPath,
       inFrame: exportInFrame,
       outFrame: exportOutFrame,
+      kind: 0,
+      fallbackError: 'MLT could not start composited video export.',
     );
-
-    if (!started) {
-      _exporting = false;
-      _exportError = bridge.exportError.isEmpty
-          ? 'MLT could not start export.'
-          : bridge.exportError;
-      notifyListeners();
-      return false;
-    }
-
-    _exporting = true;
-    notifyListeners();
-    return true;
   }
 
   void cancelExport() {
@@ -992,6 +950,7 @@ class PlayerEngine extends ChangeNotifier {
     _secondaryTrackAudioGain = 1.0;
     _secondaryTrackHasAudio = false;
     _playingSelection = false;
+    _exportRangeMode = ExportRangeMode.wholeMovie;
     _inFrame = null;
     _outFrame = null;
     _trimInFrame = 0;
@@ -2123,6 +2082,7 @@ class PlayerEngine extends ChangeNotifier {
     if (_outFrame != null && _outFrame! < frame) {
       _outFrame = null;
     }
+    _normalizeExportRangeMode();
 
     final after = _captureEditState();
     if (!before.sameAs(after)) {
@@ -2158,6 +2118,7 @@ class PlayerEngine extends ChangeNotifier {
     if (_inFrame != null && _inFrame! > frame) {
       _inFrame = null;
     }
+    _normalizeExportRangeMode();
 
     final after = _captureEditState();
     if (!before.sameAs(after)) {
@@ -2207,6 +2168,7 @@ class PlayerEngine extends ChangeNotifier {
     // bounds and the markers exactly as they were before Trim.
     _inFrame = null;
     _outFrame = null;
+    _normalizeExportRangeMode();
 
     _constrainSourcePositionToTrim();
 
@@ -2228,6 +2190,7 @@ class PlayerEngine extends ChangeNotifier {
     _playingSelection = false;
     _inFrame = null;
     _outFrame = null;
+    _normalizeExportRangeMode();
     _recordEditBeforeChange(before);
     notifyListeners();
   }

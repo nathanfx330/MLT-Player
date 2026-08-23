@@ -103,6 +103,19 @@ typedef _FrameExportStartDart = int Function(
   int,
 );
 
+typedef _CompositionExportStartNative = Int32 Function(
+  Pointer<Utf8>,
+  Int64,
+  Int64,
+  Int32,
+);
+typedef _CompositionExportStartDart = int Function(
+  Pointer<Utf8>,
+  int,
+  int,
+  int,
+);
+
 /// Thin wrapper over libmlt_bridge.so.
 ///
 /// The library is resolved out of the running process rather than opened
@@ -269,6 +282,10 @@ class MltBridge {
     _sourceTimecode = _library.lookupFunction<_CopyStringNative, _CopyStringDart>(
         'mlt_bridge_source_timecode_copy');
 
+    _compositionExportStart = _library.lookupFunction<
+        _CompositionExportStartNative, _CompositionExportStartDart>(
+      'mlt_bridge_export_composition_start',
+    );
     _exportStart = _library.lookupFunction<_ExportStartNative, _ExportStartDart>(
         'mlt_bridge_export_start');
     _frameExportStart =
@@ -372,6 +389,7 @@ class MltBridge {
   late final _IntDart _videoColorTrc;
   late final _CopyStringDart _videoColorRange;
   late final _CopyStringDart _sourceTimecode;
+  late final _CompositionExportStartDart _compositionExportStart;
   late final _ExportStartDart _exportStart;
   late final _FrameExportStartDart _frameExportStart;
   late final _ExportStartDart _pngSequenceExportStart;
@@ -572,6 +590,30 @@ class MltBridge {
       _withEngine(1.0, () => _trackAudioGain(trackIndex));
 
   void closeMedia() => _withEngineVoid(_closeMedia);
+
+  bool startCompositionExport({
+    required String outputPath,
+    required int inFrame,
+    required int outFrame,
+    required int kind,
+  }) {
+    final nativeOutput = outputPath.toNativeUtf8(allocator: malloc);
+
+    try {
+      return _withEngine(
+        false,
+        () => _compositionExportStart(
+              nativeOutput,
+              inFrame,
+              outFrame,
+              kind,
+            ) !=
+            0,
+      );
+    } finally {
+      malloc.free(nativeOutput);
+    }
+  }
 
   bool startExport({
     required String sourcePath,
