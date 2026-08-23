@@ -217,13 +217,12 @@ class PlayerEngine extends ChangeNotifier {
       return;
     }
 
-    final sourcePosition = bridge.positionMs;
-    final sourceFrame = _frameAtPosition(media, sourcePosition);
+    final sourceFrame = bridge.positionFrame;
     final targetFrame =
         sourceFrame.clamp(_trimInFrame, _trimOutFrame);
 
     if (targetFrame != sourceFrame) {
-      bridge.seekMs(_midpointMsForFrame(media, targetFrame));
+      bridge.seekFrame(targetFrame);
     }
 
     _positionMs = bridge.positionMs;
@@ -333,6 +332,7 @@ class PlayerEngine extends ChangeNotifier {
 
     final previousSpeed = _speed;
     final position = bridge.positionMs;
+    final positionFrame = bridge.positionFrame;
     final playing = bridge.isPlaying;
     final speed = bridge.speed;
     final playAllFrames = bridge.playAllFrames;
@@ -342,7 +342,7 @@ class PlayerEngine extends ChangeNotifier {
     // repeat logic so Loop can never carry a Play Selection command beyond
     // the marked range.
     if (_handleSelectionBoundary(
-      positionMs: position,
+      positionFrame: positionFrame,
       playing: playing,
       eof: eof,
     )) {
@@ -353,7 +353,7 @@ class PlayerEngine extends ChangeNotifier {
     // them before whole-source EOF repeat so normal Play/Loop can never
     // escape a trimmed movie.
     if (_handleTrimBoundary(
-      positionMs: position,
+      positionFrame: positionFrame,
       playing: playing,
       eof: eof,
       previousSpeed: previousSpeed,
@@ -365,7 +365,7 @@ class PlayerEngine extends ChangeNotifier {
     // boundary. Keep the last commanded speed long enough to restart loop
     // playback from that boundary.
     if (_handleRepeatBoundary(
-      positionMs: position,
+      positionFrame: positionFrame,
       eof: eof,
       previousSpeed: previousSpeed,
     )) {
@@ -388,7 +388,7 @@ class PlayerEngine extends ChangeNotifier {
   }
 
   bool _handleSelectionBoundary({
-    required int positionMs,
+    required int positionFrame,
     required bool playing,
     required bool eof,
   }) {
@@ -405,12 +405,9 @@ class PlayerEngine extends ChangeNotifier {
       return false;
     }
 
-    // The selection model is frame-based, so keep the playback boundary
-    // frame-based too. mlt_bridge_position_ms() is derived from the integer
-    // consumer frame; rounding it back to a frame recovers that visible
-    // position without relying on an independently rounded millisecond
-    // threshold.
-    final currentFrame = _frameAtPosition(media, positionMs);
+    // The selection model and the native playback position are both
+    // frame-based here; no millisecond round-trip is involved.
+    final currentFrame = positionFrame;
     if (currentFrame <= outFrame && !eof) {
       return false;
     }
@@ -433,8 +430,7 @@ class PlayerEngine extends ChangeNotifier {
     // Loop applies to the active selection. When Play Selection owns the
     // transport, Loop means In -> Out -> In, not whole-file repeat.
     if (_repeatMode == PlaybackRepeatMode.loop) {
-      final inMs = _midpointMsForFrame(media, inFrame);
-      if (!bridge.seekMs(inMs)) {
+      if (!bridge.seekFrame(inFrame)) {
         _playingSelection = false;
         _playing = false;
         _speed = 0.0;
@@ -471,8 +467,7 @@ class PlayerEngine extends ChangeNotifier {
     }
 
     // Loop is off: park on the inclusive Out frame and finish Play Selection.
-    final outMs = _midpointMsForFrame(media, outFrame);
-    if (!bridge.seekMs(outMs)) {
+    if (!bridge.seekFrame(outFrame)) {
       _playingSelection = false;
       _error = bridge.lastError.isEmpty
           ? 'MLT could not park on the selection Out point.'
@@ -496,7 +491,7 @@ class PlayerEngine extends ChangeNotifier {
   }
 
   bool _handleTrimBoundary({
-    required int positionMs,
+    required int positionFrame,
     required bool playing,
     required bool eof,
     required double previousSpeed,
@@ -510,7 +505,7 @@ class PlayerEngine extends ChangeNotifier {
       return false;
     }
 
-    final currentFrame = _frameAtPosition(media, positionMs);
+    final currentFrame = positionFrame;
     final beyondOut = previousSpeed > 0.0 &&
         (currentFrame > _trimOutFrame ||
             (eof && currentFrame >= _trimOutFrame));
@@ -541,7 +536,7 @@ class PlayerEngine extends ChangeNotifier {
       final restartFrame =
           previousSpeed > 0.0 ? _trimInFrame : _trimOutFrame;
 
-      if (!bridge.seekMs(_midpointMsForFrame(media, restartFrame))) {
+      if (!bridge.seekFrame(restartFrame)) {
         _playing = false;
         _speed = 0.0;
         _positionMs = bridge.positionMs;
@@ -574,7 +569,7 @@ class PlayerEngine extends ChangeNotifier {
       return true;
     }
 
-    if (!bridge.seekMs(_midpointMsForFrame(media, boundaryFrame))) {
+    if (!bridge.seekFrame(boundaryFrame)) {
       _playing = false;
       _speed = 0.0;
       _positionMs = bridge.positionMs;
@@ -596,7 +591,7 @@ class PlayerEngine extends ChangeNotifier {
   }
 
   bool _handleRepeatBoundary({
-    required int positionMs,
+    required int positionFrame,
     required bool eof,
     required double previousSpeed,
   }) {
@@ -610,9 +605,8 @@ class PlayerEngine extends ChangeNotifier {
       return false;
     }
 
-    final frame = ((positionMs / 1000.0) * media.fps).round();
     final atForwardEnd = previousSpeed > 0.0 && eof;
-    final atReverseStart = previousSpeed < 0.0 && frame <= 0;
+    final atReverseStart = previousSpeed < 0.0 && positionFrame <= 0;
 
     if (!atForwardEnd && !atReverseStart) {
       return false;
@@ -689,8 +683,7 @@ class PlayerEngine extends ChangeNotifier {
      * position in the direction of travel, so capture must remember the
      * visible frame first and then explicitly seek back to that exact frame.
      */
-    final position = bridge.positionMs;
-    final frame = _frameAtPosition(media, position)
+    final frame = bridge.positionFrame
         .clamp(_trimInFrame, _trimOutFrame);
 
     if (_playing) {
@@ -702,7 +695,7 @@ class PlayerEngine extends ChangeNotifier {
         return null;
       }
 
-      if (!bridge.seekMs(_midpointMsForFrame(media, frame))) {
+      if (!bridge.seekFrame(frame)) {
         _playingSelection = false;
         _playing = false;
         _speed = 0.0;
@@ -919,7 +912,7 @@ class PlayerEngine extends ChangeNotifier {
 
     bool opened;
     try {
-      opened = await openMediaOnHelperIsolate(path);
+      opened = await openMediaOnHelperIsolate(path, bridge.engineAddress);
     } catch (error) {
       _opening = false;
       _error = error.toString();
@@ -1038,9 +1031,9 @@ class PlayerEngine extends ChangeNotifier {
     _playingSelection = false;
 
     if (!_playing && isTrimmed && media.fps > 0) {
-      final currentFrame = _frameAtPosition(media, bridge.positionMs);
+      final currentFrame = bridge.positionFrame;
       if (currentFrame >= _trimOutFrame) {
-        if (!bridge.seekMs(_midpointMsForFrame(media, _trimInFrame))) {
+        if (!bridge.seekFrame(_trimInFrame)) {
           _error = bridge.lastError;
           notifyListeners();
           return;
@@ -1097,14 +1090,14 @@ class PlayerEngine extends ChangeNotifier {
     _playingSelection = false;
 
     if (isTrimmed && media.fps > 0) {
-      final currentFrame = _frameAtPosition(media, bridge.positionMs);
+      final currentFrame = bridge.positionFrame;
       final atForwardEnd = direction > 0 && currentFrame >= _trimOutFrame;
       final atReverseStart = direction < 0 && currentFrame <= _trimInFrame;
 
       if (atForwardEnd || atReverseStart) {
         final restartFrame =
             direction > 0 ? _trimInFrame : _trimOutFrame;
-        if (!bridge.seekMs(_midpointMsForFrame(media, restartFrame))) {
+        if (!bridge.seekFrame(restartFrame)) {
           _error = bridge.lastError;
           notifyListeners();
           return;
@@ -1156,9 +1149,8 @@ class PlayerEngine extends ChangeNotifier {
         .round()
         .clamp(0, frames - 1);
     final sourceFrame = _trimInFrame + clipFrame;
-    final sourceMs = _midpointMsForFrame(media, sourceFrame);
 
-    if (!bridge.seekMs(sourceMs)) {
+    if (!bridge.seekFrame(sourceFrame)) {
       _error = bridge.lastError;
       notifyListeners();
       return;
@@ -1185,7 +1177,7 @@ class PlayerEngine extends ChangeNotifier {
     _playingSelection = false;
 
     final position = bridge.positionMs;
-    final frame = _frameAtPosition(media, position)
+    final frame = bridge.positionFrame
         .clamp(_trimInFrame, _trimOutFrame);
     final before = _captureEditState();
 
@@ -1221,7 +1213,7 @@ class PlayerEngine extends ChangeNotifier {
     _playingSelection = false;
 
     final position = bridge.positionMs;
-    final frame = _frameAtPosition(media, position)
+    final frame = bridge.positionFrame
         .clamp(_trimInFrame, _trimOutFrame);
     final before = _captureEditState();
 
@@ -1332,7 +1324,7 @@ class PlayerEngine extends ChangeNotifier {
         return;
       }
 
-      if (!bridge.seekMs(_midpointMsForFrame(media, inFrame))) {
+      if (!bridge.seekFrame(inFrame)) {
         _error = bridge.lastError;
         notifyListeners();
         return;
@@ -1354,7 +1346,7 @@ class PlayerEngine extends ChangeNotifier {
       return;
     }
 
-    if (!bridge.seekMs(_midpointMsForFrame(media, inFrame))) {
+    if (!bridge.seekFrame(inFrame)) {
       _playingSelection = false;
       _error = bridge.lastError;
       notifyListeners();
@@ -1418,19 +1410,11 @@ class PlayerEngine extends ChangeNotifier {
       return;
     }
 
-    final parkedMs = bridge.positionMs;
-    final currentFrame = _frameAtPosition(media, parkedMs);
+    final currentFrame = bridge.positionFrame;
     final targetFrame = (currentFrame + deltaFrames)
         .clamp(_trimInFrame, _trimOutFrame);
 
-    // mlt_bridge_seek_ms() converts milliseconds back to a frame with a
-    // truncating cast. Aim at the middle of the requested frame's time span
-    // rather than its boundary so fractional rates such as 23.976 and 29.97
-    // cannot round us onto the preceding frame.
-    final targetMs =
-        (((targetFrame + 0.5) * 1000.0) / media.fps).floor();
-
-    if (!bridge.seekMs(targetMs)) {
+    if (!bridge.seekFrame(targetFrame)) {
       _error = bridge.lastError;
       notifyListeners();
       return;

@@ -7,6 +7,7 @@
 #include <framework/mlt.h>
 #include <glib.h>
 
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,45 +39,6 @@
 /* Engine state                                                              */
 /* ------------------------------------------------------------------------- */
 
-/*
- * engine_mutex guards every field in this block, and every call
- * into MLT that mutates the producer or the consumer.
- *
- * The frame callback never takes this lock. It runs on MLT's own
- * thread while transport calls run on a Dart thread, and taking
- * both locks in the two directions would be a deadlock waiting to
- * happen. Everything the callback needs is published as an atomic
- * instead (see target_width / target_height).
- */
-static GMutex engine_mutex;
-
-static mlt_repository repository = NULL;
-static mlt_profile profile = NULL;
-static mlt_producer producer = NULL;
-static mlt_consumer consumer = NULL;
-
-static int has_video = 0;
-static int has_audio = 0;
-static int is_still = 0;
-
-static double requested_volume = 1.0;
-static int requested_play_all_frames = 0;
-
-/* Read-only stream inspection captured when a producer is opened. */
-static int stream_count = 0;
-static int selected_video_stream_index = -1;
-static int selected_audio_stream_index = -1;
-
-static char video_codec_name[128] = "";
-static char video_codec_long_name[256] = "";
-static char audio_codec_name[128] = "";
-static char audio_codec_long_name[256] = "";
-
-static char video_pixel_format[128] = "";
-static int video_colorspace = -1;
-static int video_color_trc = -1;
-static char video_color_range[32] = "";
-
 typedef struct _StreamInspection {
     char type[32];
     char codec_name[128];
@@ -89,15 +51,129 @@ typedef struct _StreamInspection {
     int64_t bit_rate;
 } StreamInspection;
 
-static StreamInspection *stream_inspection = NULL;
-static int stream_inspection_count = 0;
+typedef struct _FrameSlot {
+    uint8_t *data;
+    size_t capacity;
+    int width;
+    int height;
+} FrameSlot;
 
-static char last_error[512] = "";
-static char source_timecode[128] = "";
+struct _MltBridgeEngine {
+    GMutex e_mutex;
 
-/* Published for the frame callback without taking engine_mutex. */
-static gint target_width = 0;
-static gint target_height = 0;
+    mlt_profile e_profile;
+    mlt_producer e_producer;
+    mlt_consumer e_consumer;
+
+    int e_has_video;
+    int e_has_audio;
+    int e_is_still;
+
+    double e_requested_volume;
+    int e_requested_play_all_frames;
+    gint e_preview_enabled;
+
+    int e_stream_count;
+    int e_selected_video_stream_index;
+    int e_selected_audio_stream_index;
+
+    char e_video_codec_name[128];
+    char e_video_codec_long_name[256];
+    char e_audio_codec_name[128];
+    char e_audio_codec_long_name[256];
+
+    char e_video_pixel_format[128];
+    int e_video_colorspace;
+    int e_video_color_trc;
+    char e_video_color_range[32];
+
+    StreamInspection *e_stream_inspection;
+    int e_stream_inspection_count;
+
+    char e_last_error[512];
+    char e_source_timecode[128];
+
+    /* Published for the MLT frame callback without taking e_mutex. */
+    gint e_target_width;
+    gint e_target_height;
+
+    GMutex e_frame_mutex;
+    GCond e_frame_idle_cond;
+    int e_active_frame_readers;
+
+    FrameSlot e_slots[MLT_BRIDGE_SLOT_COUNT];
+    int e_slot_write;
+    int e_slot_ready;
+    int e_slot_display;
+    int e_slot_ready_valid;
+    int64_t e_last_frame_position;
+};
+
+/*
+ * The public C ABI keeps the existing operation names while engine ownership
+ * becomes explicit through an opaque handle. Each calling thread activates
+ * the handle it is about to use. This keeps the hot-path code compact and,
+ * because GPrivate is thread-local, allows different engines to be driven on
+ * different threads without reintroducing process-global playback state.
+ */
+static GPrivate current_engine_key = G_PRIVATE_INIT(NULL);
+
+static MltBridgeEngine *current_engine(void)
+{
+    return (MltBridgeEngine *)g_private_get(&current_engine_key);
+}
+
+static void activate_engine_local(MltBridgeEngine *engine)
+{
+    g_private_set(&current_engine_key, engine);
+}
+
+/* Engine-local aliases used by the existing playback implementation. */
+#define engine_mutex (current_engine()->e_mutex)
+#define profile (current_engine()->e_profile)
+#define producer (current_engine()->e_producer)
+#define consumer (current_engine()->e_consumer)
+#define has_video (current_engine()->e_has_video)
+#define has_audio (current_engine()->e_has_audio)
+#define is_still (current_engine()->e_is_still)
+#define requested_volume (current_engine()->e_requested_volume)
+#define requested_play_all_frames (current_engine()->e_requested_play_all_frames)
+#define stream_count (current_engine()->e_stream_count)
+#define selected_video_stream_index (current_engine()->e_selected_video_stream_index)
+#define selected_audio_stream_index (current_engine()->e_selected_audio_stream_index)
+#define video_codec_name (current_engine()->e_video_codec_name)
+#define video_codec_long_name (current_engine()->e_video_codec_long_name)
+#define audio_codec_name (current_engine()->e_audio_codec_name)
+#define audio_codec_long_name (current_engine()->e_audio_codec_long_name)
+#define video_pixel_format (current_engine()->e_video_pixel_format)
+#define video_colorspace (current_engine()->e_video_colorspace)
+#define video_color_trc (current_engine()->e_video_color_trc)
+#define video_color_range (current_engine()->e_video_color_range)
+#define stream_inspection (current_engine()->e_stream_inspection)
+#define stream_inspection_count (current_engine()->e_stream_inspection_count)
+#define last_error (current_engine()->e_last_error)
+#define source_timecode (current_engine()->e_source_timecode)
+#define target_width (current_engine()->e_target_width)
+#define target_height (current_engine()->e_target_height)
+#define frame_mutex (current_engine()->e_frame_mutex)
+#define frame_idle_cond (current_engine()->e_frame_idle_cond)
+#define active_frame_readers (current_engine()->e_active_frame_readers)
+#define slots (current_engine()->e_slots)
+#define slot_write (current_engine()->e_slot_write)
+#define slot_ready (current_engine()->e_slot_ready)
+#define slot_display (current_engine()->e_slot_display)
+#define slot_ready_valid (current_engine()->e_slot_ready_valid)
+#define last_frame_position (current_engine()->e_last_frame_position)
+
+/* ------------------------------------------------------------------------- */
+/* Process-wide state                                                        */
+/* ------------------------------------------------------------------------- */
+
+static GMutex factory_mutex;
+static mlt_repository repository = NULL;
+static int engine_count = 0;
+static int factory_shutdown_requested = 0;
+static char init_error[512] = "";
 
 /* ------------------------------------------------------------------------- */
 /* Export state                                                              */
@@ -131,53 +207,18 @@ typedef struct _ExportJob {
 } ExportJob;
 
 /* ------------------------------------------------------------------------- */
-/* Video frame state                                                         */
-/* ------------------------------------------------------------------------- */
-
-typedef struct _FrameSlot {
-    uint8_t *data;
-    size_t capacity;
-    int width;
-    int height;
-} FrameSlot;
-
-/*
- * frame_mutex guards the slot indices below, and nothing else.
- *
- * Each of the three slots is owned outright by exactly one party at
- * any moment: the MLT frame callback owns slot_write, the Flutter
- * raster thread owns slot_display, and slot_ready is the handoff
- * point. Because ownership is exclusive, the expensive work (the
- * copy out of MLT, and the upload into OpenGL) happens with no lock
- * held. Only the index swap is contended.
- */
-static GMutex frame_mutex;
-static GCond frame_idle_cond;
-static int active_frame_readers = 0;
-
-static FrameSlot slots[MLT_BRIDGE_SLOT_COUNT];
-
-static int slot_write = 0;
-static int slot_ready = 1;
-static int slot_display = 2;
-
-static int slot_ready_valid = 0;
-
-static int64_t last_frame_position = -1;
-
-/* ------------------------------------------------------------------------- */
 /* Flutter texture state                                                     */
 /* ------------------------------------------------------------------------- */
 
 /*
- * texture_mutex guards the registrar and texture pointers, which are
- * written from the platform thread during registration and read from
- * the MLT thread on every frame.
+ * The Flutter registrar and GL texture are process-wide because the Linux
+ * runner owns one Flutter view. texture_engine identifies which opaque engine
+ * currently feeds that view; switching it does not move playback state back
+ * to globals.
  */
 static GMutex texture_mutex;
-
 static FlTextureRegistrar *texture_registrar = NULL;
-
+static MltBridgeEngine *texture_engine = NULL;
 static gint frame_notification_pending = 0;
 
 typedef struct _MltVideoTexture {
@@ -210,9 +251,7 @@ static gsize locks_initialized = 0;
 static void ensure_locks(void)
 {
     if (g_once_init_enter(&locks_initialized)) {
-        g_mutex_init(&engine_mutex);
-        g_mutex_init(&frame_mutex);
-        g_cond_init(&frame_idle_cond);
+        g_mutex_init(&factory_mutex);
         g_mutex_init(&texture_mutex);
         g_mutex_init(&export_mutex);
 
@@ -239,6 +278,43 @@ static void set_error(
         "%s",
         message
     );
+}
+
+/*
+ * Copy a UTF-8 string into caller-owned storage. The return value is the
+ * required capacity including the trailing NUL. Passing NULL/0 therefore
+ * performs a size query without exposing bridge-owned storage.
+ */
+static int copy_string_value(
+    const char *value,
+    char *buffer,
+    int capacity)
+{
+    const char *source = value != NULL ? value : "";
+    const size_t length = strlen(source);
+
+    if (length >= (size_t)INT_MAX) {
+        return 0;
+    }
+
+    const int required = (int)length + 1;
+
+    if (buffer == NULL || capacity <= 0) {
+        return required;
+    }
+
+    const size_t writable =
+        capacity > 1 ? (size_t)(capacity - 1) : 0;
+    const size_t copy_length =
+        length < writable ? length : writable;
+
+    if (copy_length > 0) {
+        memcpy(buffer, source, copy_length);
+    }
+
+    buffer[copy_length] = '\0';
+
+    return required;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -322,10 +398,22 @@ static gboolean mlt_video_texture_populate(
     ensure_locks();
 
     /*
-     * Claim the newest completed frame. The swap is the only part
-     * that needs the lock: after it returns, slot_display belongs
-     * to this thread alone until the next call.
+     * Claim the currently selected engine while texture_mutex prevents that
+     * engine from being detached and destroyed. Increment its frame-reader
+     * count before releasing texture_mutex so engine destruction can safely
+     * wait for this raster upload to finish.
      */
+    g_mutex_lock(&texture_mutex);
+
+    MltBridgeEngine *engine = texture_engine;
+
+    if (engine == NULL) {
+        g_mutex_unlock(&texture_mutex);
+        return FALSE;
+    }
+
+    activate_engine_local(engine);
+
     g_mutex_lock(&frame_mutex);
 
     if (slot_ready_valid) {
@@ -344,6 +432,7 @@ static gboolean mlt_video_texture_populate(
     active_frame_readers += 1;
 
     g_mutex_unlock(&frame_mutex);
+    g_mutex_unlock(&texture_mutex);
 
     FrameSlot *slot =
         &slots[display_index];
@@ -561,7 +650,15 @@ static void on_consumer_frame_show(
     mlt_event_data event_data)
 {
     (void)owner;
-    (void)listener_data;
+
+    MltBridgeEngine *engine =
+        (MltBridgeEngine *)listener_data;
+
+    if (engine == NULL) {
+        return;
+    }
+
+    activate_engine_local(engine);
 
     mlt_frame frame =
         mlt_event_data_to_frame(
@@ -687,8 +784,10 @@ static void on_consumer_frame_show(
     notify_flutter_frame_available();
 }
 
-/* close_consumer_locked() is defined with the producer helpers below. */
+/* Preview-consumer helpers are defined with the producer helpers below. */
 static void close_consumer_locked(void);
+static int create_consumer_locked(void);
+static void refresh_locked(void);
 
 /* ------------------------------------------------------------------------- */
 /* Flutter texture registration                                              */
@@ -768,18 +867,21 @@ void mlt_bridge_unregister_flutter_texture(void)
     ensure_locks();
 
     /*
-     * Slot storage is shared with the MLT frame callback. Stop and join the
-     * consumer before detaching the Flutter texture so the writer cannot be
-     * inside realloc()/memcpy() when release_slots() frees the buffers.
-     *
-     * This is intentionally safe to call after mlt_bridge_shutdown(): in that
-     * case the consumer is already NULL and close_consumer_locked() is a no-op.
+     * Detach the engine from the raster thread first. A populate call that
+     * already claimed it incremented active_frame_readers while holding
+     * texture_mutex, so release_slots() below can wait it out safely.
      */
-    g_mutex_lock(&engine_mutex);
-    close_consumer_locked();
-    g_mutex_unlock(&engine_mutex);
-
     g_mutex_lock(&texture_mutex);
+
+    MltBridgeEngine *engine = texture_engine;
+    texture_engine = NULL;
+
+    if (engine != NULL) {
+        g_atomic_int_set(
+            &engine->e_preview_enabled,
+            0
+        );
+    }
 
     FlTextureRegistrar *local_registrar =
         texture_registrar;
@@ -791,6 +893,16 @@ void mlt_bridge_unregister_flutter_texture(void)
     video_texture = NULL;
 
     g_mutex_unlock(&texture_mutex);
+
+    if (engine != NULL) {
+        activate_engine_local(engine);
+
+        g_mutex_lock(&engine_mutex);
+        close_consumer_locked();
+        g_mutex_unlock(&engine_mutex);
+
+        release_slots();
+    }
 
     if (local_registrar != NULL &&
         local_texture != NULL) {
@@ -807,8 +919,139 @@ void mlt_bridge_unregister_flutter_texture(void)
     if (local_registrar != NULL) {
         g_object_unref(local_registrar);
     }
+}
 
-    release_slots();
+MLT_BRIDGE_EXPORT
+int mlt_bridge_engine_set_texture_source(
+    MltBridgeEngine *engine)
+{
+    if (engine == NULL) {
+        return 0;
+    }
+
+    ensure_locks();
+
+    MltBridgeEngine *caller_engine =
+        current_engine();
+
+    /*
+     * MLT 7.22's sdl2_audio consumer calls SDL_QuitSubSystem(SDL_INIT_AUDIO)
+     * when it stops. Two live preview consumers are therefore not safely
+     * independent: stopping one tears the SDL audio subsystem out from under
+     * the other. Opaque engines may coexist, but exactly one engine owns the
+     * live preview consumer at a time.
+     *
+     * Detach the previous texture source first, then stop its consumer before
+     * enabling the replacement. This makes the ownership rule enforceable in
+     * native code instead of relying on Dart to avoid overlapping consumers.
+     */
+    g_mutex_lock(&texture_mutex);
+
+    MltBridgeEngine *previous =
+        texture_engine;
+
+    if (previous == engine) {
+        g_atomic_int_set(
+            &engine->e_preview_enabled,
+            1
+        );
+        g_mutex_unlock(&texture_mutex);
+        return 1;
+    }
+
+    texture_engine = NULL;
+
+    if (previous != NULL) {
+        g_atomic_int_set(
+            &previous->e_preview_enabled,
+            0
+        );
+    }
+
+    g_mutex_unlock(&texture_mutex);
+
+    if (previous != NULL) {
+        activate_engine_local(previous);
+
+        g_mutex_lock(&previous->e_mutex);
+
+        if (previous->e_producer != NULL) {
+            mlt_producer_set_speed(
+                previous->e_producer,
+                0.0
+            );
+        }
+
+        close_consumer_locked();
+
+        g_mutex_unlock(&previous->e_mutex);
+
+        release_slots();
+    }
+
+    g_atomic_int_set(
+        &engine->e_preview_enabled,
+        1
+    );
+
+    g_mutex_lock(&texture_mutex);
+    texture_engine = engine;
+    g_mutex_unlock(&texture_mutex);
+
+    /*
+     * A background engine may already have a producer loaded when it becomes
+     * the viewer. Start its preview consumer only after the previous viewer
+     * has relinquished SDL audio.
+     */
+    activate_engine_local(engine);
+
+    g_mutex_lock(&engine->e_mutex);
+
+    int preview_ready = 1;
+
+    if (engine->e_producer != NULL &&
+        engine->e_consumer == NULL) {
+        preview_ready =
+            create_consumer_locked();
+
+        if (preview_ready &&
+            mlt_consumer_start(engine->e_consumer) != 0) {
+            set_error(
+                "MLT could not start the preview consumer."
+            );
+            close_consumer_locked();
+            preview_ready = 0;
+        }
+
+        if (preview_ready) {
+            refresh_locked();
+        }
+    }
+
+    g_mutex_unlock(&engine->e_mutex);
+
+    if (!preview_ready) {
+        g_mutex_lock(&texture_mutex);
+        if (texture_engine == engine) {
+            texture_engine = NULL;
+        }
+        g_mutex_unlock(&texture_mutex);
+
+        g_atomic_int_set(
+            &engine->e_preview_enabled,
+            0
+        );
+    }
+
+    if (caller_engine != NULL) {
+        activate_engine_local(caller_engine);
+    } else if (preview_ready) {
+        activate_engine_local(engine);
+    } else {
+        activate_engine_local(NULL);
+    }
+
+    return preview_ready;
 }
 
 MLT_BRIDGE_EXPORT
@@ -1289,6 +1532,15 @@ static const StreamInspection *stream_inspection_at_locked(int index)
 
 static int create_consumer_locked(void)
 {
+    if (!g_atomic_int_get(
+            &current_engine()->e_preview_enabled)) {
+        set_error(
+            "This engine is not selected as the preview source."
+        );
+
+        return 0;
+    }
+
     if (producer == NULL ||
         profile == NULL) {
         set_error("No producer is loaded.");
@@ -1407,7 +1659,7 @@ static int create_consumer_locked(void)
 
     mlt_events_listen(
         properties,
-        NULL,
+        current_engine(),
         "consumer-frame-show",
         (mlt_listener)on_consumer_frame_show
     );
@@ -2732,51 +2984,182 @@ static void cancel_export_and_join(void)
 /* Lifecycle                                                                 */
 /* ------------------------------------------------------------------------- */
 
+static void set_init_error_locked(const char *message)
+{
+    if (message == NULL) {
+        init_error[0] = '\0';
+        return;
+    }
+
+    snprintf(
+        init_error,
+        sizeof(init_error),
+        "%s",
+        message
+    );
+}
+
 MLT_BRIDGE_EXPORT
 int mlt_bridge_init(void)
 {
     ensure_locks();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&factory_mutex);
 
-    if (repository != NULL &&
-        profile != NULL) {
-        g_mutex_unlock(&engine_mutex);
-
+    if (repository != NULL) {
+        factory_shutdown_requested = 0;
+        set_init_error_locked(NULL);
+        g_mutex_unlock(&factory_mutex);
         return 1;
     }
 
-    if (repository == NULL) {
-        repository = mlt_factory_init(NULL);
-    }
+    repository = mlt_factory_init(NULL);
 
     if (repository == NULL) {
-        set_error("Failed to initialize MLT.");
-
-        g_mutex_unlock(&engine_mutex);
-
+        set_init_error_locked("Failed to initialize MLT.");
+        g_mutex_unlock(&factory_mutex);
         return 0;
     }
 
-    if (profile == NULL) {
-        profile = mlt_profile_init(NULL);
+    factory_shutdown_requested = 0;
+    set_init_error_locked(NULL);
+
+    g_mutex_unlock(&factory_mutex);
+
+    return 1;
+}
+
+MLT_BRIDGE_EXPORT
+MltBridgeEngine *mlt_bridge_engine_create(void)
+{
+    ensure_locks();
+
+    g_mutex_lock(&factory_mutex);
+
+    if (repository == NULL) {
+        set_init_error_locked("MLT is not initialized.");
+        g_mutex_unlock(&factory_mutex);
+        return NULL;
     }
 
-    if (profile == NULL) {
-        set_error(
-            "Failed to create the MLT profile."
-        );
+    MltBridgeEngine *engine =
+        g_new0(MltBridgeEngine, 1);
 
-        g_mutex_unlock(&engine_mutex);
+    if (engine == NULL) {
+        set_init_error_locked("Could not allocate an MLT engine.");
+        g_mutex_unlock(&factory_mutex);
+        return NULL;
+    }
 
+    g_mutex_init(&engine->e_mutex);
+    g_mutex_init(&engine->e_frame_mutex);
+    g_cond_init(&engine->e_frame_idle_cond);
+
+    engine->e_requested_volume = 1.0;
+    engine->e_selected_video_stream_index = -1;
+    engine->e_selected_audio_stream_index = -1;
+    engine->e_video_colorspace = -1;
+    engine->e_video_color_trc = -1;
+    engine->e_slot_write = 0;
+    engine->e_slot_ready = 1;
+    engine->e_slot_display = 2;
+    engine->e_last_frame_position = -1;
+
+    engine->e_profile = mlt_profile_init(NULL);
+
+    if (engine->e_profile == NULL) {
+        g_cond_clear(&engine->e_frame_idle_cond);
+        g_mutex_clear(&engine->e_frame_mutex);
+        g_mutex_clear(&engine->e_mutex);
+        g_free(engine);
+
+        set_init_error_locked("Failed to create the MLT engine profile.");
+        g_mutex_unlock(&factory_mutex);
+        return NULL;
+    }
+
+    engine_count += 1;
+    set_init_error_locked(NULL);
+
+    g_mutex_unlock(&factory_mutex);
+
+    return engine;
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_engine_activate(
+    MltBridgeEngine *engine)
+{
+    if (engine == NULL) {
         return 0;
     }
 
-    set_error(NULL);
+    activate_engine_local(engine);
+    return 1;
+}
+
+MLT_BRIDGE_EXPORT
+void mlt_bridge_engine_destroy(
+    MltBridgeEngine *engine)
+{
+    if (engine == NULL) {
+        return;
+    }
+
+    ensure_locks();
+
+    /* Prevent any new Flutter raster callback from claiming this engine. */
+    g_mutex_lock(&texture_mutex);
+    if (texture_engine == engine) {
+        texture_engine = NULL;
+    }
+    g_atomic_int_set(
+        &engine->e_preview_enabled,
+        0
+    );
+    g_mutex_unlock(&texture_mutex);
+
+    activate_engine_local(engine);
+
+    g_mutex_lock(&engine_mutex);
+
+    close_producer_locked();
+
+    if (profile != NULL) {
+        mlt_profile_close(profile);
+        profile = NULL;
+    }
 
     g_mutex_unlock(&engine_mutex);
 
-    return 1;
+    /* Wait for a raster upload that claimed the engine before detachment. */
+    release_slots();
+
+    if (current_engine() == engine) {
+        activate_engine_local(NULL);
+    }
+
+    g_cond_clear(&engine->e_frame_idle_cond);
+    g_mutex_clear(&engine->e_frame_mutex);
+    g_mutex_clear(&engine->e_mutex);
+
+    g_free(engine);
+
+    g_mutex_lock(&factory_mutex);
+
+    if (engine_count > 0) {
+        engine_count -= 1;
+    }
+
+    if (engine_count == 0 &&
+        factory_shutdown_requested &&
+        repository != NULL) {
+        mlt_factory_close();
+        repository = NULL;
+        factory_shutdown_requested = 0;
+    }
+
+    g_mutex_unlock(&factory_mutex);
 }
 
 MLT_BRIDGE_EXPORT
@@ -2786,9 +3169,28 @@ const char *mlt_bridge_version(void)
 }
 
 MLT_BRIDGE_EXPORT
-const char *mlt_bridge_last_error(void)
+int mlt_bridge_last_error_copy(
+    char *buffer,
+    int capacity)
 {
-    return last_error;
+    ensure_locks();
+
+    MltBridgeEngine *engine = current_engine();
+
+    if (engine != NULL) {
+        g_mutex_lock(&engine->e_mutex);
+        const int required =
+            copy_string_value(engine->e_last_error, buffer, capacity);
+        g_mutex_unlock(&engine->e_mutex);
+        return required;
+    }
+
+    g_mutex_lock(&factory_mutex);
+    const int required =
+        copy_string_value(init_error, buffer, capacity);
+    g_mutex_unlock(&factory_mutex);
+
+    return required;
 }
 
 MLT_BRIDGE_EXPORT
@@ -2796,31 +3198,21 @@ void mlt_bridge_shutdown(void)
 {
     ensure_locks();
 
-    /*
-     * The export worker uses the process-wide MLT factory. It must be fully
-     * joined before playback tears that factory down.
-     */
+    /* The background exporter shares the process-wide MLT factory. */
     cancel_export_and_join();
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&factory_mutex);
 
-    close_producer_locked();
+    factory_shutdown_requested = 1;
 
-    if (profile != NULL) {
-        mlt_profile_close(profile);
-
-        profile = NULL;
-    }
-
-    if (repository != NULL) {
+    if (engine_count == 0 &&
+        repository != NULL) {
         mlt_factory_close();
-
         repository = NULL;
+        factory_shutdown_requested = 0;
     }
 
-    g_mutex_unlock(&engine_mutex);
-
-    release_slots();
+    g_mutex_unlock(&factory_mutex);
 }
 
 
@@ -2849,9 +3241,9 @@ static int start_export_job(
         return 0;
     }
 
-    g_mutex_lock(&engine_mutex);
+    g_mutex_lock(&factory_mutex);
     const int initialized = repository != NULL;
-    g_mutex_unlock(&engine_mutex);
+    g_mutex_unlock(&factory_mutex);
 
     if (!initialized) {
         g_mutex_lock(&export_mutex);
@@ -3043,15 +3435,18 @@ int mlt_bridge_export_succeeded(void)
 }
 
 MLT_BRIDGE_EXPORT
-const char *mlt_bridge_export_error(void)
+int mlt_bridge_export_error_copy(
+    char *buffer,
+    int capacity)
 {
     ensure_locks();
 
     g_mutex_lock(&export_mutex);
-    const char *result = export_error;
+    const int required =
+        copy_string_value(export_error, buffer, capacity);
     g_mutex_unlock(&export_mutex);
 
-    return result;
+    return required;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -3392,28 +3787,31 @@ int mlt_bridge_open(
     mlt_producer_set_speed(producer, 0.0);
     mlt_producer_seek(producer, 0);
 
-    if (!create_consumer_locked()) {
-        close_producer_locked();
+    if (g_atomic_int_get(
+            &current_engine()->e_preview_enabled)) {
+        if (!create_consumer_locked()) {
+            close_producer_locked();
 
-        g_mutex_unlock(&engine_mutex);
+            g_mutex_unlock(&engine_mutex);
 
-        return 0;
+            return 0;
+        }
+
+        if (mlt_consumer_start(consumer) != 0) {
+            set_error(
+                "MLT could not start the "
+                "audio and preview consumer."
+            );
+
+            close_producer_locked();
+
+            g_mutex_unlock(&engine_mutex);
+
+            return 0;
+        }
+
+        refresh_locked();
     }
-
-    if (mlt_consumer_start(consumer) != 0) {
-        set_error(
-            "MLT could not start the "
-            "audio and preview consumer."
-        );
-
-        close_producer_locked();
-
-        g_mutex_unlock(&engine_mutex);
-
-        return 0;
-    }
-
-    refresh_locked();
 
     set_error(NULL);
 
@@ -3756,37 +4154,11 @@ int mlt_bridge_pause(void)
     return 1;
 }
 
-MLT_BRIDGE_EXPORT
-int mlt_bridge_seek_ms(
-    int64_t milliseconds)
+static int seek_frame_locked(mlt_position frame)
 {
-    ensure_locks();
-
-    g_mutex_lock(&engine_mutex);
-
     if (producer == NULL) {
-        g_mutex_unlock(&engine_mutex);
-
         return 0;
     }
-
-    const double fps =
-        mlt_producer_get_fps(producer);
-
-    if (fps <= 0.0) {
-        set_error(
-            "Producer has an invalid frame rate."
-        );
-
-        g_mutex_unlock(&engine_mutex);
-
-        return 0;
-    }
-
-    mlt_position frame =
-        (mlt_position)(
-            ((double)milliseconds / 1000.0) * fps
-        );
 
     const mlt_position length =
         mlt_producer_get_length(producer);
@@ -3806,54 +4178,30 @@ int mlt_bridge_seek_ms(
 
     if (mlt_producer_seek(producer, frame) != 0) {
         set_error("MLT seek failed.");
-
-        g_mutex_unlock(&engine_mutex);
-
         return 0;
     }
 
     /*
-     * A seek does not restart the consumer. Purge plus refresh is
-     * the supported way to make a running or paused consumer show
-     * the new position.
+     * A seek does not restart the consumer. Purge plus refresh is the
+     * supported way to make a running or paused consumer show the new
+     * position.
      */
     refresh_locked();
-
     set_error(NULL);
-
-    g_mutex_unlock(&engine_mutex);
-
-    invalidate_frames();
 
     return 1;
 }
 
-MLT_BRIDGE_EXPORT
-int64_t mlt_bridge_position_ms(void)
+static mlt_position visible_position_locked(void)
 {
-    ensure_locks();
-
-    g_mutex_lock(&engine_mutex);
-
     if (producer == NULL) {
-        g_mutex_unlock(&engine_mutex);
-
-        return 0;
-    }
-
-    const double fps =
-        mlt_producer_get_fps(producer);
-
-    if (fps <= 0.0) {
-        g_mutex_unlock(&engine_mutex);
-
         return 0;
     }
 
     /*
-     * While playing, the consumer knows what the viewer is actually
-     * looking at. While paused or seeking, the producer holds the
-     * position we just asked for and the consumer is stale.
+     * While playing, the consumer knows the frame the viewer is actually
+     * seeing. While paused or seeking, the producer holds the requested
+     * position and the consumer may still be stale.
      */
     const int playing =
         consumer != NULL &&
@@ -3868,6 +4216,106 @@ int64_t mlt_bridge_position_ms(void)
     if (position < 0) {
         position = 0;
     }
+
+    const mlt_position length =
+        mlt_producer_get_length(producer);
+
+    if (length > 0 && position >= length) {
+        position = length - 1;
+    }
+
+    return position;
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_seek_frame(
+    int64_t frame)
+{
+    ensure_locks();
+
+    g_mutex_lock(&engine_mutex);
+    const int result = seek_frame_locked((mlt_position)frame);
+    g_mutex_unlock(&engine_mutex);
+
+    if (result) {
+        invalidate_frames();
+    }
+
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+int64_t mlt_bridge_position_frame(void)
+{
+    ensure_locks();
+
+    g_mutex_lock(&engine_mutex);
+    const int64_t result =
+        (int64_t)visible_position_locked();
+    g_mutex_unlock(&engine_mutex);
+
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_seek_ms(
+    int64_t milliseconds)
+{
+    ensure_locks();
+
+    g_mutex_lock(&engine_mutex);
+
+    if (producer == NULL) {
+        g_mutex_unlock(&engine_mutex);
+        return 0;
+    }
+
+    const double fps =
+        mlt_producer_get_fps(producer);
+
+    if (fps <= 0.0) {
+        set_error("Producer has an invalid frame rate.");
+        g_mutex_unlock(&engine_mutex);
+        return 0;
+    }
+
+    const mlt_position frame =
+        (mlt_position)(
+            ((double)milliseconds / 1000.0) * fps
+        );
+
+    const int result = seek_frame_locked(frame);
+    g_mutex_unlock(&engine_mutex);
+
+    if (result) {
+        invalidate_frames();
+    }
+
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+int64_t mlt_bridge_position_ms(void)
+{
+    ensure_locks();
+
+    g_mutex_lock(&engine_mutex);
+
+    if (producer == NULL) {
+        g_mutex_unlock(&engine_mutex);
+        return 0;
+    }
+
+    const double fps =
+        mlt_producer_get_fps(producer);
+
+    if (fps <= 0.0) {
+        g_mutex_unlock(&engine_mutex);
+        return 0;
+    }
+
+    const mlt_position position =
+        visible_position_locked();
 
     g_mutex_unlock(&engine_mutex);
 
@@ -4032,95 +4480,139 @@ int mlt_bridge_audio_stream_index(void)
 }
 
 MLT_BRIDGE_EXPORT
-const char *mlt_bridge_video_codec_name(void)
+int mlt_bridge_video_codec_name_copy(
+    char *buffer,
+    int capacity)
 {
     ensure_locks();
-
     g_mutex_lock(&engine_mutex);
-    const char *result = producer != NULL ? video_codec_name : "";
+    const int required = copy_string_value(
+        producer != NULL ? video_codec_name : "",
+        buffer,
+        capacity
+    );
     g_mutex_unlock(&engine_mutex);
-
-    return result;
+    return required;
 }
 
 MLT_BRIDGE_EXPORT
-const char *mlt_bridge_video_codec_long_name(void)
+int mlt_bridge_video_codec_long_name_copy(
+    char *buffer,
+    int capacity)
 {
     ensure_locks();
-
     g_mutex_lock(&engine_mutex);
-    const char *result = producer != NULL ? video_codec_long_name : "";
+    const int required = copy_string_value(
+        producer != NULL ? video_codec_long_name : "",
+        buffer,
+        capacity
+    );
     g_mutex_unlock(&engine_mutex);
-
-    return result;
+    return required;
 }
 
 MLT_BRIDGE_EXPORT
-const char *mlt_bridge_audio_codec_name(void)
+int mlt_bridge_audio_codec_name_copy(
+    char *buffer,
+    int capacity)
 {
     ensure_locks();
-
     g_mutex_lock(&engine_mutex);
-    const char *result = producer != NULL ? audio_codec_name : "";
+    const int required = copy_string_value(
+        producer != NULL ? audio_codec_name : "",
+        buffer,
+        capacity
+    );
     g_mutex_unlock(&engine_mutex);
-
-    return result;
+    return required;
 }
 
 MLT_BRIDGE_EXPORT
-const char *mlt_bridge_audio_codec_long_name(void)
+int mlt_bridge_audio_codec_long_name_copy(
+    char *buffer,
+    int capacity)
 {
     ensure_locks();
-
     g_mutex_lock(&engine_mutex);
-    const char *result = producer != NULL ? audio_codec_long_name : "";
+    const int required = copy_string_value(
+        producer != NULL ? audio_codec_long_name : "",
+        buffer,
+        capacity
+    );
     g_mutex_unlock(&engine_mutex);
-
-    return result;
+    return required;
 }
 
 MLT_BRIDGE_EXPORT
-const char *mlt_bridge_stream_type(int index)
+int mlt_bridge_stream_type_copy(
+    int index,
+    char *buffer,
+    int capacity)
 {
     ensure_locks();
     g_mutex_lock(&engine_mutex);
     const StreamInspection *info = stream_inspection_at_locked(index);
-    const char *result = info != NULL ? info->type : "";
+    const int required = copy_string_value(
+        info != NULL ? info->type : "",
+        buffer,
+        capacity
+    );
     g_mutex_unlock(&engine_mutex);
-    return result;
+    return required;
 }
 
 MLT_BRIDGE_EXPORT
-const char *mlt_bridge_stream_codec_name(int index)
+int mlt_bridge_stream_codec_name_copy(
+    int index,
+    char *buffer,
+    int capacity)
 {
     ensure_locks();
     g_mutex_lock(&engine_mutex);
     const StreamInspection *info = stream_inspection_at_locked(index);
-    const char *result = info != NULL ? info->codec_name : "";
+    const int required = copy_string_value(
+        info != NULL ? info->codec_name : "",
+        buffer,
+        capacity
+    );
     g_mutex_unlock(&engine_mutex);
-    return result;
+    return required;
 }
 
 MLT_BRIDGE_EXPORT
-const char *mlt_bridge_stream_codec_long_name(int index)
+int mlt_bridge_stream_codec_long_name_copy(
+    int index,
+    char *buffer,
+    int capacity)
 {
     ensure_locks();
     g_mutex_lock(&engine_mutex);
     const StreamInspection *info = stream_inspection_at_locked(index);
-    const char *result = info != NULL ? info->codec_long_name : "";
+    const int required = copy_string_value(
+        info != NULL ? info->codec_long_name : "",
+        buffer,
+        capacity
+    );
     g_mutex_unlock(&engine_mutex);
-    return result;
+    return required;
 }
 
 MLT_BRIDGE_EXPORT
-const char *mlt_bridge_stream_language(int index)
+int mlt_bridge_stream_language_copy(
+    int index,
+    char *buffer,
+    int capacity)
 {
     ensure_locks();
     g_mutex_lock(&engine_mutex);
     const StreamInspection *info = stream_inspection_at_locked(index);
-    const char *result = info != NULL ? info->language : "";
+    const int required = copy_string_value(
+        info != NULL ? info->language : "",
+        buffer,
+        capacity
+    );
     g_mutex_unlock(&engine_mutex);
-    return result;
+    return required;
 }
 
 MLT_BRIDGE_EXPORT
@@ -4179,15 +4671,19 @@ int64_t mlt_bridge_stream_bit_rate(int index)
 }
 
 MLT_BRIDGE_EXPORT
-const char *mlt_bridge_video_pixel_format(void)
+int mlt_bridge_video_pixel_format_copy(
+    char *buffer,
+    int capacity)
 {
     ensure_locks();
-
     g_mutex_lock(&engine_mutex);
-    const char *result = producer != NULL ? video_pixel_format : "";
+    const int required = copy_string_value(
+        producer != NULL ? video_pixel_format : "",
+        buffer,
+        capacity
+    );
     g_mutex_unlock(&engine_mutex);
-
-    return result;
+    return required;
 }
 
 MLT_BRIDGE_EXPORT
@@ -4215,32 +4711,35 @@ int mlt_bridge_video_color_trc(void)
 }
 
 MLT_BRIDGE_EXPORT
-const char *mlt_bridge_video_color_range(void)
+int mlt_bridge_video_color_range_copy(
+    char *buffer,
+    int capacity)
 {
     ensure_locks();
-
     g_mutex_lock(&engine_mutex);
-    const char *result = producer != NULL ? video_color_range : "";
+    const int required = copy_string_value(
+        producer != NULL ? video_color_range : "",
+        buffer,
+        capacity
+    );
     g_mutex_unlock(&engine_mutex);
-
-    return result;
+    return required;
 }
 
 MLT_BRIDGE_EXPORT
-const char *mlt_bridge_source_timecode(void)
+int mlt_bridge_source_timecode_copy(
+    char *buffer,
+    int capacity)
 {
     ensure_locks();
-
     g_mutex_lock(&engine_mutex);
-
-    const char *result =
-        producer != NULL
-            ? source_timecode
-            : "";
-
+    const int required = copy_string_value(
+        producer != NULL ? source_timecode : "",
+        buffer,
+        capacity
+    );
     g_mutex_unlock(&engine_mutex);
-
-    return result;
+    return required;
 }
 
 MLT_BRIDGE_EXPORT

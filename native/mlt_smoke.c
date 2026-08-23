@@ -30,11 +30,31 @@ static const char *junk_path = NULL;
 static const char *still_path = NULL;
 
 static GMainLoop *loop = NULL;
+static MltBridgeEngine *engine = NULL;
 
 static int step = 0;
 static int failures = 0;
 
 static int64_t position_before_seek = 0;
+
+static void copy_last_error(
+    char *buffer,
+    int capacity)
+{
+    if (buffer == NULL || capacity <= 0) {
+        return;
+    }
+
+    const int required =
+        mlt_bridge_last_error_copy(
+            buffer,
+            capacity
+        );
+
+    if (required <= 0) {
+        buffer[0] = '\0';
+    }
+}
 
 static void check(
     int condition,
@@ -51,10 +71,82 @@ static void check(
     }
 }
 
+static void check_engine_isolation(void)
+{
+    MltBridgeEngine *primary = engine;
+    const int64_t primary_position =
+        mlt_bridge_position_frame();
+
+    MltBridgeEngine *secondary =
+        mlt_bridge_engine_create();
+
+    check(
+        secondary != NULL,
+        "second opaque engine can be created"
+    );
+
+    if (secondary == NULL) {
+        return;
+    }
+
+    check(
+        mlt_bridge_engine_activate(secondary),
+        "second opaque engine can be activated"
+    );
+
+    const int secondary_opened =
+        mlt_bridge_open(media_path);
+
+    check(
+        secondary_opened,
+        "second opaque engine opens media independently"
+    );
+
+    if (secondary_opened) {
+        const int64_t length =
+            mlt_bridge_duration_frames();
+
+        const int64_t target =
+            length > 6 ? 5 : (length > 1 ? length - 1 : 0);
+
+        check(
+            mlt_bridge_seek_frame(target),
+            "second opaque engine seeks independently"
+        );
+
+        check(
+            mlt_bridge_position_frame() == target,
+            "second opaque engine reports its own playhead"
+        );
+    }
+
+    check(
+        mlt_bridge_engine_activate(primary),
+        "primary opaque engine can be reactivated"
+    );
+
+    check(
+        mlt_bridge_position_frame() == primary_position,
+        "second engine does not move primary playhead"
+    );
+
+    mlt_bridge_engine_activate(secondary);
+    mlt_bridge_engine_destroy(secondary);
+    mlt_bridge_engine_activate(primary);
+}
+
 static gboolean run_step(
     gpointer user_data)
 {
     (void)user_data;
+
+    if (engine == NULL ||
+        !mlt_bridge_engine_activate(engine)) {
+        fprintf(stderr, "MLT engine is unavailable.\n");
+        failures++;
+        g_main_loop_quit(loop);
+        return G_SOURCE_REMOVE;
+    }
 
     switch (step++) {
     case 0:
@@ -91,6 +183,8 @@ static gboolean run_step(
             !mlt_bridge_is_playing(),
             "starts paused"
         );
+
+        check_engine_isolation();
 
         break;
 
@@ -180,21 +274,35 @@ static gboolean run_step(
         break;
     }
 
-    case 7:
+    case 7: {
         printf("seek while paused\n");
 
         check(
             mlt_bridge_seek_ms(1000),
-            "seek accepted"
+            "millisecond seek accepted"
         );
 
         check(
             mlt_bridge_position_ms() >= 950 &&
                 mlt_bridge_position_ms() <= 1100,
-            "paused seek reports the requested position"
+            "paused millisecond seek reports the requested position"
+        );
+
+        const int64_t target_frame =
+            (int64_t)mlt_bridge_fps();
+
+        check(
+            mlt_bridge_seek_frame(target_frame),
+            "frame-native seek accepted"
+        );
+
+        check(
+            mlt_bridge_position_frame() == target_frame,
+            "frame-native position round trips exactly"
         );
 
         break;
+    }
 
     case 8:
         printf("volume\n");
@@ -294,15 +402,20 @@ static gboolean run_step(
             "a non-media file is refused"
         );
 
-        printf(
-            "  error: %s\n",
-            mlt_bridge_last_error()
-        );
+        {
+            char error[512];
+            copy_last_error(error, (int)sizeof(error));
 
-        check(
-            mlt_bridge_last_error()[0] != '\0',
-            "an error message is reported"
-        );
+            printf(
+                "  error: %s\n",
+                error
+            );
+
+            check(
+                error[0] != '\0',
+                "an error message is reported"
+            );
+        }
 
         break;
 
@@ -332,9 +445,12 @@ static gboolean run_step(
                 "a still reports no timeline"
             );
         } else {
+            char error[512];
+            copy_last_error(error, (int)sizeof(error));
+
             printf(
                 "  skipped, no image producer: %s\n",
-                mlt_bridge_last_error()
+                error
             );
         }
 
@@ -355,6 +471,8 @@ static gboolean run_step(
             "closed media reports position zero"
         );
 
+        mlt_bridge_engine_destroy(engine);
+        engine = NULL;
         mlt_bridge_shutdown();
 
         printf(
@@ -395,12 +513,38 @@ int main(
     still_path = argc > 3 ? argv[3] : NULL;
 
     if (!mlt_bridge_init()) {
+        char error[512];
+        copy_last_error(error, (int)sizeof(error));
+
         fprintf(
             stderr,
             "MLT failed to initialize: %s\n",
-            mlt_bridge_last_error()
+            error
         );
 
+        return 1;
+    }
+
+    engine = mlt_bridge_engine_create();
+
+    if (engine == NULL ||
+        !mlt_bridge_engine_activate(engine) ||
+        !mlt_bridge_engine_set_texture_source(engine)) {
+        char error[512];
+        copy_last_error(error, (int)sizeof(error));
+
+        fprintf(
+            stderr,
+            "MLT engine failed to initialize: %s\n",
+            error
+        );
+
+        if (engine != NULL) {
+            mlt_bridge_engine_destroy(engine);
+            engine = NULL;
+        }
+
+        mlt_bridge_shutdown();
         return 1;
     }
 

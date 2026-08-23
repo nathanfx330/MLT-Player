@@ -5,6 +5,14 @@ import 'dart:isolate';
 
 import 'package:ffi/ffi.dart';
 
+final class _NativeMltBridgeEngine extends Opaque {}
+
+typedef _EngineCreateNative = Pointer<_NativeMltBridgeEngine> Function();
+typedef _EngineCreateDart = Pointer<_NativeMltBridgeEngine> Function();
+typedef _EngineIntNative = Int32 Function(Pointer<_NativeMltBridgeEngine>);
+typedef _EngineIntDart = int Function(Pointer<_NativeMltBridgeEngine>);
+typedef _EngineVoidNative = Void Function(Pointer<_NativeMltBridgeEngine>);
+typedef _EngineVoidDart = void Function(Pointer<_NativeMltBridgeEngine>);
 
 typedef _IntNative = Int32 Function();
 typedef _IntDart = int Function();
@@ -24,8 +32,19 @@ typedef _IndexedIntDart = int Function(int);
 typedef _IndexedInt64Native = Int64 Function(Int32);
 typedef _IndexedInt64Dart = int Function(int);
 
-typedef _IndexedStringNative = Pointer<Utf8> Function(Int32);
-typedef _IndexedStringDart = Pointer<Utf8> Function(int);
+typedef _CopyStringNative = Int32 Function(Pointer<Utf8>, Int32);
+typedef _CopyStringDart = int Function(Pointer<Utf8>, int);
+
+typedef _IndexedCopyStringNative = Int32 Function(
+  Int32,
+  Pointer<Utf8>,
+  Int32,
+);
+typedef _IndexedCopyStringDart = int Function(
+  int,
+  Pointer<Utf8>,
+  int,
+);
 
 typedef _VoidNative = Void Function();
 typedef _VoidDart = void Function();
@@ -79,14 +98,33 @@ typedef _FrameExportStartDart = int Function(
 /// failure mode when it does not is silent: two independent players, one
 /// of which owns the texture and the other of which owns the media.
 class MltBridge {
-  MltBridge() : _library = DynamicLibrary.process() {
+  MltBridge() : this._internal();
+
+  MltBridge.attach(int engineAddress)
+      : this._internal(engineAddress: engineAddress);
+
+  MltBridge._internal({int? engineAddress})
+      : _library = DynamicLibrary.process(),
+        _ownsEngine = engineAddress == null {
+    if (engineAddress != null) {
+      _engine = Pointer<_NativeMltBridgeEngine>.fromAddress(engineAddress);
+    }
     _init = _library.lookupFunction<_IntNative, _IntDart>('mlt_bridge_init');
     _shutdown =
         _library.lookupFunction<_VoidNative, _VoidDart>('mlt_bridge_shutdown');
+    _engineCreate = _library.lookupFunction<_EngineCreateNative, _EngineCreateDart>(
+        'mlt_bridge_engine_create');
+    _engineActivate = _library.lookupFunction<_EngineIntNative, _EngineIntDart>(
+        'mlt_bridge_engine_activate');
+    _engineDestroy = _library.lookupFunction<_EngineVoidNative, _EngineVoidDart>(
+        'mlt_bridge_engine_destroy');
+    _engineSetTextureSource =
+        _library.lookupFunction<_EngineIntNative, _EngineIntDart>(
+            'mlt_bridge_engine_set_texture_source');
     _version = _library
         .lookupFunction<_StringNative, _StringDart>('mlt_bridge_version');
-    _lastError = _library
-        .lookupFunction<_StringNative, _StringDart>('mlt_bridge_last_error');
+    _lastError = _library.lookupFunction<_CopyStringNative, _CopyStringDart>(
+        'mlt_bridge_last_error_copy');
 
     _textureId = _library
         .lookupFunction<_Int64Native, _Int64Dart>('mlt_bridge_texture_id');
@@ -98,6 +136,8 @@ class MltBridge {
     _play = _library.lookupFunction<_IntNative, _IntDart>('mlt_bridge_play');
     _pause = _library.lookupFunction<_IntNative, _IntDart>('mlt_bridge_pause');
     _seek = _library.lookupFunction<_SeekNative, _SeekDart>('mlt_bridge_seek_ms');
+    _seekFrame = _library.lookupFunction<_SeekNative, _SeekDart>(
+        'mlt_bridge_seek_frame');
     _setSpeed = _library.lookupFunction<_SetSpeedNative, _SetSpeedDart>(
         'mlt_bridge_set_speed');
     _speed =
@@ -109,6 +149,8 @@ class MltBridge {
 
     _positionMs = _library
         .lookupFunction<_Int64Native, _Int64Dart>('mlt_bridge_position_ms');
+    _positionFrame = _library.lookupFunction<_Int64Native, _Int64Dart>(
+        'mlt_bridge_position_frame');
     _isPlaying =
         _library.lookupFunction<_IntNative, _IntDart>('mlt_bridge_is_playing');
     _isEof = _library.lookupFunction<_IntNative, _IntDart>('mlt_bridge_is_eof');
@@ -126,28 +168,28 @@ class MltBridge {
         'mlt_bridge_video_stream_index');
     _audioStreamIndex = _library.lookupFunction<_IntNative, _IntDart>(
         'mlt_bridge_audio_stream_index');
-    _videoCodecName = _library.lookupFunction<_StringNative, _StringDart>(
-        'mlt_bridge_video_codec_name');
+    _videoCodecName = _library.lookupFunction<_CopyStringNative, _CopyStringDart>(
+        'mlt_bridge_video_codec_name_copy');
     _videoCodecLongName =
-        _library.lookupFunction<_StringNative, _StringDart>(
-            'mlt_bridge_video_codec_long_name');
-    _audioCodecName = _library.lookupFunction<_StringNative, _StringDart>(
-        'mlt_bridge_audio_codec_name');
+        _library.lookupFunction<_CopyStringNative, _CopyStringDart>(
+            'mlt_bridge_video_codec_long_name_copy');
+    _audioCodecName = _library.lookupFunction<_CopyStringNative, _CopyStringDart>(
+        'mlt_bridge_audio_codec_name_copy');
     _audioCodecLongName =
-        _library.lookupFunction<_StringNative, _StringDart>(
-            'mlt_bridge_audio_codec_long_name');
-    _streamType =
-        _library.lookupFunction<_IndexedStringNative, _IndexedStringDart>(
-            'mlt_bridge_stream_type');
-    _streamCodecName =
-        _library.lookupFunction<_IndexedStringNative, _IndexedStringDart>(
-            'mlt_bridge_stream_codec_name');
-    _streamCodecLongName =
-        _library.lookupFunction<_IndexedStringNative, _IndexedStringDart>(
-            'mlt_bridge_stream_codec_long_name');
-    _streamLanguage =
-        _library.lookupFunction<_IndexedStringNative, _IndexedStringDart>(
-            'mlt_bridge_stream_language');
+        _library.lookupFunction<_CopyStringNative, _CopyStringDart>(
+            'mlt_bridge_audio_codec_long_name_copy');
+    _streamType = _library
+        .lookupFunction<_IndexedCopyStringNative, _IndexedCopyStringDart>(
+            'mlt_bridge_stream_type_copy');
+    _streamCodecName = _library
+        .lookupFunction<_IndexedCopyStringNative, _IndexedCopyStringDart>(
+            'mlt_bridge_stream_codec_name_copy');
+    _streamCodecLongName = _library
+        .lookupFunction<_IndexedCopyStringNative, _IndexedCopyStringDart>(
+            'mlt_bridge_stream_codec_long_name_copy');
+    _streamLanguage = _library
+        .lookupFunction<_IndexedCopyStringNative, _IndexedCopyStringDart>(
+            'mlt_bridge_stream_language_copy');
     _streamChannels =
         _library.lookupFunction<_IndexedIntNative, _IndexedIntDart>(
             'mlt_bridge_stream_channels');
@@ -163,16 +205,16 @@ class MltBridge {
     _streamBitRate =
         _library.lookupFunction<_IndexedInt64Native, _IndexedInt64Dart>(
             'mlt_bridge_stream_bit_rate');
-    _videoPixelFormat = _library.lookupFunction<_StringNative, _StringDart>(
-        'mlt_bridge_video_pixel_format');
+    _videoPixelFormat = _library.lookupFunction<_CopyStringNative, _CopyStringDart>(
+        'mlt_bridge_video_pixel_format_copy');
     _videoColorspace = _library.lookupFunction<_IntNative, _IntDart>(
         'mlt_bridge_video_colorspace');
     _videoColorTrc = _library.lookupFunction<_IntNative, _IntDart>(
         'mlt_bridge_video_color_trc');
-    _videoColorRange = _library.lookupFunction<_StringNative, _StringDart>(
-        'mlt_bridge_video_color_range');
-    _sourceTimecode = _library.lookupFunction<_StringNative, _StringDart>(
-        'mlt_bridge_source_timecode');
+    _videoColorRange = _library.lookupFunction<_CopyStringNative, _CopyStringDart>(
+        'mlt_bridge_video_color_range_copy');
+    _sourceTimecode = _library.lookupFunction<_CopyStringNative, _CopyStringDart>(
+        'mlt_bridge_source_timecode_copy');
 
     _exportStart = _library.lookupFunction<_ExportStartNative, _ExportStartDart>(
         'mlt_bridge_export_start');
@@ -193,8 +235,8 @@ class MltBridge {
         'mlt_bridge_export_progress');
     _exportSucceeded = _library.lookupFunction<_IntNative, _IntDart>(
         'mlt_bridge_export_succeeded');
-    _exportError = _library.lookupFunction<_StringNative, _StringDart>(
-        'mlt_bridge_export_error');
+    _exportError = _library.lookupFunction<_CopyStringNative, _CopyStringDart>(
+        'mlt_bridge_export_error_copy');
     _durationFrames = _library
         .lookupFunction<_Int64Native, _Int64Dart>('mlt_bridge_duration_frames');
     _durationMs = _library
@@ -209,22 +251,31 @@ class MltBridge {
   }
 
   final DynamicLibrary _library;
+  final bool _ownsEngine;
+
+  Pointer<_NativeMltBridgeEngine> _engine = nullptr;
 
   late final _IntDart _init;
   late final _VoidDart _shutdown;
+  late final _EngineCreateDart _engineCreate;
+  late final _EngineIntDart _engineActivate;
+  late final _EngineVoidDart _engineDestroy;
+  late final _EngineIntDart _engineSetTextureSource;
   late final _StringDart _version;
-  late final _StringDart _lastError;
+  late final _CopyStringDart _lastError;
   late final _Int64Dart _textureId;
   late final _OpenDart _open;
   late final _VoidDart _closeMedia;
   late final _IntDart _play;
   late final _IntDart _pause;
   late final _SeekDart _seek;
+  late final _SeekDart _seekFrame;
   late final _SetSpeedDart _setSpeed;
   late final _DoubleDart _speed;
   late final _SetIntDart _setPlayAllFrames;
   late final _IntDart _playAllFrames;
   late final _Int64Dart _positionMs;
+  late final _Int64Dart _positionFrame;
   late final _IntDart _isPlaying;
   late final _IntDart _isEof;
   late final _SetVolumeDart _setVolume;
@@ -233,24 +284,24 @@ class MltBridge {
   late final _IntDart _streamCount;
   late final _IntDart _videoStreamIndex;
   late final _IntDart _audioStreamIndex;
-  late final _StringDart _videoCodecName;
-  late final _StringDart _videoCodecLongName;
-  late final _StringDart _audioCodecName;
-  late final _StringDart _audioCodecLongName;
-  late final _IndexedStringDart _streamType;
-  late final _IndexedStringDart _streamCodecName;
-  late final _IndexedStringDart _streamCodecLongName;
-  late final _IndexedStringDart _streamLanguage;
+  late final _CopyStringDart _videoCodecName;
+  late final _CopyStringDart _videoCodecLongName;
+  late final _CopyStringDart _audioCodecName;
+  late final _CopyStringDart _audioCodecLongName;
+  late final _IndexedCopyStringDart _streamType;
+  late final _IndexedCopyStringDart _streamCodecName;
+  late final _IndexedCopyStringDart _streamCodecLongName;
+  late final _IndexedCopyStringDart _streamLanguage;
   late final _IndexedIntDart _streamChannels;
   late final _IndexedIntDart _streamSampleRate;
   late final _IndexedIntDart _streamWidth;
   late final _IndexedIntDart _streamHeight;
   late final _IndexedInt64Dart _streamBitRate;
-  late final _StringDart _videoPixelFormat;
+  late final _CopyStringDart _videoPixelFormat;
   late final _IntDart _videoColorspace;
   late final _IntDart _videoColorTrc;
-  late final _StringDart _videoColorRange;
-  late final _StringDart _sourceTimecode;
+  late final _CopyStringDart _videoColorRange;
+  late final _CopyStringDart _sourceTimecode;
   late final _ExportStartDart _exportStart;
   late final _FrameExportStartDart _frameExportStart;
   late final _ExportStartDart _pngSequenceExportStart;
@@ -259,7 +310,7 @@ class MltBridge {
   late final _IntDart _exportIsRunning;
   late final _DoubleDart _exportProgress;
   late final _IntDart _exportSucceeded;
-  late final _StringDart _exportError;
+  late final _CopyStringDart _exportError;
   late final _Int64Dart _durationFrames;
   late final _Int64Dart _durationMs;
   late final _DoubleDart _fps;
@@ -268,15 +319,131 @@ class MltBridge {
   late final _DoubleDart _displayAspect;
   late final _IntDart _isStill;
 
-  bool initialize() => _init() != 0;
-  void shutdown() => _shutdown();
+  String _readCopiedString(_CopyStringDart reader) {
+    var required = reader(Pointer<Utf8>.fromAddress(0), 0);
+    if (required <= 1) {
+      return '';
+    }
+
+    for (var attempt = 0; attempt < 3; attempt++) {
+      final buffer = malloc<Uint8>(required).cast<Utf8>();
+      try {
+        final actual = reader(buffer, required);
+        if (actual <= required) {
+          return buffer.toDartString();
+        }
+        required = actual;
+      } finally {
+        malloc.free(buffer);
+      }
+    }
+
+    return '';
+  }
+
+  String _readIndexedCopiedString(
+    _IndexedCopyStringDart reader,
+    int index,
+  ) {
+    var required = reader(index, Pointer<Utf8>.fromAddress(0), 0);
+    if (required <= 1) {
+      return '';
+    }
+
+    for (var attempt = 0; attempt < 3; attempt++) {
+      final buffer = malloc<Uint8>(required).cast<Utf8>();
+      try {
+        final actual = reader(index, buffer, required);
+        if (actual <= required) {
+          return buffer.toDartString();
+        }
+        required = actual;
+      } finally {
+        malloc.free(buffer);
+      }
+    }
+
+    return '';
+  }
+
+  bool _activate() {
+    return _engine != nullptr && _engineActivate(_engine) != 0;
+  }
+
+  T _withEngine<T>(T fallback, T Function() call) {
+    if (!_activate()) {
+      return fallback;
+    }
+    return call();
+  }
+
+  void _withEngineVoid(void Function() call) {
+    if (_activate()) {
+      call();
+    }
+  }
+
+  bool initialize() {
+    if (_engine != nullptr) {
+      return _activate();
+    }
+
+    if (_init() == 0) {
+      return false;
+    }
+
+    final engine = _engineCreate();
+    if (engine == nullptr) {
+      _shutdown();
+      return false;
+    }
+
+    _engine = engine;
+
+    if (!_activate() || _engineSetTextureSource(_engine) == 0) {
+      _engineDestroy(_engine);
+      _engine = nullptr;
+      _shutdown();
+      return false;
+    }
+
+    return true;
+  }
+
+  void shutdown() {
+    if (!_ownsEngine) {
+      return;
+    }
+
+    // Join the process-wide export worker first. Native shutdown defers
+    // mlt_factory_close() while this engine still exists.
+    _shutdown();
+
+    if (_engine != nullptr) {
+      _engineActivate(_engine);
+      _engineDestroy(_engine);
+      _engine = nullptr;
+    }
+  }
+
+  int get engineAddress => _engine.address;
 
   String get version => _version().toDartString();
-  String get lastError => _lastError().toDartString();
+
+  String get lastError {
+    if (_engine != nullptr) {
+      _activate();
+    }
+    return _readCopiedString(_lastError);
+  }
 
   int get textureId => _textureId();
 
   bool open(String path) {
+    if (!_activate()) {
+      return false;
+    }
+
     final nativePath = path.toNativeUtf8(allocator: malloc);
     try {
       return _open(nativePath) != 0;
@@ -285,7 +452,7 @@ class MltBridge {
     }
   }
 
-  void closeMedia() => _closeMedia();
+  void closeMedia() => _withEngineVoid(_closeMedia);
 
   bool startExport({
     required String sourcePath,
@@ -381,60 +548,94 @@ class MltBridge {
   bool get exportIsRunning => _exportIsRunning() != 0;
   double get exportProgress => _exportProgress();
   bool get exportSucceeded => _exportSucceeded() != 0;
-  String get exportError => _exportError().toDartString();
+  String get exportError => _readCopiedString(_exportError);
 
-  bool play() => _play() != 0;
-  bool pause() => _pause() != 0;
-  bool seekMs(int milliseconds) => _seek(milliseconds) != 0;
-  bool setSpeed(double value) => _setSpeed(value) != 0;
-  bool setPlayAllFrames(bool enabled) => _setPlayAllFrames(enabled ? 1 : 0) != 0;
+  bool play() => _withEngine(false, () => _play() != 0);
+  bool pause() => _withEngine(false, () => _pause() != 0);
+  bool seekMs(int milliseconds) =>
+      _withEngine(false, () => _seek(milliseconds) != 0);
+  bool seekFrame(int frame) =>
+      _withEngine(false, () => _seekFrame(frame) != 0);
+  bool setSpeed(double value) =>
+      _withEngine(false, () => _setSpeed(value) != 0);
+  bool setPlayAllFrames(bool enabled) =>
+      _withEngine(false, () => _setPlayAllFrames(enabled ? 1 : 0) != 0);
 
-  double get speed => _speed();
-  bool get playAllFrames => _playAllFrames() != 0;
-  int get positionMs => _positionMs();
-  bool get isPlaying => _isPlaying() != 0;
-  bool get isEof => _isEof() != 0;
+  double get speed => _withEngine(0.0, _speed);
+  bool get playAllFrames => _withEngine(false, () => _playAllFrames() != 0);
+  int get positionMs => _withEngine(0, _positionMs);
+  int get positionFrame => _withEngine(0, _positionFrame);
+  bool get isPlaying => _withEngine(false, () => _isPlaying() != 0);
+  bool get isEof => _withEngine(false, () => _isEof() != 0);
 
-  set volume(double value) => _setVolume(value);
-  double get volume => _volume();
-  bool get hasAudio => _hasAudio() != 0;
+  set volume(double value) => _withEngineVoid(() => _setVolume(value));
+  double get volume => _withEngine(0.0, _volume);
+  bool get hasAudio => _withEngine(false, () => _hasAudio() != 0);
 
-  int get streamCount => _streamCount();
-  int get videoStreamIndex => _videoStreamIndex();
-  int get audioStreamIndex => _audioStreamIndex();
-  String get videoCodecName => _videoCodecName().toDartString();
-  String get videoCodecLongName => _videoCodecLongName().toDartString();
-  String get audioCodecName => _audioCodecName().toDartString();
-  String get audioCodecLongName => _audioCodecLongName().toDartString();
-  String streamType(int index) => _streamType(index).toDartString();
-  String streamCodecName(int index) => _streamCodecName(index).toDartString();
-  String streamCodecLongName(int index) =>
-      _streamCodecLongName(index).toDartString();
-  String streamLanguage(int index) => _streamLanguage(index).toDartString();
-  int streamChannels(int index) => _streamChannels(index);
-  int streamSampleRate(int index) => _streamSampleRate(index);
-  int streamWidth(int index) => _streamWidth(index);
-  int streamHeight(int index) => _streamHeight(index);
-  int streamBitRate(int index) => _streamBitRate(index);
-  String get videoPixelFormat => _videoPixelFormat().toDartString();
-  int get videoColorspace => _videoColorspace();
-  int get videoColorTrc => _videoColorTrc();
-  String get videoColorRange => _videoColorRange().toDartString();
-  String get sourceTimecode => _sourceTimecode().toDartString();
-  int get durationFrames => _durationFrames();
-  int get durationMs => _durationMs();
-  double get fps => _fps();
-  int get width => _width();
-  int get height => _height();
-  double get displayAspect => _displayAspect();
-  bool get isStill => _isStill() != 0;
+  int get streamCount => _withEngine(0, _streamCount);
+  int get videoStreamIndex => _withEngine(-1, _videoStreamIndex);
+  int get audioStreamIndex => _withEngine(-1, _audioStreamIndex);
+  String get videoCodecName =>
+      _withEngine('', () => _readCopiedString(_videoCodecName));
+  String get videoCodecLongName =>
+      _withEngine('', () => _readCopiedString(_videoCodecLongName));
+  String get audioCodecName =>
+      _withEngine('', () => _readCopiedString(_audioCodecName));
+  String get audioCodecLongName =>
+      _withEngine('', () => _readCopiedString(_audioCodecLongName));
+  String streamType(int index) => _withEngine(
+        '',
+        () => _readIndexedCopiedString(_streamType, index),
+      );
+  String streamCodecName(int index) => _withEngine(
+        '',
+        () => _readIndexedCopiedString(_streamCodecName, index),
+      );
+  String streamCodecLongName(int index) => _withEngine(
+        '',
+        () => _readIndexedCopiedString(_streamCodecLongName, index),
+      );
+  String streamLanguage(int index) => _withEngine(
+        '',
+        () => _readIndexedCopiedString(_streamLanguage, index),
+      );
+  int streamChannels(int index) =>
+      _withEngine(0, () => _streamChannels(index));
+  int streamSampleRate(int index) =>
+      _withEngine(0, () => _streamSampleRate(index));
+  int streamWidth(int index) => _withEngine(0, () => _streamWidth(index));
+  int streamHeight(int index) => _withEngine(0, () => _streamHeight(index));
+  int streamBitRate(int index) => _withEngine(0, () => _streamBitRate(index));
+  String get videoPixelFormat =>
+      _withEngine('', () => _readCopiedString(_videoPixelFormat));
+  int get videoColorspace => _withEngine(-1, _videoColorspace);
+  int get videoColorTrc => _withEngine(-1, _videoColorTrc);
+  String get videoColorRange =>
+      _withEngine('', () => _readCopiedString(_videoColorRange));
+  String get sourceTimecode =>
+      _withEngine('', () => _readCopiedString(_sourceTimecode));
+  int get durationFrames => _withEngine(0, _durationFrames);
+  int get durationMs => _withEngine(0, _durationMs);
+  double get fps => _withEngine(0.0, _fps);
+  int get width => _withEngine(0, _width);
+  int get height => _withEngine(0, _height);
+  double get displayAspect => _withEngine(0.0, _displayAspect);
+  bool get isStill => _withEngine(false, () => _isStill() != 0);
+
 }
 
 /// Opens media on a helper isolate so native probing does not stall Flutter's
 /// frame pump.
 ///
 /// DynamicLibrary.process() resolves the same already-loaded bridge in the
-/// process, while the native engine mutex serializes access to shared state.
-Future<bool> openMediaOnHelperIsolate(String path) {
-  return Isolate.run(() => MltBridge().open(path));
+/// process. The helper isolate attaches to the exact opaque engine handle
+/// owned by the viewer, and that engine's native mutex serializes probing.
+Future<bool> openMediaOnHelperIsolate(
+  String path,
+  int engineAddress,
+) {
+  return Isolate.run(() {
+    final bridge = MltBridge.attach(engineAddress);
+    return bridge.open(path);
+  });
 }

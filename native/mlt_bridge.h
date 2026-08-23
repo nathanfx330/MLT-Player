@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 typedef struct _FlTextureRegistrar FlTextureRegistrar;
+typedef struct _MltBridgeEngine MltBridgeEngine;
 
 #if defined(__GNUC__)
 #define MLT_BRIDGE_EXPORT __attribute__((visibility("default")))
@@ -27,11 +28,37 @@ mlt_bridge_init(void);
 MLT_BRIDGE_EXPORT void
 mlt_bridge_shutdown(void);
 
+/*
+ * Playback state lives in an opaque engine handle. The process-wide MLT
+ * repository and Flutter texture registrar remain shared infrastructure.
+ * Activate an engine on each calling thread before using the legacy-shaped
+ * media/transport/property operations below.
+ */
+MLT_BRIDGE_EXPORT MltBridgeEngine *
+mlt_bridge_engine_create(void);
+
+MLT_BRIDGE_EXPORT int
+mlt_bridge_engine_activate(
+    MltBridgeEngine *engine
+);
+
+MLT_BRIDGE_EXPORT void
+mlt_bridge_engine_destroy(
+    MltBridgeEngine *engine
+);
+
 MLT_BRIDGE_EXPORT const char *
 mlt_bridge_version(void);
 
-MLT_BRIDGE_EXPORT const char *
-mlt_bridge_last_error(void);
+/*
+ * Mutable bridge strings use caller-owned copy-out buffers. Return value is
+ * the required capacity including the trailing NUL; pass NULL/0 to query.
+ */
+MLT_BRIDGE_EXPORT int
+mlt_bridge_last_error_copy(
+    char *buffer,
+    int capacity
+);
 
 /* ------------------------------------------------------------------------- */
 /* Flutter texture                                                           */
@@ -44,6 +71,17 @@ mlt_bridge_register_flutter_texture(
 
 MLT_BRIDGE_EXPORT void
 mlt_bridge_unregister_flutter_texture(void);
+
+/*
+ * Select which opaque engine owns the single Flutter preview path. MLT 7.22
+ * sdl2_audio is process-global enough that only this selected engine may own
+ * a live preview consumer; background engines still own independent producers
+ * and may be probed/searched/seeked without opening SDL audio.
+ */
+MLT_BRIDGE_EXPORT int
+mlt_bridge_engine_set_texture_source(
+    MltBridgeEngine *engine
+);
 
 MLT_BRIDGE_EXPORT int64_t
 mlt_bridge_texture_id(void);
@@ -89,7 +127,7 @@ mlt_bridge_export_png_sequence_start(
 );
 
 /*
- * Export an inclusive absolute source-frame range as uncompressed 16-bit PCM
+ * Export an inclusive absolute source-frame range as uncompressed 24-bit PCM
  * WAV audio. Video is disabled explicitly; preview playback is unaffected.
  */
 MLT_BRIDGE_EXPORT int
@@ -112,8 +150,11 @@ mlt_bridge_export_progress(void);
 MLT_BRIDGE_EXPORT int
 mlt_bridge_export_succeeded(void);
 
-MLT_BRIDGE_EXPORT const char *
-mlt_bridge_export_error(void);
+MLT_BRIDGE_EXPORT int
+mlt_bridge_export_error_copy(
+    char *buffer,
+    int capacity
+);
 
 /* ------------------------------------------------------------------------- */
 /* Media                                                                     */
@@ -163,6 +204,16 @@ mlt_bridge_set_play_all_frames(
 MLT_BRIDGE_EXPORT int
 mlt_bridge_play_all_frames(void);
 
+/* Exact frame-native transport for frame stepping and edit boundaries. */
+MLT_BRIDGE_EXPORT int
+mlt_bridge_seek_frame(
+    int64_t frame
+);
+
+MLT_BRIDGE_EXPORT int64_t
+mlt_bridge_position_frame(void);
+
+/* Millisecond transport remains available for time-based UI scrubbing. */
 MLT_BRIDGE_EXPORT int
 mlt_bridge_seek_ms(
     int64_t milliseconds
@@ -216,34 +267,34 @@ mlt_bridge_video_stream_index(void);
 MLT_BRIDGE_EXPORT int
 mlt_bridge_audio_stream_index(void);
 
-MLT_BRIDGE_EXPORT const char *
-mlt_bridge_video_codec_name(void);
+MLT_BRIDGE_EXPORT int
+mlt_bridge_video_codec_name_copy(char *buffer, int capacity);
 
-MLT_BRIDGE_EXPORT const char *
-mlt_bridge_video_codec_long_name(void);
+MLT_BRIDGE_EXPORT int
+mlt_bridge_video_codec_long_name_copy(char *buffer, int capacity);
 
-MLT_BRIDGE_EXPORT const char *
-mlt_bridge_audio_codec_name(void);
+MLT_BRIDGE_EXPORT int
+mlt_bridge_audio_codec_name_copy(char *buffer, int capacity);
 
-MLT_BRIDGE_EXPORT const char *
-mlt_bridge_audio_codec_long_name(void);
+MLT_BRIDGE_EXPORT int
+mlt_bridge_audio_codec_long_name_copy(char *buffer, int capacity);
 
 /*
  * Per-stream inspection. Index is the absolute container stream index.
  * MLT 7.22 explicitly labels video/audio stream types; other stream types
  * remain enumerable and are reported as "other" when no type label exists.
  */
-MLT_BRIDGE_EXPORT const char *
-mlt_bridge_stream_type(int index);
+MLT_BRIDGE_EXPORT int
+mlt_bridge_stream_type_copy(int index, char *buffer, int capacity);
 
-MLT_BRIDGE_EXPORT const char *
-mlt_bridge_stream_codec_name(int index);
+MLT_BRIDGE_EXPORT int
+mlt_bridge_stream_codec_name_copy(int index, char *buffer, int capacity);
 
-MLT_BRIDGE_EXPORT const char *
-mlt_bridge_stream_codec_long_name(int index);
+MLT_BRIDGE_EXPORT int
+mlt_bridge_stream_codec_long_name_copy(int index, char *buffer, int capacity);
 
-MLT_BRIDGE_EXPORT const char *
-mlt_bridge_stream_language(int index);
+MLT_BRIDGE_EXPORT int
+mlt_bridge_stream_language_copy(int index, char *buffer, int capacity);
 
 MLT_BRIDGE_EXPORT int
 mlt_bridge_stream_channels(int index);
@@ -264,8 +315,8 @@ mlt_bridge_stream_bit_rate(int index);
  * Source video format/color metadata for the selected video stream.
  * Strings are empty and integer identifiers are -1 when unavailable.
  */
-MLT_BRIDGE_EXPORT const char *
-mlt_bridge_video_pixel_format(void);
+MLT_BRIDGE_EXPORT int
+mlt_bridge_video_pixel_format_copy(char *buffer, int capacity);
 
 MLT_BRIDGE_EXPORT int
 mlt_bridge_video_colorspace(void);
@@ -273,15 +324,15 @@ mlt_bridge_video_colorspace(void);
 MLT_BRIDGE_EXPORT int
 mlt_bridge_video_color_trc(void);
 
-MLT_BRIDGE_EXPORT const char *
-mlt_bridge_video_color_range(void);
+MLT_BRIDGE_EXPORT int
+mlt_bridge_video_color_range_copy(char *buffer, int capacity);
 
 /*
  * Embedded/source starting timecode as reported by the loaded producer.
  * Returns an empty string when the file does not expose a timecode tag.
  */
-MLT_BRIDGE_EXPORT const char *
-mlt_bridge_source_timecode(void);
+MLT_BRIDGE_EXPORT int
+mlt_bridge_source_timecode_copy(char *buffer, int capacity);
 
 MLT_BRIDGE_EXPORT int64_t
 mlt_bridge_duration_frames(void);
