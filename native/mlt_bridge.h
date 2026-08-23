@@ -194,6 +194,33 @@ MLT_BRIDGE_EXPORT double
 mlt_bridge_secondary_opacity(void);
 
 /*
+ * POC 10.8: Layer 2 presentation geometry in base-frame pixels. Scale is
+ * uniform: 1.0 means the source's native presentation size for a still image
+ * unless it had to fit down, or the base-frame fit size for timed video.
+ * Anchor indices are row-major: 0 top-left through 8 bottom-right.
+ */
+MLT_BRIDGE_EXPORT int
+mlt_bridge_set_secondary_geometry(
+    double x,
+    double y,
+    double scale
+);
+
+MLT_BRIDGE_EXPORT int
+mlt_bridge_set_secondary_anchor(
+    int anchor
+);
+
+MLT_BRIDGE_EXPORT double
+mlt_bridge_secondary_x(void);
+
+MLT_BRIDGE_EXPORT double
+mlt_bridge_secondary_y(void);
+
+MLT_BRIDGE_EXPORT double
+mlt_bridge_secondary_scale(void);
+
+/*
  * POC 10.6 layer metadata / alpha interpretation.
  * Alpha mode: 0 Auto/native, 1 Straight/native, 2 Premultiplied (unpremultiply
  * RGB before MLT's existing composite transition applies alpha).

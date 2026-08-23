@@ -1232,6 +1232,11 @@ class _PlayerPageState extends State<PlayerPage>
             secondaryAudioGain: _engine.secondaryTrackAudioGain,
             secondaryOpacity: _engine.secondaryTrackOpacity,
             secondaryVisible: _engine.secondaryTrackVisible,
+            secondaryX: _engine.secondaryTrackX,
+            secondaryY: _engine.secondaryTrackY,
+            secondaryScale: _engine.secondaryTrackScale,
+            baseWidth: media.width,
+            baseHeight: media.height,
             canSwapLayers: !_engine.secondaryTrackIsStill,
             onPrimaryAudioChanged: (value) =>
                 _engine.setTrackAudioGain(0, value),
@@ -1241,6 +1246,10 @@ class _PlayerPageState extends State<PlayerPage>
                 _engine.setSecondaryTrackOpacity,
             onSecondaryAlphaModeChanged:
                 _engine.setSecondaryTrackAlphaMode,
+            onSecondaryXChanged: _engine.setSecondaryTrackX,
+            onSecondaryYChanged: _engine.setSecondaryTrackY,
+            onSecondaryScaleChanged: _engine.setSecondaryTrackScale,
+            onSecondaryAnchorChanged: _engine.setSecondaryTrackAnchor,
             onReplacePrimarySource: _replacePrimaryLayerSource,
             onReplaceSecondarySource: _replaceSecondaryLayerSource,
             onToggleSecondaryVisible:

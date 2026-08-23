@@ -276,6 +276,82 @@ static gboolean run_step(
             "track 2 opacity clamps at one"
         );
 
+        printf("layer geometry\n");
+
+        check(
+            mlt_bridge_secondary_scale() > 0.999 &&
+                mlt_bridge_secondary_scale() < 1.001,
+            "layer 2 scale starts at 100 percent"
+        );
+
+        check(
+            mlt_bridge_secondary_x() > -0.001 &&
+                mlt_bridge_secondary_x() < 0.001 &&
+                mlt_bridge_secondary_y() > -0.001 &&
+                mlt_bridge_secondary_y() < 0.001,
+            "same-size layer starts aligned to the base frame"
+        );
+
+        check(
+            mlt_bridge_set_secondary_geometry(17.0, 23.0, 0.5),
+            "layer 2 accepts live position and scale"
+        );
+
+        check(
+            mlt_bridge_secondary_x() > 16.999 &&
+                mlt_bridge_secondary_x() < 17.001 &&
+                mlt_bridge_secondary_y() > 22.999 &&
+                mlt_bridge_secondary_y() < 23.001 &&
+                mlt_bridge_secondary_scale() > 0.499 &&
+                mlt_bridge_secondary_scale() < 0.501,
+            "layer 2 geometry round trips"
+        );
+
+        check(
+            mlt_bridge_set_secondary_opacity(0.35),
+            "opacity can change after moving layer 2"
+        );
+
+        check(
+            mlt_bridge_secondary_x() > 16.999 &&
+                mlt_bridge_secondary_x() < 17.001 &&
+                mlt_bridge_secondary_y() > 22.999 &&
+                mlt_bridge_secondary_y() < 23.001 &&
+                mlt_bridge_secondary_scale() > 0.499 &&
+                mlt_bridge_secondary_scale() < 0.501,
+            "opacity changes preserve layer 2 geometry"
+        );
+
+        check(
+            mlt_bridge_set_secondary_anchor(8),
+            "layer 2 accepts the bottom-right anchor"
+        );
+
+        check(
+            mlt_bridge_secondary_x() > (mlt_bridge_width() / 2.0) - 0.01 &&
+                mlt_bridge_secondary_x() < (mlt_bridge_width() / 2.0) + 0.01 &&
+                mlt_bridge_secondary_y() > (mlt_bridge_height() / 2.0) - 0.01 &&
+                mlt_bridge_secondary_y() < (mlt_bridge_height() / 2.0) + 0.01,
+            "bottom-right anchor uses the scaled visible layer bounds"
+        );
+
+        check(
+            mlt_bridge_set_secondary_geometry(0.0, 0.0, 4.0),
+            "layer 2 scale accepts a high clamp"
+        );
+
+        check(
+            mlt_bridge_secondary_scale() > 2.999 &&
+                mlt_bridge_secondary_scale() < 3.001,
+            "layer 2 scale clamps at 300 percent"
+        );
+
+        check(
+            mlt_bridge_set_secondary_geometry(0.0, 0.0, 1.0) &&
+                mlt_bridge_set_secondary_opacity(1.0),
+            "layer 2 geometry and opacity restore to defaults"
+        );
+
         printf("track audio gain\n");
 
         check(
@@ -556,6 +632,13 @@ static gboolean run_step(
         check(
             mlt_bridge_secondary_opacity() == 1.0,
             "opening a new movie resets track-2 opacity"
+        );
+
+        check(
+            mlt_bridge_secondary_x() == 0.0 &&
+                mlt_bridge_secondary_y() == 0.0 &&
+                mlt_bridge_secondary_scale() == 1.0,
+            "opening a new movie resets layer-2 geometry"
         );
 
         check(

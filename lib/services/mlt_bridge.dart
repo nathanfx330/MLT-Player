@@ -73,6 +73,9 @@ typedef _SetSpeedDart = int Function(double);
 typedef _SetOpacityNative = Int32 Function(Double);
 typedef _SetOpacityDart = int Function(double);
 
+typedef _SetGeometryNative = Int32 Function(Double, Double, Double);
+typedef _SetGeometryDart = int Function(double, double, double);
+
 typedef _SetIntNative = Int32 Function(Int32);
 typedef _SetIntDart = int Function(int);
 
@@ -153,6 +156,17 @@ class MltBridge {
             'mlt_bridge_set_secondary_opacity');
     _secondaryOpacity = _library.lookupFunction<_DoubleNative, _DoubleDart>(
         'mlt_bridge_secondary_opacity');
+    _setSecondaryGeometry =
+        _library.lookupFunction<_SetGeometryNative, _SetGeometryDart>(
+            'mlt_bridge_set_secondary_geometry');
+    _setSecondaryAnchor = _library.lookupFunction<_SetIntNative, _SetIntDart>(
+        'mlt_bridge_set_secondary_anchor');
+    _secondaryX = _library.lookupFunction<_DoubleNative, _DoubleDart>(
+        'mlt_bridge_secondary_x');
+    _secondaryY = _library.lookupFunction<_DoubleNative, _DoubleDart>(
+        'mlt_bridge_secondary_y');
+    _secondaryScale = _library.lookupFunction<_DoubleNative, _DoubleDart>(
+        'mlt_bridge_secondary_scale');
     _secondaryIsStill = _library.lookupFunction<_IntNative, _IntDart>(
         'mlt_bridge_secondary_is_still');
     _secondaryHasAlpha = _library.lookupFunction<_IntNative, _IntDart>(
@@ -309,6 +323,11 @@ class MltBridge {
   late final _Int64Dart _secondaryStartFrame;
   late final _SetOpacityDart _setSecondaryOpacity;
   late final _DoubleDart _secondaryOpacity;
+  late final _SetGeometryDart _setSecondaryGeometry;
+  late final _SetIntDart _setSecondaryAnchor;
+  late final _DoubleDart _secondaryX;
+  late final _DoubleDart _secondaryY;
+  late final _DoubleDart _secondaryScale;
   late final _IntDart _secondaryIsStill;
   late final _IntDart _secondaryHasAlpha;
   late final _SetIntDart _setSecondaryAlphaMode;
@@ -523,6 +542,16 @@ class MltBridge {
       _withEngine(false, () => _setSecondaryOpacity(opacity) != 0);
 
   double get secondaryOpacity => _withEngine(1.0, _secondaryOpacity);
+
+  bool setSecondaryGeometry(double x, double y, double scale) =>
+      _withEngine(false, () => _setSecondaryGeometry(x, y, scale) != 0);
+
+  bool setSecondaryAnchor(int anchor) =>
+      _withEngine(false, () => _setSecondaryAnchor(anchor) != 0);
+
+  double get secondaryX => _withEngine(0.0, _secondaryX);
+  double get secondaryY => _withEngine(0.0, _secondaryY);
+  double get secondaryScale => _withEngine(1.0, _secondaryScale);
 
   bool get secondaryIsStill => _withEngine(false, () => _secondaryIsStill() != 0);
   bool get secondaryHasAlpha =>

@@ -59,6 +59,9 @@ class PlayerEngine extends ChangeNotifier {
   String? _secondaryTrackPath;
   int? _secondaryTrackStartFrame;
   double _secondaryTrackOpacity = 1.0;
+  double _secondaryTrackX = 0.0;
+  double _secondaryTrackY = 0.0;
+  double _secondaryTrackScale = 1.0;
   bool _secondaryTrackVisible = true;
   bool _secondaryTrackIsStill = false;
   bool _secondaryTrackHasAlpha = false;
@@ -110,6 +113,9 @@ class PlayerEngine extends ChangeNotifier {
   String? get secondaryTrackPath => _secondaryTrackPath;
   int? get secondaryTrackStartFrame => _secondaryTrackStartFrame;
   double get secondaryTrackOpacity => _secondaryTrackOpacity;
+  double get secondaryTrackX => _secondaryTrackX;
+  double get secondaryTrackY => _secondaryTrackY;
+  double get secondaryTrackScale => _secondaryTrackScale;
   bool get secondaryTrackVisible => _secondaryTrackVisible;
   bool get secondaryTrackIsStill => _secondaryTrackIsStill;
   bool get secondaryTrackHasAlpha => _secondaryTrackHasAlpha;
@@ -975,6 +981,9 @@ class PlayerEngine extends ChangeNotifier {
     _secondaryTrackPath = null;
     _secondaryTrackStartFrame = null;
     _secondaryTrackOpacity = 1.0;
+    _secondaryTrackX = 0.0;
+    _secondaryTrackY = 0.0;
+    _secondaryTrackScale = 1.0;
     _secondaryTrackVisible = true;
     _secondaryTrackIsStill = false;
     _secondaryTrackHasAlpha = false;
@@ -1195,6 +1204,10 @@ class PlayerEngine extends ChangeNotifier {
         nativeStartFrame >= 0 ? nativeStartFrame : clampedStart;
     _secondaryTrackOpacity =
         bridge.secondaryOpacity.clamp(0.0, 1.0).toDouble();
+    _secondaryTrackX = bridge.secondaryX;
+    _secondaryTrackY = bridge.secondaryY;
+    _secondaryTrackScale =
+        bridge.secondaryScale.clamp(0.10, 3.0).toDouble();
     _secondaryTrackVisible = true;
     _secondaryTrackIsStill = bridge.secondaryIsStill;
     _secondaryTrackHasAlpha = bridge.secondaryHasAlpha;
@@ -1271,6 +1284,9 @@ class PlayerEngine extends ChangeNotifier {
     final currentFrame = bridge.positionFrame;
     final startFrame = _secondaryTrackStartFrame ?? 0;
     final opacity = _secondaryTrackOpacity;
+    final secondaryX = _secondaryTrackX;
+    final secondaryY = _secondaryTrackY;
+    final secondaryScale = _secondaryTrackScale;
     final visible = _secondaryTrackVisible;
     final alphaMode = _secondaryTrackAlphaMode;
     final primaryGain = _primaryTrackAudioGain;
@@ -1285,6 +1301,9 @@ class PlayerEngine extends ChangeNotifier {
       primaryGain: primaryGain,
       secondaryGain: secondaryGain,
       secondaryOpacity: opacity,
+      secondaryX: secondaryX,
+      secondaryY: secondaryY,
+      secondaryScale: secondaryScale,
       secondaryVisible: visible,
       // Alpha interpretation belongs to the asset, not the layer slot. A new
       // source therefore starts in Auto even though placement/opacity/gain
@@ -1309,6 +1328,9 @@ class PlayerEngine extends ChangeNotifier {
       primaryGain: primaryGain,
       secondaryGain: secondaryGain,
       secondaryOpacity: opacity,
+      secondaryX: secondaryX,
+      secondaryY: secondaryY,
+      secondaryScale: secondaryScale,
       secondaryVisible: visible,
       secondaryAlphaMode: alphaMode,
       editState: editState,
@@ -1358,6 +1380,9 @@ class PlayerEngine extends ChangeNotifier {
         ? oldPlayheadFrame / oldMedia.fps
         : 0.0;
     final opacity = _secondaryTrackOpacity;
+    final secondaryX = _secondaryTrackX;
+    final secondaryY = _secondaryTrackY;
+    final secondaryScale = _secondaryTrackScale;
     final visible = _secondaryTrackVisible;
     final alphaMode = _secondaryTrackAlphaMode;
     final primaryGain = _primaryTrackAudioGain;
@@ -1382,6 +1407,9 @@ class PlayerEngine extends ChangeNotifier {
         primaryGain: primaryGain,
         secondaryGain: secondaryGain,
         secondaryOpacity: opacity,
+        secondaryX: secondaryX,
+        secondaryY: secondaryY,
+        secondaryScale: secondaryScale,
         secondaryVisible: visible,
         secondaryAlphaMode: alphaMode,
         editState: oldEditState,
@@ -1412,6 +1440,9 @@ class PlayerEngine extends ChangeNotifier {
         primaryGain: primaryGain,
         secondaryGain: secondaryGain,
         secondaryOpacity: opacity,
+        secondaryX: secondaryX,
+        secondaryY: secondaryY,
+        secondaryScale: secondaryScale,
         secondaryVisible: visible,
         secondaryAlphaMode: alphaMode,
       );
@@ -1426,6 +1457,9 @@ class PlayerEngine extends ChangeNotifier {
           primaryGain: primaryGain,
           secondaryGain: secondaryGain,
           secondaryOpacity: opacity,
+          secondaryX: secondaryX,
+          secondaryY: secondaryY,
+          secondaryScale: secondaryScale,
           secondaryVisible: visible,
           secondaryAlphaMode: alphaMode,
           editState: oldEditState,
@@ -1494,6 +1528,9 @@ class PlayerEngine extends ChangeNotifier {
     final oldRedoState = List<_ClipEditState>.from(_redoStack);
 
     final opacity = _secondaryTrackOpacity;
+    final secondaryX = _secondaryTrackX;
+    final secondaryY = _secondaryTrackY;
+    final secondaryScale = _secondaryTrackScale;
     final visible = _secondaryTrackVisible;
     final oldAlphaMode = _secondaryTrackAlphaMode;
     final primaryGain = _primaryTrackAudioGain;
@@ -1521,6 +1558,9 @@ class PlayerEngine extends ChangeNotifier {
         primaryGain: primaryGain,
         secondaryGain: secondaryGain,
         secondaryOpacity: opacity,
+        secondaryX: secondaryX,
+        secondaryY: secondaryY,
+        secondaryScale: secondaryScale,
         secondaryVisible: visible,
         secondaryAlphaMode: oldAlphaMode,
         editState: oldEditState,
@@ -1549,6 +1589,9 @@ class PlayerEngine extends ChangeNotifier {
       primaryGain: primaryGain,
       secondaryGain: secondaryGain,
       secondaryOpacity: opacity,
+      secondaryX: secondaryX,
+      secondaryY: secondaryY,
+      secondaryScale: secondaryScale,
       secondaryVisible: visible,
       // Alpha interpretation belongs to the asset. The old base is a new
       // overlay source, so begin conservatively in Auto.
@@ -1570,6 +1613,9 @@ class PlayerEngine extends ChangeNotifier {
       primaryGain: primaryGain,
       secondaryGain: secondaryGain,
       secondaryOpacity: opacity,
+      secondaryX: secondaryX,
+      secondaryY: secondaryY,
+      secondaryScale: secondaryScale,
       secondaryVisible: visible,
       secondaryAlphaMode: oldAlphaMode,
       editState: oldEditState,
@@ -1592,6 +1638,9 @@ class PlayerEngine extends ChangeNotifier {
     required double primaryGain,
     required double secondaryGain,
     required double secondaryOpacity,
+    required double secondaryX,
+    required double secondaryY,
+    required double secondaryScale,
     required bool secondaryVisible,
     required int secondaryAlphaMode,
     _ClipEditState? editState,
@@ -1626,6 +1675,11 @@ class PlayerEngine extends ChangeNotifier {
     }
 
     if (secondaryPath != null && hasSecondaryTrack) {
+      setSecondaryTrackGeometry(
+        x: secondaryX,
+        y: secondaryY,
+        scale: secondaryScale,
+      );
       setSecondaryTrackOpacity(secondaryOpacity);
       if (!secondaryVisible) {
         setSecondaryTrackVisible(false);
@@ -1734,6 +1788,86 @@ class PlayerEngine extends ChangeNotifier {
 
   void toggleSecondaryTrackVisible() {
     setSecondaryTrackVisible(!_secondaryTrackVisible);
+  }
+
+  /// POC 10.8: move and uniformly scale Layer 2 without rebuilding the tractor.
+  /// Coordinates are base-frame pixels measured from the top-left corner.
+  void setSecondaryTrackGeometry({
+    required double x,
+    required double y,
+    required double scale,
+  }) {
+    if (!hasSecondaryTrack) {
+      return;
+    }
+
+    final requestedScale = scale.clamp(0.10, 3.0).toDouble();
+
+    if (!bridge.setSecondaryGeometry(x, y, requestedScale)) {
+      _error = bridge.lastError.isEmpty
+          ? 'MLT could not change Layer 2 position or scale.'
+          : bridge.lastError;
+      _syncSecondaryGeometry();
+      notifyListeners();
+      return;
+    }
+
+    _syncSecondaryGeometry();
+    _error = null;
+    notifyListeners();
+  }
+
+  void setSecondaryTrackX(double value) {
+    setSecondaryTrackGeometry(
+      x: value,
+      y: _secondaryTrackY,
+      scale: _secondaryTrackScale,
+    );
+  }
+
+  void setSecondaryTrackY(double value) {
+    setSecondaryTrackGeometry(
+      x: _secondaryTrackX,
+      y: value,
+      scale: _secondaryTrackScale,
+    );
+  }
+
+  void setSecondaryTrackScale(double value) {
+    setSecondaryTrackGeometry(
+      x: _secondaryTrackX,
+      y: _secondaryTrackY,
+      scale: value,
+    );
+  }
+
+  /// Anchor indices are row-major: 0 top-left through 8 bottom-right.
+  void setSecondaryTrackAnchor(int anchor) {
+    if (!hasSecondaryTrack) {
+      return;
+    }
+
+    final requested = anchor.clamp(0, 8).toInt();
+
+    if (!bridge.setSecondaryAnchor(requested)) {
+      _error = bridge.lastError.isEmpty
+          ? 'MLT could not anchor Layer 2.'
+          : bridge.lastError;
+      _syncSecondaryGeometry();
+      notifyListeners();
+      return;
+    }
+
+    _syncSecondaryGeometry();
+    _error = null;
+    notifyListeners();
+  }
+
+  void _syncSecondaryGeometry() {
+    _secondaryTrackX = bridge.secondaryX;
+    _secondaryTrackY = bridge.secondaryY;
+    _secondaryTrackScale =
+        bridge.secondaryScale.clamp(0.10, 3.0).toDouble();
   }
 
   /// POC 10.6: interpret layer 2 alpha without rebuilding the tractor.

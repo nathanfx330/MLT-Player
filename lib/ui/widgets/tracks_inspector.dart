@@ -19,11 +19,20 @@ class TracksInspector extends StatelessWidget {
     required this.secondaryAudioGain,
     required this.secondaryOpacity,
     required this.secondaryVisible,
+    required this.secondaryX,
+    required this.secondaryY,
+    required this.secondaryScale,
+    required this.baseWidth,
+    required this.baseHeight,
     required this.canSwapLayers,
     required this.onPrimaryAudioChanged,
     required this.onSecondaryAudioChanged,
     required this.onSecondaryOpacityChanged,
     required this.onSecondaryAlphaModeChanged,
+    required this.onSecondaryXChanged,
+    required this.onSecondaryYChanged,
+    required this.onSecondaryScaleChanged,
+    required this.onSecondaryAnchorChanged,
     required this.onReplacePrimarySource,
     required this.onReplaceSecondarySource,
     required this.onToggleSecondaryVisible,
@@ -45,12 +54,21 @@ class TracksInspector extends StatelessWidget {
   final double secondaryAudioGain;
   final double secondaryOpacity;
   final bool secondaryVisible;
+  final double secondaryX;
+  final double secondaryY;
+  final double secondaryScale;
+  final int baseWidth;
+  final int baseHeight;
   final bool canSwapLayers;
 
   final ValueChanged<double> onPrimaryAudioChanged;
   final ValueChanged<double> onSecondaryAudioChanged;
   final ValueChanged<double> onSecondaryOpacityChanged;
   final ValueChanged<int> onSecondaryAlphaModeChanged;
+  final ValueChanged<double> onSecondaryXChanged;
+  final ValueChanged<double> onSecondaryYChanged;
+  final ValueChanged<double> onSecondaryScaleChanged;
+  final ValueChanged<int> onSecondaryAnchorChanged;
   final VoidCallback onReplacePrimarySource;
   final VoidCallback onReplaceSecondarySource;
   final VoidCallback onToggleSecondaryVisible;
@@ -59,6 +77,11 @@ class TracksInspector extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final availableBodyHeight =
+        (MediaQuery.sizeOf(context).height - 120)
+            .clamp(280.0, 620.0)
+            .toDouble();
+
     return Material(
       color: const Color(0xF2191919),
       elevation: 18,
@@ -76,37 +99,56 @@ class TracksInspector extends StatelessWidget {
           children: [
             _buildHeader(),
             const Divider(height: 1, color: Colors.white24),
-            _LayerSection(
-              number: 1,
-              name: primaryName,
-              badge: 'BASE VIDEO',
-              start: '00:00:00:00',
-              videoLabel: 'BASE LAYER',
-              audioEnabled: primaryHasAudio,
-              audioGain: primaryAudioGain,
-              onAudioChanged: onPrimaryAudioChanged,
-              onReplaceSource: onReplacePrimarySource,
-            ),
-            const Divider(height: 1, color: Colors.white30),
-            _LayerSection(
-              number: 2,
-              name: secondaryName,
-              badge: secondaryIsStill ? 'STILL' : 'VIDEO',
-              start: secondaryStart,
-              videoOpacity: secondaryOpacity,
-              videoVisible: secondaryVisible,
-              sizeLabel: secondaryIsStill
-                  ? 'NATIVE SIZE • FIT IF LARGER'
-                  : 'FIT TO BASE FRAME',
-              audioEnabled: secondaryHasAudio,
-              audioGain: secondaryAudioGain,
-              alphaMode: secondaryAlphaMode,
-              hasAlpha: secondaryHasAlpha,
-              onVideoOpacityChanged: onSecondaryOpacityChanged,
-              onAudioChanged: onSecondaryAudioChanged,
-              onAlphaModeChanged: onSecondaryAlphaModeChanged,
-              onReplaceSource: onReplaceSecondarySource,
-              onToggleVideoVisible: onToggleSecondaryVisible,
+            ConstrainedBox(
+              constraints: BoxConstraints(maxHeight: availableBodyHeight),
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _LayerSection(
+                      number: 1,
+                      name: primaryName,
+                      badge: 'BASE VIDEO',
+                      start: '00:00:00:00',
+                      videoLabel: 'BASE LAYER',
+                      audioEnabled: primaryHasAudio,
+                      audioGain: primaryAudioGain,
+                      onAudioChanged: onPrimaryAudioChanged,
+                      onReplaceSource: onReplacePrimarySource,
+                    ),
+                    const Divider(height: 1, color: Colors.white30),
+                    _LayerSection(
+                      number: 2,
+                      name: secondaryName,
+                      badge: secondaryIsStill ? 'STILL' : 'VIDEO',
+                      start: secondaryStart,
+                      videoOpacity: secondaryOpacity,
+                      videoVisible: secondaryVisible,
+                      sizeLabel: secondaryIsStill
+                          ? '100% = NATIVE • FIT IF LARGER'
+                          : '100% = FIT TO BASE FRAME',
+                      positionX: secondaryX,
+                      positionY: secondaryY,
+                      scale: secondaryScale,
+                      baseWidth: baseWidth,
+                      baseHeight: baseHeight,
+                      audioEnabled: secondaryHasAudio,
+                      audioGain: secondaryAudioGain,
+                      alphaMode: secondaryAlphaMode,
+                      hasAlpha: secondaryHasAlpha,
+                      onVideoOpacityChanged: onSecondaryOpacityChanged,
+                      onPositionXChanged: onSecondaryXChanged,
+                      onPositionYChanged: onSecondaryYChanged,
+                      onScaleChanged: onSecondaryScaleChanged,
+                      onAnchorChanged: onSecondaryAnchorChanged,
+                      onAudioChanged: onSecondaryAudioChanged,
+                      onAlphaModeChanged: onSecondaryAlphaModeChanged,
+                      onReplaceSource: onReplaceSecondarySource,
+                      onToggleVideoVisible: onToggleSecondaryVisible,
+                    ),
+                  ],
+                ),
+              ),
             ),
           ],
         ),
@@ -189,9 +231,18 @@ class _LayerSection extends StatelessWidget {
     this.videoOpacity,
     this.videoVisible = true,
     this.sizeLabel,
+    this.positionX,
+    this.positionY,
+    this.scale,
+    this.baseWidth,
+    this.baseHeight,
     this.alphaMode,
     this.hasAlpha,
     this.onVideoOpacityChanged,
+    this.onPositionXChanged,
+    this.onPositionYChanged,
+    this.onScaleChanged,
+    this.onAnchorChanged,
     this.onAlphaModeChanged,
     this.onToggleVideoVisible,
     required this.onReplaceSource,
@@ -205,15 +256,35 @@ class _LayerSection extends StatelessWidget {
   final double? videoOpacity;
   final bool videoVisible;
   final String? sizeLabel;
+  final double? positionX;
+  final double? positionY;
+  final double? scale;
+  final int? baseWidth;
+  final int? baseHeight;
   final bool audioEnabled;
   final double audioGain;
   final int? alphaMode;
   final bool? hasAlpha;
   final ValueChanged<double> onAudioChanged;
   final ValueChanged<double>? onVideoOpacityChanged;
+  final ValueChanged<double>? onPositionXChanged;
+  final ValueChanged<double>? onPositionYChanged;
+  final ValueChanged<double>? onScaleChanged;
+  final ValueChanged<int>? onAnchorChanged;
   final ValueChanged<int>? onAlphaModeChanged;
   final VoidCallback? onToggleVideoVisible;
   final VoidCallback onReplaceSource;
+
+  bool get hasGeometry =>
+      positionX != null &&
+      positionY != null &&
+      scale != null &&
+      baseWidth != null &&
+      baseHeight != null &&
+      onPositionXChanged != null &&
+      onPositionYChanged != null &&
+      onScaleChanged != null &&
+      onAnchorChanged != null;
 
   @override
   Widget build(BuildContext context) {
@@ -303,12 +374,7 @@ class _LayerSection extends StatelessWidget {
             ),
           ),
         ),
-        const Divider(
-          height: 1,
-          indent: 12,
-          endIndent: 12,
-          color: Colors.white12,
-        ),
+        const _Rule(),
         _InspectorLine(
           label: 'START',
           child: Align(
@@ -323,12 +389,7 @@ class _LayerSection extends StatelessWidget {
             ),
           ),
         ),
-        const Divider(
-          height: 1,
-          indent: 12,
-          endIndent: 12,
-          color: Colors.white12,
-        ),
+        const _Rule(),
         _InspectorLine(
           label: 'VIDEO',
           child: videoOpacity == null
@@ -354,12 +415,7 @@ class _LayerSection extends StatelessWidget {
                 ),
         ),
         if (sizeLabel != null) ...[
-          const Divider(
-            height: 1,
-            indent: 12,
-            endIndent: 12,
-            color: Colors.white12,
-          ),
+          const _Rule(),
           _InspectorLine(
             label: 'SIZE',
             child: Align(
@@ -376,13 +432,41 @@ class _LayerSection extends StatelessWidget {
             ),
           ),
         ],
-        if (alphaMode != null) ...[
-          const Divider(
-            height: 1,
-            indent: 12,
-            endIndent: 12,
-            color: Colors.white12,
+        if (hasGeometry) ...[
+          const _Rule(),
+          _InspectorBlock(
+            label: 'ANCHOR',
+            child: _AnchorControl(onChanged: onAnchorChanged!),
           ),
+          const _Rule(),
+          _InspectorLine(
+            label: 'X',
+            child: _PixelControl(
+              value: positionX!,
+              extent: baseWidth!,
+              onChanged: onPositionXChanged!,
+            ),
+          ),
+          const _Rule(),
+          _InspectorLine(
+            label: 'Y',
+            child: _PixelControl(
+              value: positionY!,
+              extent: baseHeight!,
+              onChanged: onPositionYChanged!,
+            ),
+          ),
+          const _Rule(),
+          _InspectorLine(
+            label: 'SCALE',
+            child: _ScaleControl(
+              value: scale!,
+              onChanged: onScaleChanged!,
+            ),
+          ),
+        ],
+        if (alphaMode != null) ...[
+          const _Rule(),
           _InspectorLine(
             label: 'ALPHA',
             child: _AlphaControl(
@@ -392,12 +476,7 @@ class _LayerSection extends StatelessWidget {
             ),
           ),
         ],
-        const Divider(
-          height: 1,
-          indent: 12,
-          endIndent: 12,
-          color: Colors.white12,
-        ),
+        const _Rule(),
         _InspectorLine(
           label: 'AUDIO',
           child: _LevelControl(
@@ -408,6 +487,20 @@ class _LayerSection extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+class _Rule extends StatelessWidget {
+  const _Rule();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Divider(
+      height: 1,
+      indent: 12,
+      endIndent: 12,
+      color: Colors.white12,
     );
   }
 }
@@ -446,6 +539,236 @@ class _InspectorLine extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+class _InspectorBlock extends StatelessWidget {
+  const _InspectorBlock({
+    required this.label,
+    required this.child,
+  });
+
+  final String label;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 86,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(
+              width: 62,
+              child: Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  label,
+                  style: const TextStyle(
+                    fontSize: 9,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 0.9,
+                    color: Colors.white38,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(child: child),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _AnchorControl extends StatelessWidget {
+  const _AnchorControl({required this.onChanged});
+
+  final ValueChanged<int> onChanged;
+
+  static const List<IconData> _icons = <IconData>[
+    Icons.north_west,
+    Icons.north,
+    Icons.north_east,
+    Icons.west,
+    Icons.center_focus_weak,
+    Icons.east,
+    Icons.south_west,
+    Icons.south,
+    Icons.south_east,
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: SizedBox(
+        width: 96,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: List<Widget>.generate(3, (row) {
+            return SizedBox(
+              height: 24,
+              child: Row(
+                children: List<Widget>.generate(3, (column) {
+                  final index = row * 3 + column;
+                  return SizedBox(
+                    width: 30,
+                    height: 24,
+                    child: IconButton(
+                      tooltip: _anchorTooltip(index),
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints.tightFor(
+                        width: 28,
+                        height: 22,
+                      ),
+                      visualDensity: VisualDensity.compact,
+                      iconSize: 13,
+                      onPressed: () => onChanged(index),
+                      icon: Icon(
+                        _icons[index],
+                        color: const Color(0xFFE8A33D),
+                      ),
+                    ),
+                  );
+                }),
+              ),
+            );
+          }),
+        ),
+      ),
+    );
+  }
+
+  static String _anchorTooltip(int index) {
+    return switch (index) {
+      0 => 'Top left',
+      1 => 'Top center',
+      2 => 'Top right',
+      3 => 'Center left',
+      4 => 'Center',
+      5 => 'Center right',
+      6 => 'Bottom left',
+      7 => 'Bottom center',
+      8 => 'Bottom right',
+      _ => 'Anchor',
+    };
+  }
+}
+
+class _PixelControl extends StatelessWidget {
+  const _PixelControl({
+    required this.value,
+    required this.extent,
+    required this.onChanged,
+  });
+
+  final double value;
+  final int extent;
+  final ValueChanged<double> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final canvasExtent = extent > 0 ? extent.toDouble() : 1.0;
+    var minimum = -2.0 * canvasExtent;
+    var maximum = canvasExtent;
+
+    if (value < minimum) {
+      minimum = value;
+    }
+    if (value > maximum) {
+      maximum = value;
+    }
+    if (maximum <= minimum) {
+      maximum = minimum + 1.0;
+    }
+
+    final applied = value.clamp(minimum, maximum).toDouble();
+
+    return Row(
+      children: [
+        Expanded(
+          child: SliderTheme(
+            data: SliderTheme.of(context).copyWith(
+              trackHeight: 3,
+              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5),
+              overlayShape: const RoundSliderOverlayShape(overlayRadius: 11),
+              inactiveTrackColor: Colors.white24,
+            ),
+            child: Slider(
+              min: minimum,
+              max: maximum,
+              value: applied,
+              onChanged: onChanged,
+            ),
+          ),
+        ),
+        SizedBox(
+          width: 62,
+          child: Text(
+            '${value.round()} px',
+            textAlign: TextAlign.right,
+            style: const TextStyle(
+              fontSize: 10,
+              color: Colors.white70,
+              fontFeatures: [ui.FontFeature.tabularFigures()],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _ScaleControl extends StatelessWidget {
+  const _ScaleControl({
+    required this.value,
+    required this.onChanged,
+  });
+
+  final double value;
+  final ValueChanged<double> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final applied = value.clamp(0.10, 3.0).toDouble();
+    final percent = (applied * 100).round();
+
+    return Row(
+      children: [
+        Expanded(
+          child: SliderTheme(
+            data: SliderTheme.of(context).copyWith(
+              trackHeight: 3,
+              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5),
+              overlayShape: const RoundSliderOverlayShape(overlayRadius: 11),
+              inactiveTrackColor: Colors.white24,
+            ),
+            child: Slider(
+              min: 0.10,
+              max: 3.0,
+              value: applied,
+              onChanged: onChanged,
+            ),
+          ),
+        ),
+        SizedBox(
+          width: 44,
+          child: Text(
+            '$percent%',
+            textAlign: TextAlign.right,
+            style: const TextStyle(
+              fontSize: 10,
+              color: Colors.white70,
+              fontFeatures: [ui.FontFeature.tabularFigures()],
+            ),
+          ),
+        ),
+      ],
     );
   }
 }

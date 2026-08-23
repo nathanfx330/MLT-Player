@@ -9,6 +9,7 @@
 
 #include <float.h>
 #include <limits.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -96,6 +97,13 @@ struct _MltBridgeEngine {
     int64_t e_secondary_start_frame;
     double e_secondary_opacity;
 
+    /* POC 10.8: Layer 2 presentation geometry in base-frame pixels. */
+    double e_secondary_x;
+    double e_secondary_y;
+    double e_secondary_scale;
+    double e_secondary_base_width;
+    double e_secondary_base_height;
+
     int e_has_video;
     int e_has_audio;
     int e_is_still;
@@ -180,6 +188,11 @@ static void activate_engine_local(MltBridgeEngine *engine)
 #define track_count (current_engine()->e_track_count)
 #define secondary_start_frame (current_engine()->e_secondary_start_frame)
 #define secondary_opacity (current_engine()->e_secondary_opacity)
+#define secondary_x (current_engine()->e_secondary_x)
+#define secondary_y (current_engine()->e_secondary_y)
+#define secondary_scale (current_engine()->e_secondary_scale)
+#define secondary_base_width (current_engine()->e_secondary_base_width)
+#define secondary_base_height (current_engine()->e_secondary_base_height)
 #define has_video (current_engine()->e_has_video)
 #define has_audio (current_engine()->e_has_audio)
 #define is_still (current_engine()->e_is_still)
@@ -1191,6 +1204,11 @@ static void close_producer_locked(void)
     track_count = 0;
     secondary_start_frame = -1;
     secondary_opacity = 1.0;
+    secondary_x = 0.0;
+    secondary_y = 0.0;
+    secondary_scale = 1.0;
+    secondary_base_width = 0.0;
+    secondary_base_height = 0.0;
     secondary_has_alpha = 0;
     secondary_alpha_mode = 0;
     secondary_is_still = 0;
@@ -3257,6 +3275,11 @@ MltBridgeEngine *mlt_bridge_engine_create(void)
 
     engine->e_requested_volume = 1.0;
     engine->e_secondary_opacity = 1.0;
+    engine->e_secondary_x = 0.0;
+    engine->e_secondary_y = 0.0;
+    engine->e_secondary_scale = 1.0;
+    engine->e_secondary_base_width = 0.0;
+    engine->e_secondary_base_height = 0.0;
     engine->e_secondary_start_frame = -1;
     engine->e_secondary_has_alpha = 0;
     engine->e_secondary_alpha_mode = 0;
@@ -3820,6 +3843,239 @@ static int still_source_is_composite_ready_locked(
     mlt_producer_seek(candidate, saved_position);
 
     return ready;
+}
+
+
+/*
+ * POC 10.8 derives an explicit 100% presentation rectangle for Layer 2.
+ *
+ * Timed video keeps the previous "fit to base frame" behavior, including
+ * upscaling smaller video to the largest contained size. Still images keep
+ * native display size when they already fit and only scale down when they
+ * would exceed the base canvas. The math mirrors core/composite's aligned
+ * aspect-preserving path, including source/profile sample aspect ratio.
+ */
+static int secondary_base_size_for_source_locked(
+    mlt_producer source,
+    int source_is_still,
+    double *out_width,
+    double *out_height)
+{
+    if (source == NULL ||
+        profile == NULL ||
+        out_width == NULL ||
+        out_height == NULL ||
+        profile->width <= 0 ||
+        profile->height <= 0) {
+        return 0;
+    }
+
+    mlt_properties properties =
+        MLT_PRODUCER_PROPERTIES(source);
+
+    int source_width =
+        mlt_properties_get_int(
+            properties,
+            "meta.media.width"
+        );
+    int source_height =
+        mlt_properties_get_int(
+            properties,
+            "meta.media.height"
+        );
+
+    if (source_width <= 0) {
+        source_width =
+            mlt_properties_get_int(
+                properties,
+                "width"
+            );
+    }
+    if (source_height <= 0) {
+        source_height =
+            mlt_properties_get_int(
+                properties,
+                "height"
+            );
+    }
+
+    if (source_width <= 0 || source_height <= 0) {
+        return 0;
+    }
+
+    double source_sar =
+        mlt_properties_get_double(
+            properties,
+            "aspect_ratio"
+        );
+    if (!isfinite(source_sar) || source_sar <= 0.0) {
+        source_sar = 1.0;
+    }
+
+    double output_sar =
+        mlt_profile_sar(profile);
+    if (!isfinite(output_sar) || output_sar <= 0.0) {
+        output_sar = 1.0;
+    }
+
+    double display_width =
+        (double)source_width *
+        source_sar /
+        output_sar;
+    double display_height =
+        (double)source_height;
+
+    if (!isfinite(display_width) ||
+        !isfinite(display_height) ||
+        display_width <= 0.0 ||
+        display_height <= 0.0) {
+        return 0;
+    }
+
+    const double canvas_width =
+        (double)profile->width;
+    const double canvas_height =
+        (double)profile->height;
+
+    double fit =
+        canvas_width / display_width;
+    const double height_fit =
+        canvas_height / display_height;
+
+    if (height_fit < fit) {
+        fit = height_fit;
+    }
+
+    if (source_is_still && fit > 1.0) {
+        fit = 1.0;
+    }
+
+    if (!isfinite(fit) || fit <= 0.0) {
+        return 0;
+    }
+
+    display_width *= fit;
+    display_height *= fit;
+
+    if (display_width < 1.0) {
+        display_width = 1.0;
+    }
+    if (display_height < 1.0) {
+        display_height = 1.0;
+    }
+
+    *out_width = display_width;
+    *out_height = display_height;
+    return 1;
+}
+
+/* Call with engine_mutex held. */
+static int apply_secondary_geometry_locked(void)
+{
+    if (track_count < 2 ||
+        video_composite == NULL ||
+        secondary_base_width <= 0.0 ||
+        secondary_base_height <= 0.0 ||
+        !isfinite(secondary_x) ||
+        !isfinite(secondary_y) ||
+        !isfinite(secondary_scale) ||
+        secondary_scale <= 0.0) {
+        return 0;
+    }
+
+    const double width =
+        secondary_base_width *
+        secondary_scale;
+    const double height =
+        secondary_base_height *
+        secondary_scale;
+
+    if (!isfinite(width) ||
+        !isfinite(height) ||
+        width <= 0.0 ||
+        height <= 0.0) {
+        return 0;
+    }
+
+    char geometry[160];
+    snprintf(
+        geometry,
+        sizeof(geometry),
+        "%.6f/%.6f:%.6fx%.6f:%.6f",
+        secondary_x,
+        secondary_y,
+        width,
+        height,
+        secondary_opacity
+    );
+
+    mlt_service_lock(
+        MLT_TRANSITION_SERVICE(
+            video_composite
+        )
+    );
+
+    mlt_properties_set(
+        MLT_TRANSITION_PROPERTIES(
+            video_composite
+        ),
+        "geometry",
+        geometry
+    );
+
+    mlt_service_unlock(
+        MLT_TRANSITION_SERVICE(
+            video_composite
+        )
+    );
+
+    invalidate_frames();
+    refresh_locked();
+    return 1;
+}
+
+static int read_secondary_rect_locked(
+    mlt_rect *out_rect)
+{
+    if (out_rect == NULL ||
+        track_count < 2 ||
+        video_composite == NULL) {
+        return 0;
+    }
+
+    mlt_service_lock(
+        MLT_TRANSITION_SERVICE(
+            video_composite
+        )
+    );
+
+    const mlt_rect rect =
+        mlt_properties_anim_get_rect(
+            MLT_TRANSITION_PROPERTIES(
+                video_composite
+            ),
+            "geometry",
+            0,
+            0
+        );
+
+    mlt_service_unlock(
+        MLT_TRANSITION_SERVICE(
+            video_composite
+        )
+    );
+
+    if (!isfinite(rect.x) ||
+        !isfinite(rect.y) ||
+        !isfinite(rect.w) ||
+        !isfinite(rect.h) ||
+        rect.w <= 0.0 ||
+        rect.h <= 0.0) {
+        return 0;
+    }
+
+    *out_rect = rect;
+    return 1;
 }
 
 static int pixel_format_has_alpha_channel(
@@ -4413,6 +4669,11 @@ int mlt_bridge_open(
     track_count = 1;
     secondary_start_frame = -1;
     secondary_opacity = 1.0;
+    secondary_x = 0.0;
+    secondary_y = 0.0;
+    secondary_scale = 1.0;
+    secondary_base_width = 0.0;
+    secondary_base_height = 0.0;
     secondary_has_alpha = 0;
     secondary_alpha_mode = 0;
     secondary_is_still = 0;
@@ -4586,6 +4847,10 @@ int mlt_bridge_add_track(
     int secondary_has_audio = 0;
     int secondary_has_alpha_value = 0;
     int secondary_still = 0;
+    double pending_base_width = 0.0;
+    double pending_base_height = 0.0;
+    double pending_x = 0.0;
+    double pending_y = 0.0;
     int succeeded = 0;
     char failure[512] = "";
 
@@ -4699,6 +4964,25 @@ int mlt_bridge_add_track(
         );
         goto add_track_cleanup;
     }
+
+    if (!secondary_base_size_for_source_locked(
+            pending_secondary,
+            secondary_still,
+            &pending_base_width,
+            &pending_base_height)) {
+        snprintf(
+            failure,
+            sizeof(failure),
+            "%s",
+            "The added layer has invalid presentation geometry."
+        );
+        goto add_track_cleanup;
+    }
+
+    pending_x =
+        ((double)profile->width - pending_base_width) / 2.0;
+    pending_y =
+        ((double)profile->height - pending_base_height) / 2.0;
 
     const mlt_position secondary_length =
         secondary_still
@@ -4944,10 +5228,10 @@ int mlt_bridge_add_track(
         );
 
     /*
-     * Track 0 is the original movie. Track 1 is composited above it over the
-     * full viewer rectangle while preserving the second source's aspect.
-     * A different-aspect source therefore reveals the base movie around it,
-     * which makes the two-track proof visible without adding geometry UI yet.
+     * Track 0 is the base movie and Track 1 is an explicitly positioned
+     * overlay rectangle. POC 10.8 converts the previous implicit centred
+     * fit into concrete base-frame pixel geometry so position and scale can
+     * be changed live without rebuilding the tractor.
      */
     mlt_properties_set_int(
         composite_properties,
@@ -4965,12 +5249,11 @@ int mlt_bridge_add_track(
         0
     );
     /*
-     * Timed video layers keep the existing fit-to-canvas behavior. Still
-     * images are different: preserve their intrinsic pixel size when they
-     * already fit, but allow MLT's aligned compositor to scale them down if
-     * they are larger than the base movie. This prevents a small corner bug
-     * from being enlarged while guaranteeing that an oversized PNG can never
-     * expand or escape the base canvas.
+     * The explicit rectangle already encodes the 100% presentation size.
+     * Keep the compositor aspect-preserving and align the source to the
+     * rectangle's top-left so x/y remain literal base-frame coordinates.
+     * fill=1 is now safe for stills because their rectangle is their native
+     * size (or the fit-down size when oversized), not the whole canvas.
      */
     mlt_properties_set_int(
         composite_properties,
@@ -4980,7 +5263,7 @@ int mlt_bridge_add_track(
     mlt_properties_set_int(
         composite_properties,
         "fill",
-        secondary_still ? 0 : 1
+        1
     );
     mlt_properties_set_int(
         composite_properties,
@@ -4990,22 +5273,29 @@ int mlt_bridge_add_track(
     mlt_properties_set(
         composite_properties,
         "halign",
-        "centre"
+        "left"
     );
     mlt_properties_set(
         composite_properties,
         "valign",
-        "middle"
+        "top"
     );
-    /*
-     * The final geometry component is MLT's normalized 0.0-1.0 opacity.
-     * POC 10.4 keeps the existing full-frame/aspect-preserving placement but
-     * makes this value a live track-2 control. Start at full opacity.
-     */
+
+    char initial_geometry[160];
+    snprintf(
+        initial_geometry,
+        sizeof(initial_geometry),
+        "%.6f/%.6f:%.6fx%.6f:1.000000",
+        pending_x,
+        pending_y,
+        pending_base_width,
+        pending_base_height
+    );
+
     mlt_properties_set(
         composite_properties,
         "geometry",
-        "0%/0%:100%x100%:1.0"
+        initial_geometry
     );
 
     if (mlt_field_plant_transition(
@@ -5164,6 +5454,11 @@ int mlt_bridge_add_track(
     track_count = 2;
     secondary_start_frame = (int64_t)pending_start;
     secondary_opacity = 1.0;
+    secondary_x = pending_x;
+    secondary_y = pending_y;
+    secondary_scale = 1.0;
+    secondary_base_width = pending_base_width;
+    secondary_base_height = pending_base_height;
     secondary_alpha_filter = pending_secondary_alpha_filter;
     secondary_has_alpha = secondary_has_alpha_value ? 1 : 0;
     secondary_alpha_mode = 0;
@@ -5313,63 +5608,36 @@ int mlt_bridge_set_secondary_opacity(
         return 0;
     }
 
+    if (!isfinite(opacity)) {
+        set_error("Layer 2 opacity must be a finite value.");
+        g_mutex_unlock(&engine_mutex);
+        return 0;
+    }
+
     if (opacity < 0.0) {
         opacity = 0.0;
     } else if (opacity > 1.0) {
         opacity = 1.0;
     }
 
-    char geometry[96];
-    snprintf(
-        geometry,
-        sizeof(geometry),
-        "0%%/0%%:100%%x100%%:%.6f",
-        opacity
-    );
-
-    /*
-     * composite_calculate() reads the transition properties while holding the
-     * service lock. Use the same lock for a live property mutation so slider
-     * changes are safe while MLT render threads are active.
-     */
-    mlt_service_lock(
-        MLT_TRANSITION_SERVICE(
-            video_composite
-        )
-    );
-
-    mlt_properties_set(
-        MLT_TRANSITION_PROPERTIES(
-            video_composite
-        ),
-        "geometry",
-        geometry
-    );
-
-    mlt_service_unlock(
-        MLT_TRANSITION_SERVICE(
-            video_composite
-        )
-    );
-
+    const double previous =
+        secondary_opacity;
     secondary_opacity = opacity;
+
+    /*
+     * POC 10.8 routes opacity through the shared geometry writer so changing
+     * opacity never resets Layer 2 position or scale back to the old full-frame
+     * rectangle.
+     */
+    if (!apply_secondary_geometry_locked()) {
+        secondary_opacity = previous;
+        set_error("Could not apply Layer 2 opacity.");
+        g_mutex_unlock(&engine_mutex);
+        return 0;
+    }
+
     set_error(NULL);
-
-    /*
-     * Forget the previously published frame before asking a paused consumer
-     * to redraw it. Otherwise the frame callback would correctly recognize the
-     * same timeline position as a duplicate and skip the opacity-only update.
-     */
-    invalidate_frames();
-
-    /*
-     * A paused consumer needs an explicit refresh to repaint the same frame.
-     * During playback this simply schedules the next frame with the new value.
-     */
-    refresh_locked();
-
     g_mutex_unlock(&engine_mutex);
-
     return 1;
 }
 
@@ -5424,6 +5692,196 @@ double mlt_bridge_secondary_opacity(void)
     return result;
 }
 
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_set_secondary_geometry(
+    double x,
+    double y,
+    double scale)
+{
+    ensure_locks();
+
+    g_mutex_lock(&engine_mutex);
+
+    if (track_count < 2 ||
+        video_composite == NULL) {
+        set_error(
+            "Layer 2 geometry requires a two-layer composition."
+        );
+        g_mutex_unlock(&engine_mutex);
+        return 0;
+    }
+
+    if (!isfinite(x) ||
+        !isfinite(y) ||
+        !isfinite(scale)) {
+        set_error("Layer 2 geometry values must be finite.");
+        g_mutex_unlock(&engine_mutex);
+        return 0;
+    }
+
+    if (scale < 0.10) {
+        scale = 0.10;
+    } else if (scale > 3.0) {
+        scale = 3.0;
+    }
+
+    const double old_x = secondary_x;
+    const double old_y = secondary_y;
+    const double old_scale = secondary_scale;
+
+    secondary_x = x;
+    secondary_y = y;
+    secondary_scale = scale;
+
+    if (!apply_secondary_geometry_locked()) {
+        secondary_x = old_x;
+        secondary_y = old_y;
+        secondary_scale = old_scale;
+        set_error("Could not apply Layer 2 geometry.");
+        g_mutex_unlock(&engine_mutex);
+        return 0;
+    }
+
+    set_error(NULL);
+    g_mutex_unlock(&engine_mutex);
+    return 1;
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_set_secondary_anchor(
+    int anchor)
+{
+    ensure_locks();
+
+    g_mutex_lock(&engine_mutex);
+
+    if (track_count < 2 ||
+        video_composite == NULL ||
+        profile == NULL ||
+        anchor < 0 ||
+        anchor > 8) {
+        set_error("Layer 2 anchor requires a valid two-layer composition.");
+        g_mutex_unlock(&engine_mutex);
+        return 0;
+    }
+
+    const double width =
+        secondary_base_width *
+        secondary_scale;
+    const double height =
+        secondary_base_height *
+        secondary_scale;
+
+    if (!isfinite(width) ||
+        !isfinite(height) ||
+        width <= 0.0 ||
+        height <= 0.0) {
+        set_error("Layer 2 has invalid presentation geometry.");
+        g_mutex_unlock(&engine_mutex);
+        return 0;
+    }
+
+    const int column = anchor % 3;
+    const int row = anchor / 3;
+
+    const double available_x =
+        (double)profile->width - width;
+    const double available_y =
+        (double)profile->height - height;
+
+    const double old_x = secondary_x;
+    const double old_y = secondary_y;
+
+    secondary_x =
+        column == 0
+            ? 0.0
+            : (column == 1
+                   ? available_x / 2.0
+                   : available_x);
+    secondary_y =
+        row == 0
+            ? 0.0
+            : (row == 1
+                   ? available_y / 2.0
+                   : available_y);
+
+    if (!apply_secondary_geometry_locked()) {
+        secondary_x = old_x;
+        secondary_y = old_y;
+        set_error("Could not apply the Layer 2 anchor.");
+        g_mutex_unlock(&engine_mutex);
+        return 0;
+    }
+
+    set_error(NULL);
+    g_mutex_unlock(&engine_mutex);
+    return 1;
+}
+
+MLT_BRIDGE_EXPORT
+double mlt_bridge_secondary_x(void)
+{
+    ensure_locks();
+
+    g_mutex_lock(&engine_mutex);
+
+    double result =
+        track_count >= 2
+            ? secondary_x
+            : 0.0;
+
+    mlt_rect rect;
+    if (read_secondary_rect_locked(&rect)) {
+        result = rect.x;
+    }
+
+    g_mutex_unlock(&engine_mutex);
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+double mlt_bridge_secondary_y(void)
+{
+    ensure_locks();
+
+    g_mutex_lock(&engine_mutex);
+
+    double result =
+        track_count >= 2
+            ? secondary_y
+            : 0.0;
+
+    mlt_rect rect;
+    if (read_secondary_rect_locked(&rect)) {
+        result = rect.y;
+    }
+
+    g_mutex_unlock(&engine_mutex);
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+double mlt_bridge_secondary_scale(void)
+{
+    ensure_locks();
+
+    g_mutex_lock(&engine_mutex);
+
+    double result =
+        track_count >= 2
+            ? secondary_scale
+            : 1.0;
+
+    mlt_rect rect;
+    if (secondary_base_width > 0.0 &&
+        read_secondary_rect_locked(&rect)) {
+        result = rect.w / secondary_base_width;
+    }
+
+    g_mutex_unlock(&engine_mutex);
+    return result;
+}
 
 MLT_BRIDGE_EXPORT
 int mlt_bridge_secondary_is_still(void)
