@@ -15,31 +15,35 @@ The player stopped being only:
 one producer -> one preview consumer
 ```
 
-and became:
+and became a composition system:
 
 ```text
-Layer 1 producer -----------\
-                            -> MLT tractor -> preview consumer
-Layer 2 playlist/producer --/
+Layer 1 producer ------------------+
+                                   |
+Layer 2 playlist / producer -------+--> MLT tractor --> preview consumer
+                                   |
+Layer 3 playlist / producer -------+
 ```
 
-The important milestone was not merely drawing a second picture over the first.
-The real milestone was getting the same editable composition to survive all the
+The important milestone was never merely drawing another picture over the
+first. The real milestone was making one editable composition survive all the
 way through:
 
 ```text
 open
-add layer
-place it in time
+add layers
+place them in time
 change opacity
-change audio level
+change audio levels
 interpret alpha
-move / scale / hide / reorder it
+move / scale / hide them
+remove / restore them
 preview the result
 export the same result
 ```
 
-This document records the architecture that finally made that work.
+This document records the architecture that made that work and the hardening
+that followed once the first two-layer proof was already functional.
 
 The implementation described here was developed and tested against **MLT
 7.22.0 on Linux**.
@@ -48,32 +52,58 @@ The implementation described here was developed and tested against **MLT
 
 # 1. The POC 10 progression
 
-The work landed in small proofs rather than one large rewrite:
+POC 10 landed in small proofs rather than one large rewrite:
 
 ```text
-POC 10.1  opaque engine handles
-POC 10.2  tractor + second track
-POC 10.3  add second track at the parked playhead
-POC 10.4  live layer opacity
-POC 10.5  Tracks inspector + per-track audio levels
-POC 10.6  alpha-capable still/video layers
-POC 10.7  layer replacement, visibility, and layer-order swap
-POC 10.8  layer position, scale, and anchors
-POC 10.9  tractor-aware composition export
+10.1  opaque engine handles
+10.2  tractor + second track
+10.3  add second track at the parked playhead
+10.4  live layer opacity
+10.5  Layers/Tracks inspector + per-track audio levels
+10.6  alpha-capable still/video layers
+10.7  layer replacement, visibility, and two-layer order swap
+10.8  layer position, scale, and anchors
+10.9  tractor-aware composition export
 ```
 
-That order mattered. Every step made one new part of the graph observable before
-adding the next source of complexity.
+At 10.9 the two-layer feature loop was complete, but the architecture still
+needed to prove that it could be trusted and extended.
+
+The work after 10.9 therefore concentrated on two things:
+
+1. **hardening the existing preview/export path**, and
+2. **generalizing the composition model to a real third layer without forking
+   preview and export behavior**.
+
+That second phase added:
+
+- shared preview/export placement helpers
+- export diagnostics and explicit range state
+- native module separation
+- preview/export parity instrumentation
+- Linux CI
+- MLT 7.22 PTS diagnosis
+- composition-aware Undo/Redo and explicit layer removal
+- macro-alias cleanup
+- no-active-engine guards
+- OpenGL texture retirement cleanup
+- indexed three-slot composition snapshots
+- a real Layer 3 in both preview and export
+- Layer 3 Dart/FFI and inspector controls
+- atomic preview transactions for seamless Layer 3 Remove/Undo
+
+The order mattered. Layer 3 was not allowed into the UI until preview and export
+could independently derive and compare the same three-layer state.
 
 ---
 
-# 2. Opaque engine handles came before multitrack
+# 2. Factory lifetime and playback-engine lifetime are separate
 
 The original bridge used one process-global playback engine. That was ideal for
 proving playback, but it was the wrong ownership model once multiple graphs were
 on the roadmap.
 
-The bridge now exposes an opaque engine object:
+The bridge exposes an opaque engine object:
 
 ```c
 MltBridgeEngine *mlt_bridge_engine_create(void);
@@ -81,176 +111,127 @@ int mlt_bridge_engine_activate(MltBridgeEngine *engine);
 void mlt_bridge_engine_destroy(MltBridgeEngine *engine);
 ```
 
-Each engine owns its own playback state:
+The MLT repository/factory remains process-wide. Playback state lives in the
+engine handle.
 
-```text
-profile
-current top-level producer
-preview consumer
-primary producer
-secondary producer
-secondary playlist
-tractor
-video composite transition
-audio mix transition
-track-local filters
-frame buffers
-transport state
-stream inspection state
-```
+Each engine owns its own media and composition state, including the current
+top-level producer, source producers/playlists, tractor, transitions, filters,
+frame buffers, transport state, and inspection state.
 
-The MLT repository/factory remains process-wide.
+The Flutter texture registrar is process-wide because the Linux runner owns one
+Flutter view, but the bridge records which engine currently feeds that texture.
 
-The Flutter texture registrar is also process-wide because the Linux runner owns
-one Flutter view, but the bridge records which engine currently feeds that
-texture.
+Thread-local engine activation lets the public C ABI stay compact while keeping
+playback state out of process globals.
 
-One useful implementation trick is thread-local engine activation. The public C
-ABI keeps compact function names while the active opaque engine is selected with
-a `GPrivate` key. That let the existing bridge code move away from process-global
-playback state without rewriting every helper signature at once.
-
-The smoke test explicitly creates a second engine, opens the same media in it,
-seeks independently, then reactivates the first engine and verifies that its
+The smoke suite explicitly creates a second engine, opens media in it, seeks it
+independently, reactivates the primary engine, and verifies that the primary
 playhead did not move.
 
 The lesson:
 
-> If multiple MLT graphs are even moderately likely, separate factory lifetime
-> from playback-engine lifetime early.
+> Separate process-wide MLT lifetime from graph/player lifetime before
+> multigraph features depend on it.
 
 ---
 
-# 3. Source producers and the top-level producer are now different concepts
+# 3. The top-level producer is not the same thing as a source producer
 
-With one track, the top-level producer is simply the primary source producer.
+With one layer, the visible producer is simply the Layer 1 source.
 
-With two tracks, transport and preview must operate on the tractor producer.
-
-That means the bridge now distinguishes:
-
-```text
-primary_producer
-secondary_producer
-secondary_playlist
-tractor
-producer              <- what transport/preview sees
-```
-
-For a one-layer movie:
-
-```text
-producer == primary_producer
-```
-
-After Add to Movie:
-
-```text
-producer == mlt_tractor_producer(tractor)
-```
-
-This distinction is foundational.
-
-If transport keeps seeking the original source producer after the tractor has
-become the visible movie, preview and edit state immediately diverge.
-
----
-
-# 4. Add to Movie rebuilds the preview graph around an MLT tractor
-
-Layer 1 stays the base movie.
-
-Layer 2 is opened as a fresh producer and placed into a playlist. The tractor
-then receives:
-
-```text
-track 0 = Layer 1 producer
-track 1 = Layer 2 playlist producer
-```
-
-The tractor field receives the transitions that combine them.
+Once a composition exists, transport and preview operate on the tractor
+producer instead.
 
 Conceptually:
 
 ```text
-Layer 1 producer ------------------------------+
-                                                |
-                                                v
-                                         [ composite ] -> tractor producer
-                                                ^
-                                                |
-blank lead-in -> Layer 2 producer -> playlist -+
+one layer:
+    visible producer == Layer 1 producer
 
-Layer 1 audio ---------------------------------+
-                                                |
-                                                v
-                                              [ mix ]
-                                                ^
-                                                |
-Layer 2 audio ---------------------------------+
+multiple layers:
+    visible producer == mlt_tractor_producer(tractor)
 ```
 
-The bridge uses MLT's `composite` transition for video and `mix` for audio.
+That distinction is foundational.
 
-The resulting tractor producer becomes the preview source and is connected to
-the same `sdl2_audio` consumer architecture that already powered the one-source
-player.
+If transport keeps seeking the original source after the tractor has become the
+visible movie, preview and edit state diverge immediately.
 
-That continuity was useful: the Flutter texture path did not need to know
-whether its frames came from one producer or a tractor.
+Layer 1 remains the composition authority for canvas, frame zero, and duration,
+but it is not necessarily the object the preview consumer is connected to.
 
 ---
 
-# 5. The second layer starts at the parked playhead
+# 4. Composition state now uses stable indexed slots
 
-Add to Movie is playhead-relative.
+The two-layer implementation began with names such as `primary` and
+`secondary`. That was understandable while only one overlay existed, but it
+became an architectural trap as soon as Layer 3 was planned.
 
-Before rebuilding the graph, the bridge captures the viewer-visible position.
-If playback is active, it prefers the consumer-visible frame rather than blindly
-trusting producer read-ahead.
-
-Layer 2 is then placed into an MLT playlist with a blank lead-in:
+The hardened model uses three stable slots:
 
 ```text
-frame 0                             insertion frame
-|---------------------------------------|
-|               blank                   | Layer 2 ...
+slot 0 = Layer 1 / base movie
+slot 1 = Layer 2 / overlay
+slot 2 = Layer 3 / overlay
+```
+
+Shared native headers define the slot count and indexed layer structures. The
+export boundary also uses indexed layer snapshots rather than a one-off bundle
+of `base_*` and `layer2_*` fields.
+
+This matters because preview and export can now reason about composition state
+with the same vocabulary.
+
+A fourth layer is currently rejected explicitly. The current product supports
+three layers; it does not silently grow an untested graph topology.
+
+---
+
+# 5. Add to Movie is playhead-relative
+
+A new overlay starts at the parked playhead.
+
+Before rebuilding the graph, the bridge captures the viewer-visible frame. If
+playback is active, it prefers the consumer-visible position instead of blindly
+trusting producer read-ahead.
+
+A timed overlay is placed into an MLT playlist with a blank lead-in:
+
+```text
+frame 0                         insertion frame
+|------------------------------------|
+|               blank                | media ...
 ```
 
 The playlist shape is approximately:
 
 ```c
-if (secondary_start > 0) {
-    mlt_playlist_blank(
-        secondary_playlist,
-        secondary_start - 1
-    );
+if (start_frame > 0) {
+    mlt_playlist_blank(playlist, start_frame - 1);
 }
 
 mlt_playlist_append_io(
-    secondary_playlist,
-    secondary_producer,
+    playlist,
+    source,
     0,
-    secondary_out
+    source_out
 );
 ```
 
-This is much cleaner than trying to offset the producer with ad-hoc frame math
-on every request.
+After the tractor is built, the bridge seeks the new top-level producer back to
+the saved playhead and preserves the transport state.
 
-After the tractor is built, the bridge seeks the new tractor producer back to
-the saved playhead and keeps it paused.
-
-The edit therefore changes the movie graph without turning into a transport
-command.
+The same placement policy is used for Layer 2 and Layer 3 and is reproduced by
+the export graph.
 
 ---
 
-# 6. Layer 1 defines the movie duration
+# 6. Layer 1 defines movie duration
 
-A multitrack graph introduces an immediate policy question:
+A multitrack graph immediately raises a policy question:
 
-> If Layer 2 is longer than Layer 1, how long is the movie?
+> If an overlay is longer than the base movie, how long is the movie?
 
 For this QuickTime-style workflow the answer is deliberately simple:
 
@@ -258,143 +239,78 @@ For this QuickTime-style workflow the answer is deliberately simple:
 Layer 1 is authoritative.
 ```
 
-The bridge sets the tractor producer's In/Out to the primary movie length even
-though MLT's multitrack refresh logic may otherwise report the longest connected
-track.
+The tractor is constrained to Layer 1's movie length even if an overlay source
+is longer.
 
-Layer 2 is clipped to the remaining available time in the base movie.
-
-A still image is held from its insertion frame through the end of Layer 1.
+Timed overlays are clipped to the available remaining span. Still images are
+held from their insertion frame through the end of Layer 1.
 
 This gives the composition a stable identity:
 
 ```text
 Layer 1 = movie
-Layer 2 = added layer inside that movie
+Layers 2/3 = media placed inside that movie
 ```
 
-That policy is also reused by export.
+Export follows the same rule.
 
 ---
 
-# 7. Still-image layers needed their own import path
+# 7. Still-image layers need different treatment from timed media
 
-A still image is not just a very short video producer.
+A still image is not simply a one-frame video.
 
-For Layer 2 stills the bridge prefers MLT's `pixbuf` producer and falls back to
-`avformat` when necessary.
+For overlay stills the bridge prefers an RGBA-capable MLT still path and verifies
+that the producer can supply composite-safe image data.
 
-That avoided letting the generic loader select a Qt/QImage path from the helper
-isolate and gave the project a dependable RGBA-capable still producer.
-
-The bridge also verifies that the still can produce composite-safe image data
-before accepting it into the graph.
-
-For sizing, stills follow a slightly different rule from timed video:
+Sizing also differs intentionally:
 
 ```text
 timed video:
-    fit to the base canvas, including upscaling if needed
+    100% = fitted presentation size for the base canvas
 
 still image:
-    keep native display size when it already fits
+    keep native presentation size when it already fits
     scale down only when it exceeds the base canvas
 ```
 
-That keeps a small logo from being automatically blown up to fill the movie.
+That keeps a small logo from being automatically enlarged to fill the movie.
+
+A held still remains present through the final Layer 1 frame. Both the native
+smoke test and preview/export parity harness verify that behavior for Layer 2
+and Layer 3 scenarios.
 
 ---
 
-# 8. Per-track audio is applied before the tractor mix
+# 8. Geometry and opacity are one render-state bundle
 
-Each audio-bearing track gets a track-local MLT `volume` filter.
-
-The filter gain is stored independently for Layer 1 and Layer 2:
-
-```text
-Layer 1 producer -> volume filter --+
-                                    |
-                                    +-> mix transition
-                                    |
-Layer 2 playlist -> volume filter --+
-```
-
-The mix transition is configured as an always-active summing mix.
-
-This separation matters because a global consumer volume control and a track
-mix level are different user intents.
-
-```text
-consumer volume = listening level
-track gain       = composition state
-```
-
-Composition export snapshots and reapplies the track gains.
-
----
-
-# 9. Opacity belongs to the composite geometry
-
-The MLT `composite` transition carries position, size, and opacity together in
+MLT's `composite` transition carries position, size, and opacity together in
 its geometry rectangle.
 
-The bridge therefore treats them as one state bundle instead of three unrelated
-properties.
+The bridge therefore treats those properties as one state bundle rather than
+independent unrelated controls.
 
-The current geometry string is written in the form:
+Conceptually the geometry is expressed as:
 
 ```text
 x/y:widthxheight:opacity
 ```
 
-For example, conceptually:
+A crucial rule emerged early:
+
+> Changing opacity must rewrite the current geometry, not default geometry.
+
+Otherwise touching opacity after moving/scaling an overlay would snap it back
+to its original rectangle.
+
+Current clamps are:
 
 ```text
-48/24:640x360:0.60
+opacity  0.0 .. 1.0
+scale    0.10 .. 3.00
 ```
 
-A key bug-prevention rule emerged here:
-
-> Changing opacity must rewrite the current geometry, not a default full-frame
-> geometry.
-
-Otherwise a user can move/scale a layer, touch opacity, and accidentally snap
-it back to its original rectangle.
-
-The bridge now routes opacity updates through the same geometry writer used by
-position and scale.
-
-Opacity is clamped to:
-
-```text
-0.0 .. 1.0
-```
-
-Scale is currently clamped to:
-
-```text
-0.10 .. 3.00
-```
-
-The smoke test checks both clamps and verifies that opacity changes preserve
-position and scale.
-
----
-
-# 10. Position, scale, and anchors are live tractor edits
-
-POC 10.8 made Layer 2 geometry editable without rebuilding the tractor.
-
-Coordinates are base-frame pixels measured from the top-left corner.
-
-The bridge stores an explicit 100% presentation size for Layer 2, then computes:
-
-```text
-visible_width  = base_width  * scale
-visible_height = base_height * scale
-```
-
-Nine anchors are available through a 3 x 3 grid:
+Nine anchors use the scaled visible rectangle:
 
 ```text
 top-left      top-center      top-right
@@ -402,69 +318,36 @@ middle-left   center          middle-right
 bottom-left   bottom-center   bottom-right
 ```
 
-The anchor calculation uses the *scaled visible rectangle*, not the source's
-unscaled dimensions.
-
-This is another small detail that is easy to get wrong when media geometry and
-UI geometry meet.
+Layer 2 and Layer 3 each carry independent X/Y, scale, opacity, and anchor
+behavior.
 
 ---
 
-# 11. Visibility is a render switch, not destructive state
+# 9. Visibility is not destructive opacity
 
-Hiding Layer 2 does not destroy its requested opacity.
+Hiding an overlay does not destroy the user's requested opacity.
 
-The Dart engine keeps the user's opacity value and temporarily sends native
-opacity zero as the render switch.
+The Dart engine keeps the requested opacity as composition state and sends zero
+to the native render path while the layer is hidden. Showing the layer again
+restores the requested value.
 
-When the layer is shown again, its previous opacity is restored.
-
-That gives visibility the expected semantics:
+Therefore:
 
 ```text
-hide != set opacity permanently to zero
+hide != permanently set opacity to zero
 ```
 
-Because native opacity is what the composition graph actually uses, a hidden
-layer also remains hidden when the composition is exported.
+Because the native render result is what export snapshots, a hidden layer also
+remains hidden in offline output.
 
 ---
 
-# 12. Layer-order swap is implemented as a graph rebuild
+# 10. Alpha interpretation is explicit
 
-The current two-layer model has semantic slots:
+MLT can expose alpha through decoded image data, but source RGB values may still
+need interpretation.
 
-```text
-Layer 1 = timed base
-Layer 2 = overlay
-```
-
-Swapping order exchanges which media occupies those slots and rebuilds the
-pair. It is deliberately not presented as a timeline edit.
-
-A still image is not allowed to become Layer 1 because Layer 1 defines the timed
-movie.
-
-The rebuild preserves the important composition controls where they still make
-sense, including the Layer 2 insertion time, opacity, visibility, geometry, and
-audio levels.
-
-If the swap fails, the application attempts to rebuild the previous composition
-rather than leaving a half-mutated graph behind.
-
-That rollback behavior is worth keeping in any graph editor:
-
-> Build the new graph first; only publish it as current state after the whole
-> operation succeeds.
-
----
-
-# 13. Alpha needed an explicit interpretation control
-
-MLT can expose alpha through image formats and frame alpha planes, but the
-source's RGB values may still need interpretation.
-
-MLT Player currently exposes three modes for Layer 2:
+Overlay layers expose three modes:
 
 ```text
 Auto
@@ -472,31 +355,104 @@ Straight
 Premultiplied
 ```
 
-Auto and Straight preserve MLT's native decode path.
+Auto and Straight keep the native decode path.
 
-Premultiplied enables a small bridge-owned filter that requests RGBA,
-unpremultiplies RGB by alpha, then converts back to the image format requested by
-the downstream MLT service.
+Premultiplied uses a bridge-owned alpha filter that requests RGBA,
+unpremultiplies RGB by alpha, and then converts back to the downstream format
+requested by MLT.
 
-That final conversion is important. The composite transition may request YUV422;
-returning RGBA from the filter while claiming the caller's old format would make
-the downstream service interpret the wrong byte layout.
+That final conversion is essential: a custom image filter must honor the
+requested downstream image format rather than simply returning pixels that look
+correct in isolation.
 
-The useful lesson is broader than alpha:
-
-> A custom MLT image filter must honor the downstream image-format contract,
-> not merely produce pixels that look correct in isolation.
-
-The project also detects likely source alpha from codec pixel-format metadata and
-from an actual source frame.
+The project detects likely alpha from codec pixel-format metadata and from
+actual frame data. Layer 2 and Layer 3 carry independent alpha modes.
 
 ---
 
-# 14. The first export architecture was correct, but no longer sufficient
+# 11. Track gain is composition state; consumer volume is monitoring state
 
-POC 9 made the right decision by giving export its own MLT graph.
+Each audio-bearing track gets a track-local MLT `volume` filter before tractor
+mixing.
 
-Originally that graph was:
+Conceptually with three audio-bearing layers:
+
+```text
+Layer 1 -> volume --+
+                    |
+Layer 2 -> volume --+--> tractor mix
+                    |
+Layer 3 -> volume --+
+```
+
+The exact tractor field can require more than one `mix` transition as layers are
+added, but the user-facing policy remains simple: each layer has an independent
+composition gain.
+
+That is different from global consumer volume:
+
+```text
+consumer volume = listening level
+track gain       = movie/composition state
+```
+
+Export snapshots and reapplies the per-track gains.
+
+---
+
+# 12. Layer 3 is a real tractor track, not a preview-only overlay
+
+The critical Layer 3 rule was that it had to land in preview and export at the
+same time.
+
+Adding Layer 3 rebuilds the preview tractor as three tracks:
+
+```text
+track 0 = Layer 1
+track 1 = Layer 2 playlist
+track 2 = Layer 3 playlist
+```
+
+Before publishing the new tractor, the bridge recreates Layer 2's live
+composition state on the new field and then plants Layer 3 above it.
+
+If Layer 3 insertion fails, the previous two-layer graph and playhead are
+restored instead of leaving a half-rebuilt movie.
+
+That rollback rule is important:
+
+> Do not publish a replacement composition until the replacement graph is
+> complete enough to become the current movie.
+
+The smoke/parity tests also deliberately attempt a fourth layer and verify that
+rejection does not disturb the valid three-layer tractor.
+
+---
+
+# 13. Two-layer order swapping remains intentionally limited
+
+Layer 1 has special semantics: it is the timed base and duration authority.
+
+The original two-layer order swap exchanges the media occupying Layer 1 and
+Layer 2, with the restriction that the resulting Layer 1 must remain timed
+media.
+
+Once Layer 3 exists, that operation is disabled.
+
+The app requires the top layer to be removed first rather than inventing an
+implicit three-way reindex/reorder policy.
+
+This is a product decision as much as an engineering decision. The application
+is intentionally avoiding a conventional NLE timeline until there is a clear,
+precise interaction model for broader reordering.
+
+---
+
+# 14. Export is composition reconstruction, not source export
+
+POC 9 correctly gave export an independent background MLT graph.
+
+The first export graph was simply:
 
 ```text
 fresh profile
@@ -504,134 +460,53 @@ fresh source producer
 avformat consumer
 ```
 
-That was safe for a single-source movie, but after POC 10 it had a fatal logical
-problem:
+That became editorially wrong as soon as preview became a tractor.
 
-```text
-preview = tractor composition
-export  = reopened base source only
-```
+A successful export of only Layer 1 would still be the wrong movie.
 
-The export could succeed technically while being wrong editorially.
+POC 10 therefore treats export as **composition reconstruction**.
 
-That is the difference between **source export** and **composition export**.
+The preview tractor is never handed to the encoder thread. Instead the bridge
+snapshots indexed composition state and the worker builds fresh producers,
+playlists, filters, transitions, and a fresh tractor.
 
-POC 10.9 fixes that distinction.
-
----
-
-# 15. Composition export snapshots state, then rebuilds fresh MLT objects
-
-The live preview tractor is still never handed to the encoder thread.
-
-Instead, when export begins, the bridge snapshots the composition state needed
-to reconstruct it:
-
-```text
-primary source path
-secondary source path
-Layer 2 insertion frame
-Layer 1 audio gain
-Layer 2 audio gain
-Layer 2 opacity / visibility result
-Layer 2 x / y
-Layer 2 scale
-Layer 2 alpha interpretation
-whether Layer 2 is a still
-whether each layer has audio
-requested export range
-export kind
-```
-
-The worker then creates a completely new graph:
-
-```text
-fresh export profile
-fresh Layer 1 producer
-fresh Layer 2 producer
-fresh Layer 2 playlist
-fresh tractor
-fresh composite transition
-fresh audio mix transition
-fresh avformat consumer
-```
-
-This preserves the most important POC 9 rule:
-
-```text
-preview graph and export graph share no live producer/tractor objects
-```
-
-The only shared MLT object is the initialized factory/repository.
+The preview and export graphs share no live producer/playlist/tractor objects.
+They share only process-wide MLT infrastructure and copied state.
 
 ---
 
-# 16. The export worker recreates the tractor, not a visual approximation
+# 15. The export snapshot is indexed
 
-The worker follows the same structural rules as preview:
+The current snapshot describes up to three stable layer slots.
 
-```text
-track 0 = fresh primary producer
-track 1 = fresh Layer 2 playlist with blank lead-in
-```
-
-It plants a fresh `composite` transition between tracks 0 and 1 and writes the
-saved geometry:
+For each layer it can carry the information needed to rebuild offline output,
+including:
 
 ```text
-x/y:(base_width * scale)x(base_height * scale):opacity
+present / absent
+source path
+start frame
+still / timed classification
+alpha mode
+has audio
+requested audio gain
+opacity / visibility render result
+x / y
+scale
 ```
 
-If Layer 2 has audio, it plants a fresh `mix` transition as well.
+Layer 1 remains the profile/duration authority.
 
-Per-track volume filters and the saved alpha interpretation are also rebuilt.
+The export worker then reconstructs the same topology preview uses.
 
-Finally:
-
-```c
-graph->export_top =
-    mlt_tractor_producer(graph->export_tractor);
-```
-
-The encoder connects to that producer.
-
-This is the point where two-layer export became real: the consumer is no longer
-rendering a file that happens to be part of the composition; it is pulling
-frames from the rebuilt composition graph itself.
+That indexed boundary was the architectural prerequisite for Layer 3. It avoids
+creating a second export implementation made from `layer3_*` special cases.
 
 ---
 
-# 17. Whole Movie is now an explicit export range mode
+# 16. All export families use the composition path
 
-Before composition export, range behavior implicitly preferred a marked
-selection whenever one existed.
-
-That became surprising once the app started behaving more like a movie with
-layers.
-
-The export UI now has an explicit range choice:
-
-```text
-RANGE
-  Whole Movie
-  In / Out
-```
-
-`Whole Movie` is the default.
-
-For a trimmed movie, Whole Movie means the current active trim bounds.
-
-`In / Out` is available when a valid marked range exists.
-
-This is a UI decision, but it simplified the engine contract too: export no
-longer has to guess whether the mere presence of markers means the user intended
-to restrict the render.
-
----
-
-# 18. All export families now use the composition path
-
-The tractor-aware start function is shared by:
+The composition-aware graph feeds:
 
 ```text
 MP4 video
@@ -640,214 +515,449 @@ PNG image sequence
 WAV audio
 ```
 
-That means a Layer 2 logo, alpha video, opacity change, position/scale change,
-hidden layer, or second audio track is no longer a preview-only feature.
+That means overlay position, opacity, alpha, visibility, still holding, and
+track audio gain are not preview-only effects.
 
-The same composition snapshot feeds every offline output type.
-
-The existing POC 9 output policies still apply:
+The output policies established in POC 9 still apply:
 
 ```text
-MP4      H.264 / AAC when composition has audio
-PNG      square-pixel display geometry, progressive, Lanczos
-sequence validated frame-for-frame
-WAV      24-bit PCM output
-real_time = -1 for offline export
-partial outputs removed on failure/cancel
+MP4      H.264 / libx264, AAC when composition has audio
+PNG      display-correct square-pixel output
+sequence deterministic owned filenames
+WAV      24-bit PCM composition mixdown
 ```
+
+The exporter also writes a JSON telemetry sidecar while MP4 export runs. It
+tracks requested/completed frames, throughput, wall time, CPU usage, graph and
+consumer setup, and final result state.
+
+That diagnostic proved an apparent "slow export" bug was actually a range-state
+bug: the encoder was rendering the whole movie rather than the intended marked
+range.
 
 ---
 
-# 19. Audio-only export is now a mixdown
+# 17. Export range selection is explicit and fail-closed
 
-Once two tracks can contain audio, WAV export can no longer ask only whether the
-base source has an audio stream.
-
-The composition reports audio if either layer has audio.
-
-The worker chooses an audio-bearing source for metadata such as sample rate and
-channel count, but the actual frames come from the tractor, including the
-track-local gains and the planted mix transition.
-
-So the WAV operation has changed semantically from:
+The export UI separates output type from range intent:
 
 ```text
-extract/export source audio
+RANGE
+  Whole Movie
+  In / Out
 ```
 
-into:
+Whole Movie is the default. For a trimmed movie it means the current active
+trim bounds.
 
-```text
-render composition audio mix
-```
+In / Out requires a complete valid pair. The engine no longer guesses that the
+mere presence of one marker implies a valid selected export range.
 
-That is exactly the kind of semantic change that should be documented when a
-player grows editing capability.
+A newly completed valid In/Out pair can choose In / Out implicitly until the
+user explicitly selects a range mode. Once the user explicitly selects Whole
+Movie or In / Out, that choice remains sticky according to the application
+history rules.
+
+The important architectural point is simpler:
+
+> Invalid range state must stop export before native work starts.
 
 ---
 
-# 20. Export completion is still validated at the top-level producer
+# 18. Preview/export parity is now a first-class regression test
 
-The POC 9 lifecycle rules survived the move to tractors:
+Once two different graphs were expected to represent the same movie, ordinary
+smoke testing was not enough.
 
-```text
-start consumer
-poll top-level export producer position
-allow cooperative cancellation
-stop consumer even after EOF
-join/flush worker threads
-validate output
-clean partial output on failure
-```
+The project therefore added a headless parity harness.
 
-The only important substitution is:
+The harness derives observable state from:
+
+1. the live preview graph, and
+2. a freshly built export graph created from the same snapshot.
+
+It then compares:
 
 ```text
-old progress source = single export producer
-new progress source = export tractor producer
+layer count
+profile width / height
+frame rate
+composition length
+normalized export range
+layer presence
+layer start frame
+playlist/timeline length
+still/timed classification
+alpha mode
+presentation geometry
+opacity
+track audio presence
+track gain
 ```
 
-For a requested inclusive range:
+Current parity scenarios include:
 
-```text
-frames = out - in + 1
-```
+- timed Layer 2 with non-default geometry/opacity/gains
+- held-alpha Layer 2
+- timed/audio Layer 3 with independent Layer 2 and Layer 3 controls
+- held-alpha Layer 3 through the composition final frame
 
-The worker continues to publish progress without calling back directly into
-Dart from the encoder thread.
+The Layer 3 cases also verify that both preview and export report the third
+indexed slot as present and equivalent.
+
+This harness is the main reason Layer 3 could be added with confidence: export
+was not allowed to drift into a third implementation of composition semantics.
 
 ---
 
-# 21. The smoke test now exercises the editing graph, not only transport
+# 19. Composition Undo/Redo has explicit baseline semantics
 
-The headless bridge test has become much more valuable during POC 10.
+The first history model covered trim and selection state. POC 10 extended it to
+composition state.
 
-In addition to playback transport, it now verifies things such as:
+Property history includes overlay visibility, opacity, geometry, alpha mode,
+source replacement, and per-track gains. Slider drags are grouped into one Undo
+step rather than filling history with every intermediate slider event.
+
+Adding a layer has special semantics:
 
 ```text
-second opaque engine isolation
-add Layer 2 at an exact insertion frame
-blank lead-in seeks
-tractor playhead preservation
-opacity round-trip and clamps
-position / scale round-trip and clamps
-anchor calculations
-per-track audio gain
-still-image Layer 2
-alpha detection and interpretation
-held still surviving to the final base-movie frame
-whole-movie layered MP4 export
-non-empty layered export output
+Add Layer 2 -> new Undo baseline
+Add Layer 3 -> new Undo baseline
 ```
 
-That is the right place to prove MLT graph behavior.
+That means a user can edit a newly added layer, Undo those property edits back
+to the freshly created composition, and stop there. Repeated Undo does not
+unexpectedly remove the layer that established the current composition.
 
-Flutter tests can then focus on application state and UI behavior instead of
-trying to diagnose every graph failure through pixels on screen.
+Explicit Remove is different:
+
+```text
+Remove Layer -> normal undoable edit
+```
+
+Undo after removing Layer 3 reconstructs the exact saved Layer 3 state.
+
+Layer 2 cannot be removed while Layer 3 exists; the stack must be reduced from
+the top.
 
 ---
 
-# 22. The architecture at the POC 10 checkpoint
+# 20. Correct history was not enough; restore also had to look atomic
+
+The first Layer 3 Remove/Undo implementation was logically correct but visibly
+ugly.
+
+Undo rebuilt Layer 2, reapplied its settings, and then made Layer 3 reappear.
+The final composition was correct, but the user could watch the intermediate
+graph states.
+
+The first optimization stopped rebuilding Layer 2 unnecessarily when the
+existing Layer 1/2 state already matched the history snapshot. That made the
+restore faster, but not completely seamless because native `add_track` still had
+to rebuild the tractor.
+
+The final solution added a small preview transaction.
+
+During an atomic composition restore:
 
 ```text
-Flutter UI
-    |
-    +-- PlayerEngine
-    |      +-- transport / selection / trim
-    |      +-- Layer 2 state and inspector controls
-    |      +-- explicit export range mode
-    |      +-- export status
-    |
-    +-- Dart FFI
-           |
-           v
-    opaque MltBridgeEngine
-           |
-           +---------------- preview ----------------+
-           |                                         |
-           |   Layer 1 producer                      |
-           |          \                              |
-           |           +-> tractor -> sdl2_audio ----+-> RGBA cache
-           |          /                                  -> OpenGL texture
-           |   Layer 2 playlist                         -> Flutter Texture
-           |      + composite transition
-           |      + audio mix transition
-           |
-           +---------------- export -----------------+
-                                                     |
-                    snapshot composition state       |
-                             |                       |
-                             v                       |
-                    background worker                |
-                             |                       |
-                    fresh Layer 1 producer            |
-                    fresh Layer 2 playlist            |
-                    fresh tractor                     |
-                    fresh composite / mix             |
-                             |                       |
-                    avformat consumer ----------------+
+begin preview transaction
+    freeze publication of newly rendered frames
+    keep the last valid external texture visible
+    suppress intermediate Dart ChangeNotifier updates
+    rebuild / modify the tractor
+    reapply saved layer state
+end preview transaction
+    invalidate duplicate-frame suppression
+    request one fresh frame from the finished graph
+    publish one final Dart state
 ```
 
-The major rule is still the same as POC 9:
+A depth counter makes nested transaction paths safe, and failure paths always
+release the freeze.
 
-> Preview and export may represent the same movie, but they do not share live
-> MLT graph objects.
+This is why Layer 3 Remove and Undo now appear seamless: the user sees the old
+finished composition until the new finished composition is ready.
+
+The lesson is useful outside this project:
+
+> Transactional state restoration must control both the model notification path
+> and the rendered-frame publication path if intermediate graph states are
+> visually observable.
 
 ---
 
-# 23. What POC 10 proved
+# 21. Native hardening removed hidden assumptions
 
-At this checkpoint MLT Player has proven that an embedded Flutter/MLT desktop
-application can:
+Several cleanup passes happened before Layer 3 was exposed.
 
-1. keep playback engines independently owned,
-2. promote a one-source viewer into a two-track tractor,
-3. place a second video/still layer at an exact movie frame,
-4. composite that layer with opacity and alpha,
-5. move and scale it live,
-6. mix track audio independently,
-7. hide, replace, and reorder the overlay,
-8. keep Layer 1 authoritative for movie duration,
-9. preserve the existing Flutter texture playback architecture, and
-10. rebuild and export the same composition on a separate MLT worker graph.
+## Macro alias cleanup
 
-The last point is the one that closes the loop.
+The bridge had accumulated dozens of preprocessor aliases mapping old global
+names onto fields in the active engine.
 
-A compositing feature is not really finished when it appears in preview.
-It is finished when the offline render is driven by the same composition model.
+Those aliases were removed and replaced with explicit engine-field access. Only
+real compile-time constants remain as macros.
+
+That made ownership and missing-engine behavior much easier to reason about.
+
+## No-active-engine guards
+
+Public media/transport/property entry points now fail closed if no opaque engine
+is active.
+
+Depending on return type they provide a safe neutral or sentinel value, and the
+last-error path reports that no active MLT engine exists.
+
+A dedicated smoke program destroys the active engine and deliberately calls the
+bridge afterward to prove the process does not crash.
+
+## OpenGL texture retirement
+
+OpenGL texture names cannot safely be deleted from arbitrary teardown code
+because a valid GL context is not guaranteed there.
+
+The bridge therefore retires old texture IDs and drains them from Flutter's
+texture-population path, where a valid GL context exists. Unregister also waits
+for in-flight raster readers before retiring the old name.
+
+That makes re-register/hot-restart cycles safer without issuing GL deletion from
+the wrong thread/context.
 
 ---
 
-# 24. What comes next
+# 22. The MLT 7.22 unset-PTS warning was diagnosed, not papered over
 
-The current graph is intentionally still small.
-
-The next useful work is refinement and generalization rather than another proof
-that MLT can composite two things.
-
-Likely directions include:
+Successful MP4 exports with encoded audio can emit FFmpeg warnings such as:
 
 ```text
-more than two tracks
-richer track timing/edit operations
-output preset / codec selection
-explicit output frame-rate control
-blend-mode exploration
-more complete alpha/color policy
-MLT XML save/open
-image-sequence import at explicit frame rate
+Timestamps are unset in a packet for stream 1
+Encoder did not produce proper pts, making some up.
 ```
 
-The important architectural pieces are now in place:
+The project added a focused PTS diagnostic with four cases:
 
 ```text
-opaque engine ownership
-tractor as the visible movie
-distinct source-vs-top-level producer model
-application-owned edit intent
-worker-owned export graph
-composition snapshot -> graph reconstruction
+simple + audio
+simple + silent
+layered + audio
+layered + silent
 ```
 
-That is a much stronger base than trying to grow multitrack behavior around a
-single process-global producer.
+The result is stable:
+
+```text
+audio cases   -> warning
+silent cases  -> no warning
+```
+
+Debug logging also shows audio packets reaching the relevant flush path with
+`AV_NOPTS_VALUE`.
+
+The application exporter does not manipulate AVPackets directly, so the project
+does not insert a speculative local timestamp patch into composition code.
+
+For MLT 7.22 this is treated as an upstream `avformat` audio-flush issue rather
+than a Layer 2/Layer 3 graph bug.
+
+---
+
+# 23. The native code is split by responsibility
+
+The original proof grew inside one large bridge translation unit. POC 10
+hardening separated responsibilities:
+
+```text
+native/mlt_bridge.c
+    engine lifecycle
+    preview graph
+    transport
+    frame/texture path
+    public bridge ABI
+
+native/mlt_composition.c/.h
+    shared placement / geometry / transition helpers
+
+native/mlt_export.c/.h
+    background export worker
+    export graph ownership
+    export diagnostics
+
+native/mlt_layers.h
+    indexed layer-slot definitions
+
+native/mlt_layer_api.h
+    indexed layer-control ABI used by Layer 3-aware Dart code
+
+native/mlt_parity_smoke.c
+    preview/export graph equivalence checks
+
+native/mlt_pts_smoke.c
+    focused MP4 audio timestamp diagnosis
+
+native/mlt_guard_smoke.c
+    no-active-engine regression checks
+```
+
+This split is not cosmetic. It prevents export code from reaching into the live
+preview engine and gives parity tests a cleaner boundary to exercise.
+
+---
+
+# 24. `tools/smoke.sh` is the current native safety net
+
+The normal native regression command is:
+
+```bash
+tools/smoke.sh
+```
+
+It builds and runs:
+
+1. no-active-engine guard tests
+2. the main native bridge smoke test
+3. preview/export parity
+4. the MP4 PTS diagnostic
+
+The main smoke test covers transport, opaque-engine isolation, Layer 2 placement,
+opacity, geometry, anchors, track audio, stills, alpha, layered export,
+reopen/reset, junk rejection, and teardown.
+
+Parity adds the three-layer cases and exact preview/export state comparison.
+
+The PTS diagnostic remains informational for the known MLT 7.22 audio warning;
+it is designed to catch a change in where that warning appears rather than to
+pretend the upstream condition does not exist.
+
+Linux CI runs the analyzer and native smoke/parity path against the project's
+pinned environment.
+
+---
+
+# 25. Current UI rules for a three-layer composition
+
+The Layers inspector exposes Layer 1, Layer 2, and Layer 3 state.
+
+Current behavior is deliberately constrained:
+
+```text
+Layer 1
+    timed base
+    duration/profile authority
+    audio gain
+
+Layer 2
+    video or held still
+    playhead-relative start
+    opacity / visibility
+    X / Y / scale / anchors
+    alpha interpretation
+    audio gain
+    replace source
+
+Layer 3
+    video or held still
+    playhead-relative start
+    opacity / visibility
+    X / Y / scale / anchors
+    alpha interpretation
+    audio gain
+    replace source
+```
+
+When three layers exist:
+
+- Layer 3 is the removable top layer.
+- Layer 2 removal is blocked until Layer 3 is removed.
+- the existing Layer 1/Layer 2 swap is disabled.
+- a fourth layer is rejected.
+
+These limits keep the interaction model precise while the product remains a
+QuickTime-style utility rather than drifting into a conventional NLE timeline.
+
+---
+
+# 26. What POC 10 now proves
+
+At this checkpoint MLT Player has demonstrated all of the following in one
+architecture:
+
+```text
+one/two/three-layer preview
+playhead-relative overlay placement
+timed and held-still overlays
+alpha-aware compositing
+independent overlay geometry
+independent per-track gain
+composition-aware Undo/Redo
+explicit layer removal
+seamless Layer 3 Remove/Undo
+independent background composition export
+preview/export parity diagnostics
+fail-closed native engine access
+headless regression coverage
+```
+
+The important result is not simply that three pictures can appear at once.
+
+The result is that **the same three-layer movie exists coherently across UI
+state, native preview state, history restoration, and offline export**.
+
+That is the foundation needed before interchange or a broader track model makes
+sense.
+
+---
+
+# 27. Current boundaries and next work
+
+The current model intentionally stops at three layers.
+
+Likely next composition/export work includes:
+
+- export preset / codec selection
+- explicit output frame-rate control
+- richer layer timing/edit operations
+- a deliberate broader reordering model
+- blend-mode exploration
+- broader alpha/color policy
+
+The next major architectural milestone remains interchange:
+
+```text
+save MLT XML
+open MLT XML
+open image sequences at a chosen frame rate
+```
+
+XML should be built on top of the indexed, parity-tested composition model—not
+used as a shortcut around it.
+
+---
+
+# Closing lesson
+
+The path from one producer to three layers looked at first like a compositing
+feature.
+
+In practice it became an ownership, state-model, testing, and transaction
+problem.
+
+The useful sequence was:
+
+```text
+separate engine lifetime
+build a real tractor
+make placement explicit
+make render properties observable
+rebuild the same graph for export
+prove preview/export parity
+harden missing-engine and resource cleanup paths
+generalize state before adding Layer 3
+make history semantically correct
+make history visually atomic
+```
+
+That sequence kept the application aligned with its original goal: a small,
+precise movie tool whose internal graph can become sophisticated without forcing
+the user into a full NLE workflow.
