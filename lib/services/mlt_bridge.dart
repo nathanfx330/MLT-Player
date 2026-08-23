@@ -179,6 +179,12 @@ class MltBridge {
     _frameExportStart =
         _library.lookupFunction<_FrameExportStartNative, _FrameExportStartDart>(
             'mlt_bridge_export_frame_start');
+    _pngSequenceExportStart =
+        _library.lookupFunction<_ExportStartNative, _ExportStartDart>(
+            'mlt_bridge_export_png_sequence_start');
+    _audioExportStart =
+        _library.lookupFunction<_ExportStartNative, _ExportStartDart>(
+            'mlt_bridge_export_audio_start');
     _exportCancel = _library.lookupFunction<_VoidNative, _VoidDart>(
         'mlt_bridge_export_cancel');
     _exportIsRunning = _library.lookupFunction<_IntNative, _IntDart>(
@@ -247,6 +253,8 @@ class MltBridge {
   late final _StringDart _sourceTimecode;
   late final _ExportStartDart _exportStart;
   late final _FrameExportStartDart _frameExportStart;
+  late final _ExportStartDart _pngSequenceExportStart;
+  late final _ExportStartDart _audioExportStart;
   late final _VoidDart _exportCancel;
   late final _IntDart _exportIsRunning;
   late final _DoubleDart _exportProgress;
@@ -315,6 +323,52 @@ class MltBridge {
             nativeSource,
             nativeOutput,
             frame,
+          ) !=
+          0;
+    } finally {
+      malloc.free(nativeSource);
+      malloc.free(nativeOutput);
+    }
+  }
+
+  bool startPngSequenceExport({
+    required String sourcePath,
+    required String outputDirectory,
+    required int inFrame,
+    required int outFrame,
+  }) {
+    final nativeSource = sourcePath.toNativeUtf8(allocator: malloc);
+    final nativeOutput = outputDirectory.toNativeUtf8(allocator: malloc);
+
+    try {
+      return _pngSequenceExportStart(
+            nativeSource,
+            nativeOutput,
+            inFrame,
+            outFrame,
+          ) !=
+          0;
+    } finally {
+      malloc.free(nativeSource);
+      malloc.free(nativeOutput);
+    }
+  }
+
+  bool startAudioExport({
+    required String sourcePath,
+    required String outputPath,
+    required int inFrame,
+    required int outFrame,
+  }) {
+    final nativeSource = sourcePath.toNativeUtf8(allocator: malloc);
+    final nativeOutput = outputPath.toNativeUtf8(allocator: malloc);
+
+    try {
+      return _audioExportStart(
+            nativeSource,
+            nativeOutput,
+            inFrame,
+            outFrame,
           ) !=
           0;
     } finally {

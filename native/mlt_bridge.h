@@ -75,6 +75,31 @@ mlt_bridge_export_frame_start(
     int64_t frame
 );
 
+/*
+ * Export an inclusive absolute source-frame range as display-size PNG files.
+ * output_directory is a dedicated directory; filenames are frame_000001.png,
+ * frame_000002.png, and so on.
+ */
+MLT_BRIDGE_EXPORT int
+mlt_bridge_export_png_sequence_start(
+    const char *source_path,
+    const char *output_directory,
+    int64_t in_frame,
+    int64_t out_frame
+);
+
+/*
+ * Export an inclusive absolute source-frame range as uncompressed 16-bit PCM
+ * WAV audio. Video is disabled explicitly; preview playback is unaffected.
+ */
+MLT_BRIDGE_EXPORT int
+mlt_bridge_export_audio_start(
+    const char *source_path,
+    const char *output_path,
+    int64_t in_frame,
+    int64_t out_frame
+);
+
 MLT_BRIDGE_EXPORT void
 mlt_bridge_export_cancel(void);
 

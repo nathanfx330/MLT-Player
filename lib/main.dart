@@ -1,6 +1,7 @@
 // lib/main.dart
 
 import 'dart:async';
+import 'dart:io';
 import 'dart:ui' as ui show FontFeature, Size;
 
 import 'package:file_selector/file_selector.dart';
@@ -68,6 +69,12 @@ class MltPlayerApp extends StatelessWidget {
   }
 }
 
+enum _ExportMode {
+  video,
+  imageSequence,
+  audio,
+}
+
 class PlayerPage extends StatefulWidget {
   const PlayerPage({
     super.key,
@@ -111,6 +118,8 @@ class _PlayerPageState extends State<PlayerPage>
   double _scrubMs = 0;
 
   bool _showTransportTimecode = false;
+
+  _ExportMode _exportMode = _ExportMode.video;
 
   @override
   void initState() {
@@ -289,6 +298,51 @@ class _PlayerPageState extends State<PlayerPage>
     }
   }
 
+  static String _mediaStem(String name) {
+    final dot = name.lastIndexOf('.');
+    return dot > 0 ? name.substring(0, dot) : name;
+  }
+
+  static String _joinPath(String directory, String child) {
+    final separator = Platform.pathSeparator;
+    return directory.endsWith(separator)
+        ? '$directory$child'
+        : '$directory$separator$child';
+  }
+
+  Future<String> _createUniqueSequenceDirectory(
+    String parentDirectory,
+    String preferredName,
+  ) async {
+    for (var index = 0; index < 1000; index++) {
+      final suffix = index == 0 ? '' : '_${index + 1}';
+      final path = _joinPath(
+        parentDirectory,
+        '$preferredName$suffix',
+      );
+      final directory = Directory(path);
+
+      if (await directory.exists()) {
+        continue;
+      }
+
+      try {
+        await directory.create();
+        return path;
+      } on FileSystemException {
+        if (await directory.exists()) {
+          continue;
+        }
+        rethrow;
+      }
+    }
+
+    throw FileSystemException(
+      'Could not create a unique image-sequence directory.',
+      parentDirectory,
+    );
+  }
+
   Future<void> _exportActiveClip() async {
     final media = _engine.media;
     if (media == null || media.isStill || _engine.exporting) {
@@ -297,9 +351,7 @@ class _PlayerPageState extends State<PlayerPage>
 
     _showOverlay();
 
-    final name = media.name;
-    final dot = name.lastIndexOf('.');
-    final stem = dot > 0 ? name.substring(0, dot) : name;
+    final stem = _mediaStem(media.name);
     final suffix = _engine.hasSelection
         ? 'selection'
         : (_engine.isTrimmed ? 'trimmed' : 'export');
@@ -337,10 +389,9 @@ class _PlayerPageState extends State<PlayerPage>
     }
 
     /*
-     * Snapshot the native visible position before opening the save dialog.
-     * Playback is allowed to continue while the user chooses a filename, but
-     * the exported PNG remains the frame that was current when this command
-     * was invoked.
+     * Capture freezes transport on the exact visible source frame before the
+     * save dialog opens. The PNG therefore matches the frame left on screen,
+     * even when the command was invoked during playback or shuttle.
      */
     final sourceFrame = _engine.captureCurrentSourceFrame();
     if (sourceFrame == null) {
@@ -349,9 +400,7 @@ class _PlayerPageState extends State<PlayerPage>
 
     _showOverlay();
 
-    final name = media.name;
-    final dot = name.lastIndexOf('.');
-    final stem = dot > 0 ? name.substring(0, dot) : name;
+    final stem = _mediaStem(media.name);
     final clipFrameNumber =
         _engine.clipFrameForSourceFrame(sourceFrame) + 1;
     final frameLabel = clipFrameNumber.toString().padLeft(6, '0');
@@ -380,6 +429,159 @@ class _PlayerPageState extends State<PlayerPage>
       outputPath,
       sourceFrame: sourceFrame,
     );
+  }
+
+  Future<void> _exportImageSequence() async {
+    final media = _engine.media;
+    if (media == null ||
+        media.isStill ||
+        !media.hasVideo ||
+        _engine.exporting) {
+      return;
+    }
+
+    _showOverlay();
+
+    final parentDirectory = await getDirectoryPath(
+      confirmButtonText: 'Export Frames',
+    );
+
+    if (parentDirectory == null) {
+      return;
+    }
+
+    final stem = _mediaStem(media.name);
+    final suffix = _engine.hasSelection
+        ? 'selection_frames'
+        : (_engine.isTrimmed ? 'trimmed_frames' : 'frames');
+
+    late final String outputDirectory;
+
+    try {
+      outputDirectory = await _createUniqueSequenceDirectory(
+        parentDirectory,
+        '${stem}_$suffix',
+      );
+    } on FileSystemException catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            error.message.isEmpty
+                ? 'Could not create the image-sequence directory.'
+                : error.message,
+          ),
+        ),
+      );
+      return;
+    }
+
+    final started =
+        _engine.startImageSequenceExport(outputDirectory);
+
+    if (!started) {
+      try {
+        await Directory(outputDirectory).delete();
+      } on FileSystemException {
+        // Native startup failed before any sequence frame was written.
+        // If the directory is no longer empty, leave it untouched.
+      }
+    }
+  }
+
+  Future<void> _exportAudio() async {
+    final media = _engine.media;
+    if (media == null ||
+        media.isStill ||
+        !media.hasAudio ||
+        _engine.exporting) {
+      return;
+    }
+
+    _showOverlay();
+
+    final stem = _mediaStem(media.name);
+    final suffix = _engine.hasSelection
+        ? 'selection'
+        : (_engine.isTrimmed ? 'trimmed' : 'audio');
+
+    final location = await getSaveLocation(
+      confirmButtonText: 'Export Audio',
+      suggestedName: '${stem}_$suffix.wav',
+      acceptedTypeGroups: <XTypeGroup>[
+        XTypeGroup(
+          label: 'WAV Audio',
+          extensions: <String>['wav'],
+        ),
+      ],
+    );
+
+    if (location == null) {
+      return;
+    }
+
+    var outputPath = location.path;
+    if (!outputPath.toLowerCase().endsWith('.wav')) {
+      outputPath = '$outputPath.wav';
+    }
+
+    _engine.startAudioExport(outputPath);
+  }
+
+  Future<void> _exportSelectedMode() async {
+    switch (_exportMode) {
+      case _ExportMode.video:
+        await _exportActiveClip();
+        return;
+      case _ExportMode.imageSequence:
+        await _exportImageSequence();
+        return;
+      case _ExportMode.audio:
+        await _exportAudio();
+        return;
+    }
+  }
+
+  void _selectExportMode(_ExportMode mode) {
+    if (_exportMode == mode) {
+      _showOverlay();
+      return;
+    }
+
+    setState(() => _exportMode = mode);
+    _showOverlay();
+  }
+
+  String _exportModeTooltip(MediaInfo media) {
+    switch (_exportMode) {
+      case _ExportMode.video:
+        return _engine.hasSelection
+            ? 'Export marked selection as MP4 (Ctrl+E)'
+            : (_engine.isTrimmed
+                ? 'Export trimmed clip as MP4 (Ctrl+E)'
+                : 'Export active clip as MP4 (Ctrl+E)');
+      case _ExportMode.imageSequence:
+        if (!media.hasVideo) {
+          return 'Image sequence unavailable for this media — hold or use ▾ to change export mode';
+        }
+        return _engine.hasSelection
+            ? 'Export marked selection as PNG frames (Ctrl+E)'
+            : (_engine.isTrimmed
+                ? 'Export trimmed clip as PNG frames (Ctrl+E)'
+                : 'Export active clip as PNG frames (Ctrl+E)');
+      case _ExportMode.audio:
+        if (!media.hasAudio) {
+          return 'Audio export unavailable for this media — hold or use ▾ to change export mode';
+        }
+        return _engine.hasSelection
+            ? 'Export marked selection as WAV audio (Ctrl+E)'
+            : (_engine.isTrimmed
+                ? 'Export trimmed clip as WAV audio (Ctrl+E)'
+                : 'Export active clip as WAV audio (Ctrl+E)');
+    }
   }
 
   void _toggleInfo() {
@@ -419,6 +621,7 @@ class _PlayerPageState extends State<PlayerPage>
     final key = event.logicalKey;
     final controlPressed = HardwareKeyboard.instance.isControlPressed;
     final shiftPressed = HardwareKeyboard.instance.isShiftPressed;
+    final altPressed = HardwareKeyboard.instance.isAltPressed;
 
     _showOverlay();
 
@@ -439,6 +642,17 @@ class _PlayerPageState extends State<PlayerPage>
 
     if (event is KeyDownEvent &&
         controlPressed &&
+        altPressed &&
+        key == LogicalKeyboardKey.keyE) {
+      if (!_engine.exporting) {
+        _selectExportMode(_ExportMode.imageSequence);
+        _exportImageSequence();
+      }
+      return KeyEventResult.handled;
+    }
+
+    if (event is KeyDownEvent &&
+        controlPressed &&
         shiftPressed &&
         key == LogicalKeyboardKey.keyE) {
       if (!_engine.exporting) {
@@ -453,7 +667,7 @@ class _PlayerPageState extends State<PlayerPage>
       if (_engine.exporting) {
         _engine.cancelExport();
       } else {
-        _exportActiveClip();
+        _exportSelectedMode();
       }
       return KeyEventResult.handled;
     }
@@ -1252,22 +1466,26 @@ class _PlayerPageState extends State<PlayerPage>
                 _engine.canTrimSelection ? _engine.trimSelection : null,
           ),
           const SizedBox(width: 2),
-          _ModeButton(
-            label: _engine.exporting ? 'CANCEL' : 'EXPORT',
+          _ExportSplitButton(
+            mode: _exportMode,
+            exporting: _engine.exporting,
             tooltip: _engine.exporting
                 ? 'Cancel export (Ctrl+E)'
-                : (_engine.hasSelection
-                    ? 'Export marked selection as MP4 (Ctrl+E)'
-                    : 'Export active clip as MP4 (Ctrl+E)'),
-            active: _engine.exporting,
+                : _exportModeTooltip(media),
+            imageSequenceEnabled: media.hasVideo,
+            audioEnabled: media.hasAudio,
             onPressed: _engine.exporting
                 ? _engine.cancelExport
-                : _exportActiveClip,
+                : ((_exportMode == _ExportMode.imageSequence && !media.hasVideo) ||
+                        (_exportMode == _ExportMode.audio && !media.hasAudio)
+                    ? null
+                    : _exportSelectedMode),
+            onModeSelected: _selectExportMode,
           ),
           const SizedBox(width: 2),
           _OverlayButton(
             icon: Icons.photo_camera_outlined,
-            tooltip: 'Export current frame as PNG (Ctrl+Shift+E)',
+            tooltip: 'Export current frame as display-size PNG (Ctrl+Shift+E)',
             onPressed: !_engine.exporting && media.hasVideo
                 ? _exportCurrentFrame
                 : null,
@@ -1532,6 +1750,167 @@ class _ModeButton extends StatelessWidget {
             fontSize: 10,
             fontWeight: FontWeight.w700,
             letterSpacing: 0.45,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+
+class _ExportSplitButton extends StatefulWidget {
+  const _ExportSplitButton({
+    required this.mode,
+    required this.exporting,
+    required this.tooltip,
+    required this.imageSequenceEnabled,
+    required this.audioEnabled,
+    required this.onPressed,
+    required this.onModeSelected,
+  });
+
+  final _ExportMode mode;
+  final bool exporting;
+  final String tooltip;
+  final bool imageSequenceEnabled;
+  final bool audioEnabled;
+  final VoidCallback? onPressed;
+  final ValueChanged<_ExportMode> onModeSelected;
+
+  @override
+  State<_ExportSplitButton> createState() => _ExportSplitButtonState();
+}
+
+class _ExportSplitButtonState extends State<_ExportSplitButton> {
+  Future<void> _showModeMenu() async {
+    if (widget.exporting) {
+      return;
+    }
+
+    final renderObject = context.findRenderObject();
+    final overlayObject = Overlay.of(context).context.findRenderObject();
+
+    if (renderObject is! RenderBox || overlayObject is! RenderBox) {
+      return;
+    }
+
+    final topLeft = renderObject.localToGlobal(
+      Offset.zero,
+      ancestor: overlayObject,
+    );
+    final bottomRight = renderObject.localToGlobal(
+      renderObject.size.bottomRight(Offset.zero),
+      ancestor: overlayObject,
+    );
+
+    final selected = await showMenu<_ExportMode>(
+      context: context,
+      color: const Color(0xFF202020),
+      elevation: 12,
+      position: RelativeRect.fromRect(
+        Rect.fromLTRB(
+          topLeft.dx,
+          bottomRight.dy,
+          bottomRight.dx,
+          bottomRight.dy,
+        ),
+        Offset.zero & overlayObject.size,
+      ),
+      items: <PopupMenuEntry<_ExportMode>>[
+        CheckedPopupMenuItem<_ExportMode>(
+          value: _ExportMode.video,
+          checked: widget.mode == _ExportMode.video,
+          child: const Text('Export Video'),
+        ),
+        CheckedPopupMenuItem<_ExportMode>(
+          value: _ExportMode.imageSequence,
+          checked: widget.mode == _ExportMode.imageSequence,
+          enabled: widget.imageSequenceEnabled,
+          child: const Text('Export Image Sequence'),
+        ),
+        CheckedPopupMenuItem<_ExportMode>(
+          value: _ExportMode.audio,
+          checked: widget.mode == _ExportMode.audio,
+          enabled: widget.audioEnabled,
+          child: const Text('Export Audio (WAV)'),
+        ),
+      ],
+    );
+
+    if (!mounted || selected == null) {
+      return;
+    }
+
+    widget.onModeSelected(selected);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final active = widget.exporting;
+    final mainEnabled = widget.onPressed != null;
+    final menuEnabled = !widget.exporting;
+
+    final label = widget.exporting
+        ? 'CANCEL'
+        : switch (widget.mode) {
+            _ExportMode.video => 'EXPORT VIDEO',
+            _ExportMode.imageSequence => 'EXPORT FRAMES',
+            _ExportMode.audio => 'EXPORT AUDIO',
+          };
+
+    final foreground = active
+        ? Colors.black
+        : (mainEnabled ? Colors.white70 : Colors.white24);
+    final background =
+        active ? const Color(0xFFE8A33D) : Colors.white10;
+
+    return Tooltip(
+      message: widget.tooltip,
+      child: Material(
+        color: background,
+        borderRadius: BorderRadius.circular(6),
+        clipBehavior: Clip.antiAlias,
+        child: SizedBox(
+          height: 30,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              InkWell(
+                onTap: widget.onPressed,
+                onLongPress: menuEnabled ? _showModeMenu : null,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 9),
+                  child: Center(
+                    child: Text(
+                      label,
+                      style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 0.45,
+                        color: foreground,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              Container(
+                width: 1,
+                height: 18,
+                color: active ? Colors.black26 : Colors.white12,
+              ),
+              InkWell(
+                onTap: menuEnabled ? _showModeMenu : null,
+                child: SizedBox(
+                  width: 24,
+                  height: 30,
+                  child: Icon(
+                    Icons.arrow_drop_down,
+                    size: 18,
+                    color: menuEnabled ? Colors.white54 : Colors.black38,
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
       ),

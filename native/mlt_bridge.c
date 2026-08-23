@@ -5,6 +5,7 @@
 #include <flutter_linux/flutter_linux.h>
 #include <epoxy/gl.h>
 #include <framework/mlt.h>
+#include <glib.h>
 
 #include <stdint.h>
 #include <stdio.h>
@@ -116,7 +117,9 @@ static char export_error[512] = "";
 
 typedef enum _ExportKind {
     EXPORT_KIND_MP4 = 0,
-    EXPORT_KIND_PNG_FRAME = 1
+    EXPORT_KIND_PNG_FRAME = 1,
+    EXPORT_KIND_PNG_SEQUENCE = 2,
+    EXPORT_KIND_WAV_AUDIO = 3
 } ExportKind;
 
 typedef struct _ExportJob {
@@ -1526,6 +1529,184 @@ static int output_file_has_data(const char *path)
         info.st_size > 0;
 }
 
+static char *export_sequence_frame_path(
+    const char *directory,
+    int64_t sequence_number)
+{
+    if (directory == NULL ||
+        directory[0] == '\0' ||
+        sequence_number <= 0) {
+        return NULL;
+    }
+
+    char *filename =
+        g_strdup_printf(
+            "frame_%06lld.png",
+            (long long)sequence_number
+        );
+
+    if (filename == NULL) {
+        return NULL;
+    }
+
+    char *path =
+        g_build_filename(
+            directory,
+            filename,
+            NULL
+        );
+
+    g_free(filename);
+
+    return path;
+}
+
+/*
+ * image2 treats percent signs in its target as filename-pattern syntax.
+ * Escape any literal percent signs in the chosen directory before appending
+ * the one pattern token that belongs to this export.
+ */
+static char *export_sequence_consumer_target(
+    const char *directory)
+{
+    if (directory == NULL ||
+        directory[0] == '\0') {
+        return NULL;
+    }
+
+    GString *escaped =
+        g_string_sized_new(strlen(directory) + 32);
+
+    if (escaped == NULL) {
+        return NULL;
+    }
+
+    for (const char *cursor = directory;
+         *cursor != '\0';
+         cursor++) {
+        if (*cursor == '%') {
+            g_string_append(escaped, "%%");
+        } else {
+            g_string_append_c(escaped, *cursor);
+        }
+    }
+
+    char *target =
+        g_build_filename(
+            escaped->str,
+            "frame_%06d.png",
+            NULL
+        );
+
+    g_string_free(escaped, TRUE);
+
+    return target;
+}
+
+static int export_sequence_filename_is_owned(
+    const char *name)
+{
+    static const char prefix[] = "frame_";
+    static const char suffix[] = ".png";
+
+    if (name == NULL ||
+        !g_str_has_prefix(name, prefix) ||
+        !g_str_has_suffix(name, suffix)) {
+        return 0;
+    }
+
+    const size_t name_length = strlen(name);
+    const size_t prefix_length = strlen(prefix);
+    const size_t suffix_length = strlen(suffix);
+
+    if (name_length <= prefix_length + suffix_length) {
+        return 0;
+    }
+
+    const size_t digits_length =
+        name_length - prefix_length - suffix_length;
+
+    if (digits_length < 6) {
+        return 0;
+    }
+
+    for (size_t index = 0;
+         index < digits_length;
+         index++) {
+        const char value =
+            name[prefix_length + index];
+
+        if (value < '0' || value > '9') {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+/*
+ * Sequence exports always target a dedicated directory created by the Dart
+ * UI. On cancellation or failure, delete only filenames owned by this export
+ * and then remove the directory if it is empty. This preserves the same
+ * "no partial output" contract used by movie and still exports.
+ */
+static void export_remove_sequence_outputs(
+    const char *directory)
+{
+    if (directory == NULL ||
+        directory[0] == '\0') {
+        return;
+    }
+
+    GDir *dir =
+        g_dir_open(directory, 0, NULL);
+
+    if (dir != NULL) {
+        const char *name = NULL;
+
+        while ((name = g_dir_read_name(dir)) != NULL) {
+            if (!export_sequence_filename_is_owned(name)) {
+                continue;
+            }
+
+            char *path =
+                g_build_filename(
+                    directory,
+                    name,
+                    NULL
+                );
+
+            if (path != NULL) {
+                remove(path);
+                g_free(path);
+            }
+        }
+
+        g_dir_close(dir);
+    }
+
+    /*
+     * remove() also removes an empty directory on POSIX. If a caller placed
+     * unrelated files there, it safely fails and leaves the directory alone.
+     */
+    remove(directory);
+}
+
+static void export_remove_partial_output(
+    const ExportJob *job)
+{
+    if (job == NULL) {
+        return;
+    }
+
+    if (job->kind == EXPORT_KIND_PNG_SEQUENCE) {
+        export_remove_sequence_outputs(job->output_path);
+        return;
+    }
+
+    remove(job->output_path);
+}
+
 static void export_job_free(ExportJob *job)
 {
     if (job == NULL) {
@@ -1537,78 +1718,126 @@ static void export_job_free(ExportJob *job)
     g_free(job);
 }
 
-static gpointer export_worker(gpointer data)
+static void export_set_failure(
+    char *failure,
+    size_t failure_size,
+    const char *message)
 {
-    ExportJob *job = (ExportJob *)data;
+    if (failure == NULL ||
+        failure_size == 0) {
+        return;
+    }
 
-    mlt_profile export_profile = NULL;
-    mlt_producer probe_producer = NULL;
-    mlt_producer export_producer = NULL;
-    mlt_consumer export_consumer = NULL;
+    snprintf(
+        failure,
+        failure_size,
+        "%s",
+        message != NULL ? message : "Export failed."
+    );
+}
 
-    int succeeded = 0;
-    int cancelled = 0;
-    char failure[512] = "";
+static int export_prepare_destination(
+    const ExportJob *job,
+    char *failure,
+    size_t failure_size)
+{
+    if (job->kind == EXPORT_KIND_PNG_SEQUENCE) {
+        if (!g_file_test(
+                job->output_path,
+                G_FILE_TEST_IS_DIR)) {
+            export_set_failure(
+                failure,
+                failure_size,
+                "The image-sequence destination directory is unavailable."
+            );
+            return 0;
+        }
 
-    export_profile = mlt_profile_init(NULL);
-
-    if (export_profile == NULL) {
-        snprintf(
-            failure,
-            sizeof(failure),
-            "%s",
-            "Could not create an MLT export profile."
-        );
-        goto cleanup;
+        return 1;
     }
 
     /*
-     * Match the export graph to the source just like the preview open path:
-     * probe once, derive the profile, then reopen against that profile.
+     * Save dialogs handle overwrite confirmation for single-file exports.
+     * Remove the destination immediately before encoding so avformat always
+     * receives a fresh target.
      */
+    remove(job->output_path);
+
+    return 1;
+}
+
+/*
+ * Build the independent source graph shared by every export kind.
+ *
+ * The source is probed once to derive its native profile, reopened against
+ * that profile, constrained to the requested absolute source-frame range,
+ * then rebased so producer position zero is the first export frame.
+ */
+static int export_prepare_source_graph(
+    const ExportJob *job,
+    mlt_profile *profile_out,
+    mlt_producer *producer_out,
+    int64_t *in_frame_out,
+    int64_t *out_frame_out,
+    char *failure,
+    size_t failure_size)
+{
+    mlt_profile source_profile = NULL;
+    mlt_producer probe_producer = NULL;
+    mlt_producer source_producer = NULL;
+
+    source_profile = mlt_profile_init(NULL);
+
+    if (source_profile == NULL) {
+        export_set_failure(
+            failure,
+            failure_size,
+            "Could not create an MLT export profile."
+        );
+        goto fail;
+    }
+
     probe_producer =
         mlt_factory_producer(
-            export_profile,
+            source_profile,
             NULL,
             job->source_path
         );
 
     if (probe_producer == NULL) {
-        snprintf(
+        export_set_failure(
             failure,
-            sizeof(failure),
-            "%s",
+            failure_size,
             "MLT could not open the source for export."
         );
-        goto cleanup;
+        goto fail;
     }
 
     mlt_producer_probe(probe_producer);
-    mlt_profile_from_producer(export_profile, probe_producer);
+    mlt_profile_from_producer(source_profile, probe_producer);
     mlt_producer_close(probe_producer);
     probe_producer = NULL;
 
-    export_producer =
+    source_producer =
         mlt_factory_producer(
-            export_profile,
+            source_profile,
             NULL,
             job->source_path
         );
 
-    if (export_producer == NULL) {
-        snprintf(
+    if (source_producer == NULL) {
+        export_set_failure(
             failure,
-            sizeof(failure),
-            "%s",
+            failure_size,
             "MLT could not reopen the source for export."
         );
-        goto cleanup;
+        goto fail;
     }
 
-    mlt_producer_probe(export_producer);
+    mlt_producer_probe(source_producer);
 
     const int64_t source_length =
-        (int64_t)mlt_producer_get_length(export_producer);
+        (int64_t)mlt_producer_get_length(source_producer);
 
     int64_t in_frame = job->in_frame;
     int64_t out_frame = job->out_frame;
@@ -1623,55 +1852,509 @@ static gpointer export_worker(gpointer data)
 
     if (source_length <= 0 ||
         out_frame < in_frame) {
-        snprintf(
+        export_set_failure(
             failure,
-            sizeof(failure),
-            "%s",
+            failure_size,
             "The requested export range is invalid."
         );
-        goto cleanup;
+        goto fail;
     }
 
     if (mlt_producer_set_in_and_out(
-            export_producer,
+            source_producer,
             (mlt_position)in_frame,
             (mlt_position)out_frame) != 0) {
-        snprintf(
+        export_set_failure(
             failure,
-            sizeof(failure),
-            "%s",
+            failure_size,
             "MLT could not set the export In/Out range."
         );
-        goto cleanup;
+        goto fail;
     }
 
     /*
      * Producer position is relative to its In point after set_in_and_out(),
      * so position zero is exactly the first requested export frame.
      */
-    if (mlt_producer_seek(export_producer, 0) != 0 ||
-        mlt_producer_set_speed(export_producer, 1.0) != 0) {
-        snprintf(
+    if (mlt_producer_seek(source_producer, 0) != 0 ||
+        mlt_producer_set_speed(source_producer, 1.0) != 0) {
+        export_set_failure(
             failure,
-            sizeof(failure),
-            "%s",
+            failure_size,
             "MLT could not initialize the export transport."
         );
+        goto fail;
+    }
+
+    *profile_out = source_profile;
+    *producer_out = source_producer;
+    *in_frame_out = in_frame;
+    *out_frame_out = out_frame;
+
+    return 1;
+
+fail:
+    if (probe_producer != NULL) {
+        mlt_producer_close(probe_producer);
+    }
+
+    if (source_producer != NULL) {
+        mlt_producer_close(source_producer);
+    }
+
+    if (source_profile != NULL) {
+        mlt_profile_close(source_profile);
+    }
+
+    return 0;
+}
+
+/*
+ * Most exports consume the source profile directly. PNG image exports differ:
+ * it needs square pixels at display geometry so anamorphic storage dimensions
+ * are not written as a squeezed image. The cloned profile belongs to the
+ * caller; source_profile always remains owned by the source graph.
+ */
+static int export_prepare_consumer_profile(
+    ExportKind kind,
+    mlt_profile source_profile,
+    mlt_profile *owned_profile_out,
+    mlt_profile *consumer_profile_out,
+    char *failure,
+    size_t failure_size)
+{
+    *owned_profile_out = NULL;
+    *consumer_profile_out = source_profile;
+
+    if (kind == EXPORT_KIND_MP4 ||
+        kind == EXPORT_KIND_WAV_AUDIO) {
+        return 1;
+    }
+
+    if (kind != EXPORT_KIND_PNG_FRAME &&
+        kind != EXPORT_KIND_PNG_SEQUENCE) {
+        export_set_failure(
+            failure,
+            failure_size,
+            "The requested export type is unsupported."
+        );
+        return 0;
+    }
+
+    mlt_profile image_profile =
+        mlt_profile_clone(source_profile);
+
+    if (image_profile == NULL) {
+        export_set_failure(
+            failure,
+            failure_size,
+            "Could not create the PNG export profile."
+        );
+        return 0;
+    }
+
+    const double display_aspect =
+        mlt_profile_dar(source_profile);
+
+    if (image_profile->height <= 0 ||
+        display_aspect <= 0.0) {
+        mlt_profile_close(image_profile);
+
+        export_set_failure(
+            failure,
+            failure_size,
+            "The source has invalid display geometry."
+        );
+        return 0;
+    }
+
+    const int display_width =
+        (int)(
+            ((double)image_profile->height * display_aspect) +
+            0.5
+        );
+
+    if (display_width <= 0) {
+        mlt_profile_close(image_profile);
+
+        export_set_failure(
+            failure,
+            failure_size,
+            "The source has invalid display geometry."
+        );
+        return 0;
+    }
+
+    image_profile->width = display_width;
+    image_profile->sample_aspect_num = 1;
+    image_profile->sample_aspect_den = 1;
+    image_profile->display_aspect_num = display_width;
+    image_profile->display_aspect_den = image_profile->height;
+    image_profile->progressive = 1;
+
+    *owned_profile_out = image_profile;
+    *consumer_profile_out = image_profile;
+
+    return 1;
+}
+
+static void export_configure_mp4_consumer(
+    mlt_properties properties)
+{
+    /*
+     * POC 9 starts with one dependable delivery preset. The UI can expose
+     * codec/container profiles after the independent render path is proven.
+     */
+    mlt_properties_set(properties, "f", "mp4");
+    mlt_properties_set(properties, "vcodec", "libx264");
+    mlt_properties_set(properties, "acodec", "aac");
+    mlt_properties_set(properties, "pix_fmt", "yuv420p");
+    mlt_properties_set(properties, "preset", "medium");
+    mlt_properties_set_int(properties, "crf", 18);
+    mlt_properties_set(properties, "movflags", "+faststart");
+}
+
+static void export_configure_wav_audio_consumer(
+    mlt_properties properties,
+    mlt_producer source_producer)
+{
+    /*
+     * POC 9.4 starts audio-only export with one transparent, dependable
+     * preset: uncompressed 16-bit PCM in a WAV container. Disable video
+     * explicitly so a video-bearing source produces audio only.
+     */
+    mlt_properties_set(properties, "f", "wav");
+    mlt_properties_set(properties, "acodec", "pcm_s16le");
+    mlt_properties_set(properties, "mlt_audio_format", "s16");
+    mlt_properties_set_int(properties, "vn", 1);
+
+    /*
+     * Preserve the selected source stream's sample rate and channel count
+     * when avformat exposes them. Otherwise leave MLT's consumer defaults
+     * alone rather than inventing metadata.
+     */
+    if (source_producer != NULL) {
+        mlt_properties source_properties =
+            MLT_PRODUCER_PROPERTIES(source_producer);
+
+        const char *audio_index_value =
+            mlt_properties_get(
+                source_properties,
+                "audio_index"
+            );
+
+        if (audio_index_value != NULL) {
+            const int audio_index =
+                mlt_properties_get_int(
+                    source_properties,
+                    "audio_index"
+                );
+
+            if (audio_index >= 0) {
+                char key[128];
+
+                snprintf(
+                    key,
+                    sizeof(key),
+                    "meta.media.%d.codec.sample_rate",
+                    audio_index
+                );
+
+                if (mlt_properties_get(source_properties, key) != NULL) {
+                    const int sample_rate =
+                        mlt_properties_get_int(
+                            source_properties,
+                            key
+                        );
+
+                    if (sample_rate > 0) {
+                        mlt_properties_set_int(
+                            properties,
+                            "frequency",
+                            sample_rate
+                        );
+                    }
+                }
+
+                snprintf(
+                    key,
+                    sizeof(key),
+                    "meta.media.%d.codec.channels",
+                    audio_index
+                );
+
+                if (mlt_properties_get(source_properties, key) != NULL) {
+                    const int channels =
+                        mlt_properties_get_int(
+                            source_properties,
+                            key
+                        );
+
+                    if (channels > 0) {
+                        mlt_properties_set_int(
+                            properties,
+                            "channels",
+                            channels
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+static void export_configure_png_common(
+    mlt_properties properties)
+{
+    /*
+     * PNG exports are rendered from the source graph, not copied from
+     * Flutter's display texture. Their consumer profile converts anamorphic
+     * storage pixels to display-correct square pixels. RGBA preserves
+     * source alpha when the decoder provides it.
+     */
+    mlt_properties_set(properties, "f", "image2");
+    mlt_properties_set(properties, "vcodec", "png");
+    mlt_properties_set(properties, "pix_fmt", "rgba");
+    mlt_properties_set_int(properties, "an", 1);
+    mlt_properties_set(properties, "mlt_image_format", "rgba");
+
+    /* Match the progressive frame the viewer presents. */
+    mlt_properties_set(properties, "rescale", "bilinear");
+    mlt_properties_set(properties, "deinterlacer", MLT_BRIDGE_DEINTERLACER);
+    mlt_properties_set_int(properties, "top_field_first", -1);
+    mlt_properties_set_int(properties, "progressive", 1);
+}
+
+static void export_configure_png_frame_consumer(
+    mlt_properties properties)
+{
+    export_configure_png_common(properties);
+
+    /*
+     * A frame export is one literal file, never an image2 filename pattern.
+     */
+    mlt_properties_set_int(properties, "update", 1);
+}
+
+static void export_configure_png_sequence_consumer(
+    mlt_properties properties)
+{
+    export_configure_png_common(properties);
+
+    /*
+     * Image2 expands frame_%06d.png into a one-based sequence. Keep update
+     * disabled so every source frame becomes a separate PNG.
+     */
+    mlt_properties_set_int(properties, "update", 0);
+    mlt_properties_set_int(properties, "start_number", 1);
+}
+
+static int export_configure_consumer(
+    ExportKind kind,
+    mlt_properties properties,
+    mlt_producer source_producer,
+    char *failure,
+    size_t failure_size)
+{
+    switch (kind) {
+        case EXPORT_KIND_MP4:
+            export_configure_mp4_consumer(properties);
+            break;
+
+        case EXPORT_KIND_PNG_FRAME:
+            export_configure_png_frame_consumer(properties);
+            break;
+
+        case EXPORT_KIND_PNG_SEQUENCE:
+            export_configure_png_sequence_consumer(properties);
+            break;
+
+        case EXPORT_KIND_WAV_AUDIO:
+            export_configure_wav_audio_consumer(
+                properties,
+                source_producer
+            );
+            break;
+
+        default:
+            export_set_failure(
+                failure,
+                failure_size,
+                "The requested export type is unsupported."
+            );
+            return 0;
+    }
+
+    /* Export never drops frames. */
+    mlt_properties_set_int(properties, "real_time", -1);
+    mlt_properties_set_int(properties, "terminate_on_pause", 1);
+
+    return 1;
+}
+
+static int export_output_completed(
+    const ExportJob *job,
+    mlt_producer source_producer,
+    int64_t total_frames,
+    char *failure,
+    size_t failure_size)
+{
+    switch (job->kind) {
+        case EXPORT_KIND_PNG_FRAME:
+            /*
+             * A one-frame producer has no meaningful terminal-position check:
+             * frame zero is both its start and end. The output file itself is
+             * the useful completion signal for this export kind.
+             */
+            if (output_file_has_data(job->output_path)) {
+                return 1;
+            }
+
+            export_set_failure(
+                failure,
+                failure_size,
+                "MLT did not write the requested PNG frame."
+            );
+            return 0;
+
+        case EXPORT_KIND_PNG_SEQUENCE: {
+            const int64_t final_position =
+                (int64_t)mlt_producer_position(source_producer);
+
+            char *first_path =
+                export_sequence_frame_path(
+                    job->output_path,
+                    1
+                );
+
+            char *last_path =
+                export_sequence_frame_path(
+                    job->output_path,
+                    total_frames
+                );
+
+            const int completed =
+                first_path != NULL &&
+                last_path != NULL &&
+                final_position >= total_frames - 1 &&
+                output_file_has_data(first_path) &&
+                output_file_has_data(last_path);
+
+            g_free(first_path);
+            g_free(last_path);
+
+            if (completed) {
+                return 1;
+            }
+
+            export_set_failure(
+                failure,
+                failure_size,
+                "MLT image-sequence export stopped before every frame completed."
+            );
+            return 0;
+        }
+
+        case EXPORT_KIND_WAV_AUDIO:
+        case EXPORT_KIND_MP4: {
+            const int64_t final_position =
+                (int64_t)mlt_producer_position(source_producer);
+
+            if (final_position >= total_frames - 1 &&
+                output_file_has_data(job->output_path)) {
+                return 1;
+            }
+
+            export_set_failure(
+                failure,
+                failure_size,
+                "MLT export stopped before the requested range completed."
+            );
+            return 0;
+        }
+
+        default:
+            export_set_failure(
+                failure,
+                failure_size,
+                "The requested export type is unsupported."
+            );
+            return 0;
+    }
+}
+
+static gpointer export_worker(gpointer data)
+{
+    ExportJob *job = (ExportJob *)data;
+
+    mlt_profile export_profile = NULL;
+    mlt_profile owned_consumer_profile = NULL;
+    mlt_profile consumer_profile = NULL;
+    mlt_producer export_producer = NULL;
+    mlt_consumer export_consumer = NULL;
+
+    char *owned_consumer_target = NULL;
+    const char *consumer_target = NULL;
+
+    int64_t in_frame = 0;
+    int64_t out_frame = -1;
+
+    int succeeded = 0;
+    int cancelled = 0;
+    char failure[512] = "";
+
+    if (!export_prepare_source_graph(
+            job,
+            &export_profile,
+            &export_producer,
+            &in_frame,
+            &out_frame,
+            failure,
+            sizeof(failure))) {
         goto cleanup;
+    }
+
+    if (!export_prepare_consumer_profile(
+            job->kind,
+            export_profile,
+            &owned_consumer_profile,
+            &consumer_profile,
+            failure,
+            sizeof(failure))) {
+        goto cleanup;
+    }
+
+    if (job->kind == EXPORT_KIND_PNG_SEQUENCE) {
+        owned_consumer_target =
+            export_sequence_consumer_target(
+                job->output_path
+            );
+
+        if (owned_consumer_target == NULL) {
+            export_set_failure(
+                failure,
+                sizeof(failure),
+                "Could not build the image-sequence filename pattern."
+            );
+            goto cleanup;
+        }
+
+        consumer_target = owned_consumer_target;
+    } else {
+        consumer_target = job->output_path;
     }
 
     export_consumer =
         mlt_factory_consumer(
-            export_profile,
+            consumer_profile,
             "avformat",
-            job->output_path
+            consumer_target
         );
 
     if (export_consumer == NULL) {
-        snprintf(
+        export_set_failure(
             failure,
             sizeof(failure),
-            "%s",
             "MLT avformat export consumer is unavailable."
         );
         goto cleanup;
@@ -1680,65 +2363,37 @@ static gpointer export_worker(gpointer data)
     mlt_properties properties =
         MLT_CONSUMER_PROPERTIES(export_consumer);
 
-    if (job->kind == EXPORT_KIND_PNG_FRAME) {
-        /*
-         * A still export is rendered from the source graph, not copied from
-         * Flutter's display texture. That keeps source dimensions and avoids
-         * inheriting any viewport scaling. RGBA also preserves source alpha
-         * when the decoder provides it.
-         */
-        mlt_properties_set(properties, "f", "image2");
-        mlt_properties_set(properties, "vcodec", "png");
-        mlt_properties_set(properties, "pix_fmt", "rgba");
-        mlt_properties_set_int(properties, "an", 1);
-        mlt_properties_set(properties, "mlt_image_format", "rgba");
-
-        /* Match the progressive frame the viewer presents. */
-        mlt_properties_set(properties, "rescale", "bilinear");
-        mlt_properties_set(properties, "deinterlacer", MLT_BRIDGE_DEINTERLACER);
-        mlt_properties_set_int(properties, "top_field_first", -1);
-        mlt_properties_set_int(properties, "progressive", 1);
-    } else {
-        /*
-         * POC 9 starts with one dependable delivery preset. The UI can expose
-         * codec/container profiles after the independent render path is proven.
-         */
-        mlt_properties_set(properties, "f", "mp4");
-        mlt_properties_set(properties, "vcodec", "libx264");
-        mlt_properties_set(properties, "acodec", "aac");
-        mlt_properties_set(properties, "pix_fmt", "yuv420p");
-        mlt_properties_set(properties, "preset", "medium");
-        mlt_properties_set_int(properties, "crf", 18);
-        mlt_properties_set(properties, "movflags", "+faststart");
+    if (!export_configure_consumer(
+            job->kind,
+            properties,
+            export_producer,
+            failure,
+            sizeof(failure))) {
+        goto cleanup;
     }
-
-    /* Export never drops frames. */
-    mlt_properties_set_int(properties, "real_time", -1);
-    mlt_properties_set_int(properties, "terminate_on_pause", 1);
 
     if (mlt_consumer_connect(
             export_consumer,
             MLT_PRODUCER_SERVICE(export_producer)) != 0) {
-        snprintf(
+        export_set_failure(
             failure,
             sizeof(failure),
-            "%s",
             "MLT could not connect the export consumer."
         );
         goto cleanup;
     }
 
-    /*
-     * The save dialog handles overwrite confirmation. Remove the destination
-     * immediately before encoding so avformat always receives a fresh target.
-     */
-    remove(job->output_path);
+    if (!export_prepare_destination(
+            job,
+            failure,
+            sizeof(failure))) {
+        goto cleanup;
+    }
 
     if (mlt_consumer_start(export_consumer) != 0) {
-        snprintf(
+        export_set_failure(
             failure,
             sizeof(failure),
-            "%s",
             "MLT could not start the export encoder."
         );
         goto cleanup;
@@ -1777,22 +2432,15 @@ static gpointer export_worker(gpointer data)
         cancelled = 1;
     }
 
-    if (!cancelled) {
-        const int64_t final_position =
-            (int64_t)mlt_producer_position(export_producer);
-
-        if (final_position >= total_frames - 1 &&
-            output_file_has_data(job->output_path)) {
-            succeeded = 1;
-            export_publish_progress(1.0);
-        } else {
-            snprintf(
-                failure,
-                sizeof(failure),
-                "%s",
-                "MLT export stopped before the requested range completed."
-            );
-        }
+    if (!cancelled &&
+        export_output_completed(
+            job,
+            export_producer,
+            total_frames,
+            failure,
+            sizeof(failure))) {
+        succeeded = 1;
+        export_publish_progress(1.0);
     }
 
 cleanup:
@@ -1804,14 +2452,14 @@ cleanup:
         export_consumer = NULL;
     }
 
-    if (probe_producer != NULL) {
-        mlt_producer_close(probe_producer);
-        probe_producer = NULL;
-    }
-
     if (export_producer != NULL) {
         mlt_producer_close(export_producer);
         export_producer = NULL;
+    }
+
+    if (owned_consumer_profile != NULL) {
+        mlt_profile_close(owned_consumer_profile);
+        owned_consumer_profile = NULL;
     }
 
     if (export_profile != NULL) {
@@ -1819,8 +2467,11 @@ cleanup:
         export_profile = NULL;
     }
 
+    g_free(owned_consumer_target);
+    owned_consumer_target = NULL;
+
     if (!succeeded) {
-        remove(job->output_path);
+        export_remove_partial_output(job);
     }
 
     ensure_locks();
@@ -2118,6 +2769,38 @@ int mlt_bridge_export_frame_start(
         frame,
         frame,
         EXPORT_KIND_PNG_FRAME
+    );
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_export_png_sequence_start(
+    const char *source_path,
+    const char *output_directory,
+    int64_t in_frame,
+    int64_t out_frame)
+{
+    return start_export_job(
+        source_path,
+        output_directory,
+        in_frame,
+        out_frame,
+        EXPORT_KIND_PNG_SEQUENCE
+    );
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_export_audio_start(
+    const char *source_path,
+    const char *output_path,
+    int64_t in_frame,
+    int64_t out_frame)
+{
+    return start_export_job(
+        source_path,
+        output_path,
+        in_frame,
+        out_frame,
+        EXPORT_KIND_WAV_AUDIO
     );
 }
 

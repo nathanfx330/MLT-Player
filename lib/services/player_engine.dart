@@ -683,9 +683,48 @@ class PlayerEngine extends ChangeNotifier {
       return null;
     }
 
+    /*
+     * Snapshot the visible source frame before stopping transport. Native
+     * pause intentionally parks one frame beyond the displayed consumer
+     * position in the direction of travel, so capture must remember the
+     * visible frame first and then explicitly seek back to that exact frame.
+     */
     final position = bridge.positionMs;
-    final frame = _frameAtPosition(media, position);
-    return frame.clamp(_trimInFrame, _trimOutFrame);
+    final frame = _frameAtPosition(media, position)
+        .clamp(_trimInFrame, _trimOutFrame);
+
+    if (_playing) {
+      if (!bridge.pause()) {
+        _error = bridge.lastError.isEmpty
+            ? 'MLT could not pause for frame export.'
+            : bridge.lastError;
+        notifyListeners();
+        return null;
+      }
+
+      if (!bridge.seekMs(_midpointMsForFrame(media, frame))) {
+        _playingSelection = false;
+        _playing = false;
+        _speed = 0.0;
+        _positionMs = bridge.positionMs;
+        _eof = bridge.isEof;
+        _error = bridge.lastError.isEmpty
+            ? 'MLT could not park on the captured frame.'
+            : bridge.lastError;
+        notifyListeners();
+        return null;
+      }
+
+      _playingSelection = false;
+      _playing = false;
+      _speed = 0.0;
+      _positionMs = bridge.positionMs;
+      _eof = false;
+      _error = null;
+      notifyListeners();
+    }
+
+    return frame;
   }
 
   bool startFrameExport(String outputPath, {required int sourceFrame}) {
@@ -714,9 +753,84 @@ class PlayerEngine extends ChangeNotifier {
     );
 
     if (!started) {
-      _exporting = false;
       _exportError = bridge.exportError.isEmpty
           ? 'MLT could not start frame export.'
+          : bridge.exportError;
+      notifyListeners();
+      return false;
+    }
+
+    _exporting = true;
+    notifyListeners();
+    return true;
+  }
+
+  bool startImageSequenceExport(String outputDirectory) {
+    final media = _media;
+
+    if (!initialized ||
+        media == null ||
+        media.isStill ||
+        !media.hasVideo ||
+        media.frames <= 0 ||
+        exportFrameCount <= 0 ||
+        _exporting) {
+      return false;
+    }
+
+    _exportSucceeded = false;
+    _exportError = null;
+    _exportProgress = 0.0;
+    _exportPath = outputDirectory;
+
+    final started = bridge.startPngSequenceExport(
+      sourcePath: media.path,
+      outputDirectory: outputDirectory,
+      inFrame: exportInFrame,
+      outFrame: exportOutFrame,
+    );
+
+    if (!started) {
+      _exportError = bridge.exportError.isEmpty
+          ? 'MLT could not start image-sequence export.'
+          : bridge.exportError;
+      notifyListeners();
+      return false;
+    }
+
+    _exporting = true;
+    notifyListeners();
+    return true;
+  }
+
+  bool startAudioExport(String outputPath) {
+    final media = _media;
+
+    if (!initialized ||
+        media == null ||
+        media.isStill ||
+        !media.hasAudio ||
+        media.frames <= 0 ||
+        exportFrameCount <= 0 ||
+        _exporting) {
+      return false;
+    }
+
+    _exportSucceeded = false;
+    _exportError = null;
+    _exportProgress = 0.0;
+    _exportPath = outputPath;
+
+    final started = bridge.startAudioExport(
+      sourcePath: media.path,
+      outputPath: outputPath,
+      inFrame: exportInFrame,
+      outFrame: exportOutFrame,
+    );
+
+    if (!started) {
+      _exportError = bridge.exportError.isEmpty
+          ? 'MLT could not start audio export.'
           : bridge.exportError;
       notifyListeners();
       return false;
