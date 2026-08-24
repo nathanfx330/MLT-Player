@@ -149,6 +149,38 @@ void main() {
       engine.dispose();
     });
 
+    test('only adjacent Layer 1/2 crossings request a base-role swap', () async {
+      expect(
+        engine.moveCrossesBaseSecondaryBoundaryForTesting(1, -1),
+        isTrue,
+      );
+      expect(
+        engine.moveCrossesBaseSecondaryBoundaryForTesting(1, 1),
+        isFalse,
+      );
+      expect(
+        engine.moveCrossesBaseSecondaryBoundaryForTesting(2, -1),
+        isFalse,
+      );
+
+      // Test mode deliberately performs visual-order changes only. Put Layer 2
+      // below Layer 1 and prove the opposite-direction crossing is detected too.
+      expect(await engine.moveLayerUp(0), isTrue);
+      expect(engine.visualOrder, <int>[1, 0, 2]);
+      expect(
+        engine.moveCrossesBaseSecondaryBoundaryForTesting(1, 1),
+        isTrue,
+      );
+      expect(
+        engine.moveCrossesBaseSecondaryBoundaryForTesting(0, -1),
+        isTrue,
+      );
+      expect(
+        engine.moveCrossesBaseSecondaryBoundaryForTesting(0, 1),
+        isFalse,
+      );
+    });
+
     test('overlay reorder changes Z-order without exchanging logical state', () async {
       final baseBefore = _values(engine.layerState(0));
       final layer2Before = _values(engine.layerState(1));

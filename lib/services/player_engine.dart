@@ -3025,8 +3025,12 @@ class PlayerEngine extends ChangeNotifier {
   /// old base is rebuilt into Layer 2 and therefore receives the normal
   /// overlay controls (timing, opacity, geometry, visibility, alpha, audio).
   ///
+  /// Layer 3, when present, keeps its logical Layer-3 role and media-owned
+  /// source/presentation/audio state. Its movie-timeline START/END and timed
+  /// SOURCE IN/OUT are converted through seconds when the promoted base changes
+  /// frame rate, because MLT reopens overlay producers against the base profile.
+  ///
   /// The role boundary remains timed-video-only: a still cannot become Layer 1.
-  /// Layer 3 is intentionally excluded from this focused correction.
   Future<bool> _swapBaseAndSecondaryRoles() async {
     final oldMedia = _media;
     final oldSecondaryPath = _layers[_secondaryLayerIndex].path;
@@ -3036,7 +3040,6 @@ class PlayerEngine extends ChangeNotifier {
         oldMedia.isStill ||
         !oldMedia.hasVideo ||
         oldSecondaryPath == null ||
-        hasLayer(_tertiaryLayerIndex) ||
         _layers[_secondaryLayerIndex].isStill ||
         _opening ||
         _addingTrack ||
@@ -3065,9 +3068,10 @@ class PlayerEngine extends ChangeNotifier {
     }
 
     // Keep the last fully composed frame published while `open()` temporarily
-    // creates the promoted base with default properties and the old base is
-    // rebuilt as Layer 2. Nested preview-update holds are supported natively,
-    // so `_rebuildLayerStack` may safely use its normal visual-order path.
+    // creates the promoted base with default properties and the old base plus
+    // optional Layer 3 are rebuilt behind it. Nested preview-update holds are
+    // supported natively, so every helper below remains inside one atomic
+    // presentation transaction.
     return _runWithFrozenPreview(() async {
       final oldBasePath = oldMedia.path;
       final oldPlayheadFrame = bridge.positionFrame;
@@ -3079,8 +3083,46 @@ class PlayerEngine extends ChangeNotifier {
       final oldUndoState = List<_ClipEditState>.from(_undoStack);
       final oldRedoState = List<_ClipEditState>.from(_redoStack);
 
-      final oldBaseGain = _layers[_baseLayerIndex].audioGain;
-      final oldOverlayGain = _layers[_secondaryLayerIndex].audioGain;
+      final oldBaseState = oldEditState.layers[_baseLayerIndex];
+      final oldSecondaryState = oldEditState.layers[_secondaryLayerIndex];
+      final oldTertiaryState = oldEditState.layers[_tertiaryLayerIndex];
+      final oldTertiaryPath = oldTertiaryState.path;
+
+      Future<bool> restoreOldComposition() {
+        return _rebuildLayerStack(
+          primaryPath: oldBasePath,
+          secondaryPath: oldSecondaryPath,
+          secondaryStartFrame: oldSecondaryState.startFrame,
+          secondaryEndFrame: oldSecondaryState.endFrame,
+          secondarySourceInFrame: oldSecondaryState.sourceInFrame,
+          secondarySourceOutFrame: oldSecondaryState.sourceOutFrame,
+          tertiaryPath: oldTertiaryPath,
+          tertiaryStartFrame: oldTertiaryState.startFrame,
+          tertiaryEndFrame: oldTertiaryState.endFrame,
+          tertiarySourceInFrame: oldTertiaryState.sourceInFrame,
+          tertiarySourceOutFrame: oldTertiaryState.sourceOutFrame,
+          playheadFrame: oldPlayheadFrame,
+          primaryGain: oldBaseState.audioGain,
+          secondaryGain: oldSecondaryState.audioGain,
+          tertiaryGain: oldTertiaryState.audioGain,
+          secondaryOpacity: oldSecondaryState.opacity,
+          secondaryX: oldSecondaryState.x,
+          secondaryY: oldSecondaryState.y,
+          secondaryScale: oldSecondaryState.scale,
+          secondaryVisible: oldSecondaryState.visible,
+          secondaryAlphaMode: oldSecondaryState.alphaMode,
+          tertiaryOpacity: oldTertiaryState.opacity,
+          tertiaryX: oldTertiaryState.x,
+          tertiaryY: oldTertiaryState.y,
+          tertiaryScale: oldTertiaryState.scale,
+          tertiaryVisible: oldTertiaryState.visible,
+          tertiaryAlphaMode: oldTertiaryState.alphaMode,
+          editState: oldEditState,
+          undoState: oldUndoState,
+          redoState: oldRedoState,
+          visualOrder: oldEditState.visualOrder,
+        );
+      }
 
       // Probe the would-be base through the normal open path so its frame rate,
       // dimensions, duration, and timed/still classification become authoritative.
@@ -3095,31 +3137,10 @@ class PlayerEngine extends ChangeNotifier {
             ? _error
             : 'Only a timed video can become the base layer.';
 
-        await _rebuildLayerStack(
-          primaryPath: oldBasePath,
-          secondaryPath: oldSecondaryPath,
-          secondaryStartFrame: oldEditState.layers[_secondaryLayerIndex].startFrame,
-          secondaryEndFrame: oldEditState.layers[_secondaryLayerIndex].endFrame,
-          secondarySourceInFrame:
-              oldEditState.layers[_secondaryLayerIndex].sourceInFrame,
-          secondarySourceOutFrame:
-              oldEditState.layers[_secondaryLayerIndex].sourceOutFrame,
-          playheadFrame: oldPlayheadFrame,
-          primaryGain: oldBaseGain,
-          secondaryGain: oldOverlayGain,
-          secondaryOpacity: oldEditState.layers[_secondaryLayerIndex].opacity,
-          secondaryX: oldEditState.layers[_secondaryLayerIndex].x,
-          secondaryY: oldEditState.layers[_secondaryLayerIndex].y,
-          secondaryScale: oldEditState.layers[_secondaryLayerIndex].scale,
-          secondaryVisible: oldEditState.layers[_secondaryLayerIndex].visible,
-          secondaryAlphaMode: oldEditState.layers[_secondaryLayerIndex].alphaMode,
-          editState: oldEditState,
-          undoState: oldUndoState,
-          redoState: oldRedoState,
-          visualOrder: oldEditState.visualOrder,
-        );
-
-        _error = swapError ?? 'The layer roles could not be changed.';
+        final rolledBack = await restoreOldComposition();
+        _error = rolledBack
+            ? (swapError ?? 'The layer roles could not be changed.')
+            : 'Layer role swap failed and the previous composition could not be restored.';
         notifyListeners();
         return false;
       }
@@ -3129,82 +3150,233 @@ class PlayerEngine extends ChangeNotifier {
           ? (oldPlayheadSeconds * newFps).round()
           : 0;
 
+      int? convertStartBoundary(
+        int? sourceFrame, {
+        int? maximumFrame,
+      }) {
+        if (sourceFrame == null || oldMedia.fps <= 0 || newFps <= 0) {
+          return sourceFrame;
+        }
+
+        final converted =
+            ((sourceFrame / oldMedia.fps) * newFps).round();
+        if (maximumFrame == null) {
+          return converted < 0 ? 0 : converted;
+        }
+        return converted.clamp(0, maximumFrame).toInt();
+      }
+
+      int? convertInclusiveEnd(
+        int? sourceFrame, {
+        required int? convertedStart,
+        int? maximumFrame,
+      }) {
+        if (sourceFrame == null || oldMedia.fps <= 0 || newFps <= 0) {
+          return sourceFrame;
+        }
+
+        // END/OUT are inclusive. Convert the exclusive boundary through time
+        // and subtract one so the represented duration survives the rate change.
+        final sourceBoundarySeconds =
+            (sourceFrame + 1) / oldMedia.fps;
+        var converted =
+            (sourceBoundarySeconds * newFps).round() - 1;
+        final minimum = convertedStart ?? 0;
+        if (converted < minimum) {
+          converted = minimum;
+        }
+        if (maximumFrame != null && converted > maximumFrame) {
+          converted = maximumFrame;
+        }
+        return converted;
+      }
+
+      final newTimelineMaximum =
+          newBase.frames > 0 ? newBase.frames - 1 : null;
+      final newTertiaryStart =
+          oldTertiaryPath != null
+              ? convertStartBoundary(
+                  oldTertiaryState.startFrame,
+                  maximumFrame: newTimelineMaximum,
+                )
+              : null;
+      final newTertiaryEnd =
+          oldTertiaryPath != null
+              ? convertInclusiveEnd(
+                  oldTertiaryState.endFrame,
+                  convertedStart: newTertiaryStart,
+                  maximumFrame: newTimelineMaximum,
+                )
+              : null;
+      final newTertiarySourceIn =
+          oldTertiaryPath != null && !oldTertiaryState.isStill
+              ? convertStartBoundary(oldTertiaryState.sourceInFrame)
+              : null;
+      final newTertiarySourceOut =
+          oldTertiaryPath != null && !oldTertiaryState.isStill
+              ? convertInclusiveEnd(
+                  oldTertiaryState.sourceOutFrame,
+                  convertedStart: newTertiarySourceIn,
+                )
+              : null;
+
       // Presentation/edit properties belong to the media asset, not to the
       // numbered role it happens to occupy. The promoted former Layer 2 now
       // becomes a normal full-frame base. The displaced old base is added back
       // as a fresh overlay at frame zero so native MLT computes an appropriate
       // fit/center geometry for the *new* canvas. In particular, do not copy a
       // vertical clip's old X/Y/scale onto a landscape clip (or vice versa).
-      //
-      // The displaced old base keeps its own audio gain. Its new overlay
-      // opacity/visibility/geometry start from the native defaults that match
-      // its own source and the new base profile.
       final addedOldBase = await _addTrackAtFrame(
         oldBasePath,
         0,
         endFrame: newBase.frames > 0 ? newBase.frames - 1 : null,
       );
 
-      if (addedOldBase) {
-        if (trackHasAudio(_baseLayerIndex)) {
-          setTrackAudioGain(
-            _baseLayerIndex,
-            oldOverlayGain,
-            recordEdit: false,
-          );
-        }
-        if (trackHasAudio(_secondaryLayerIndex)) {
-          setTrackAudioGain(
-            _secondaryLayerIndex,
-            oldBaseGain,
-            recordEdit: false,
-          );
-        }
-
-        _seekSourceFrameClamped(newPlayheadFrame);
-
-        // A base-role change creates a new clip authority (profile, duration,
-        // frame zero). Treat it as a new composition baseline rather than
-        // allowing older history entries from the previous base to rebuild
-        // against incompatible clip coordinates.
-        _undoStack.clear();
-        _redoStack.clear();
-        _visualOrder = <int>[0, 1, 2];
-        _error = null;
+      if (!addedOldBase) {
+        final swapError = _error;
+        final rolledBack = await restoreOldComposition();
+        _error = rolledBack
+            ? (swapError ?? 'The displaced base could not become Layer 2.')
+            : 'Layer role swap failed and the previous composition could not be restored.';
         notifyListeners();
-        return true;
+        return false;
       }
 
-      final swapError = _error;
-      final rolledBack = await _rebuildLayerStack(
-        primaryPath: oldBasePath,
-        secondaryPath: oldSecondaryPath,
-        secondaryStartFrame: oldEditState.layers[_secondaryLayerIndex].startFrame,
-        secondaryEndFrame: oldEditState.layers[_secondaryLayerIndex].endFrame,
-        secondarySourceInFrame:
-            oldEditState.layers[_secondaryLayerIndex].sourceInFrame,
-        secondarySourceOutFrame:
-            oldEditState.layers[_secondaryLayerIndex].sourceOutFrame,
-        playheadFrame: oldPlayheadFrame,
-        primaryGain: oldBaseGain,
-        secondaryGain: oldOverlayGain,
-        secondaryOpacity: oldEditState.layers[_secondaryLayerIndex].opacity,
-        secondaryX: oldEditState.layers[_secondaryLayerIndex].x,
-        secondaryY: oldEditState.layers[_secondaryLayerIndex].y,
-        secondaryScale: oldEditState.layers[_secondaryLayerIndex].scale,
-        secondaryVisible: oldEditState.layers[_secondaryLayerIndex].visible,
-        secondaryAlphaMode: oldEditState.layers[_secondaryLayerIndex].alphaMode,
-        editState: oldEditState,
-        undoState: oldUndoState,
-        redoState: oldRedoState,
-        visualOrder: oldEditState.visualOrder,
-      );
+      if (trackHasAudio(_baseLayerIndex)) {
+        setTrackAudioGain(
+          _baseLayerIndex,
+          oldSecondaryState.audioGain,
+          recordEdit: false,
+        );
+      }
+      if (trackHasAudio(_secondaryLayerIndex)) {
+        setTrackAudioGain(
+          _secondaryLayerIndex,
+          oldBaseState.audioGain,
+          recordEdit: false,
+        );
+      }
 
-      _error = rolledBack
-          ? (swapError ?? 'The layer roles could not be changed.')
-          : 'Layer role swap failed and the previous composition could not be restored.';
+      if (oldTertiaryPath != null) {
+        final addedTertiary = await _addTrackAtFrame(
+          oldTertiaryPath,
+          newTertiaryStart ?? 0,
+          endFrame: newTertiaryEnd,
+          sourceInFrame: newTertiarySourceIn,
+          sourceOutFrame: newTertiarySourceOut,
+        );
+
+        if (!addedTertiary) {
+          final swapError = _error;
+          final rolledBack = await restoreOldComposition();
+          _error = rolledBack
+              ? (swapError ?? 'Layer 3 could not survive the base-role change.')
+              : 'Layer role swap failed and the previous composition could not be restored.';
+          notifyListeners();
+          return false;
+        }
+
+        if (!bridge.setLayerGeometry(
+          _tertiaryLayerIndex,
+          oldTertiaryState.x,
+          oldTertiaryState.y,
+          oldTertiaryState.scale,
+        )) {
+          final swapError = bridge.lastError.isEmpty
+              ? 'Layer 3 geometry could not be restored after role promotion.'
+              : bridge.lastError;
+          final rolledBack = await restoreOldComposition();
+          _error = rolledBack
+              ? swapError
+              : 'Layer role swap failed and the previous composition could not be restored.';
+          notifyListeners();
+          return false;
+        }
+        _syncTertiaryGeometry();
+
+        final effectiveTertiaryOpacity = oldTertiaryState.visible
+            ? oldTertiaryState.opacity
+            : 0.0;
+        if (!bridge.setLayerOpacity(
+          _tertiaryLayerIndex,
+          effectiveTertiaryOpacity,
+        )) {
+          final swapError = bridge.lastError.isEmpty
+              ? 'Layer 3 opacity could not be restored after role promotion.'
+              : bridge.lastError;
+          final rolledBack = await restoreOldComposition();
+          _error = rolledBack
+              ? swapError
+              : 'Layer role swap failed and the previous composition could not be restored.';
+          notifyListeners();
+          return false;
+        }
+        _layers[_tertiaryLayerIndex].opacity = oldTertiaryState.opacity;
+        _layers[_tertiaryLayerIndex].visible = oldTertiaryState.visible;
+
+        if (!bridge.setLayerAlphaMode(
+          _tertiaryLayerIndex,
+          oldTertiaryState.alphaMode,
+        )) {
+          final swapError = bridge.lastError.isEmpty
+              ? 'Layer 3 alpha interpretation could not be restored after role promotion.'
+              : bridge.lastError;
+          final rolledBack = await restoreOldComposition();
+          _error = rolledBack
+              ? swapError
+              : 'Layer role swap failed and the previous composition could not be restored.';
+          notifyListeners();
+          return false;
+        }
+        _layers[_tertiaryLayerIndex].alphaMode =
+            bridge.layerAlphaMode(_tertiaryLayerIndex).clamp(0, 2).toInt();
+
+        _layers[_tertiaryLayerIndex].hasAudio =
+            bridge.trackHasAudio(_tertiaryLayerIndex);
+        if (_layers[_tertiaryLayerIndex].hasAudio) {
+          if (!bridge.setTrackAudioGain(
+            _tertiaryLayerIndex,
+            oldTertiaryState.audioGain,
+          )) {
+            final swapError = bridge.lastError.isEmpty
+                ? 'Layer 3 audio level could not be restored after role promotion.'
+                : bridge.lastError;
+            final rolledBack = await restoreOldComposition();
+            _error = rolledBack
+                ? swapError
+                : 'Layer role swap failed and the previous composition could not be restored.';
+            notifyListeners();
+            return false;
+          }
+          _syncTrackAudioGain(_tertiaryLayerIndex);
+        }
+      }
+
+      // Keep the numeric visual permutation that existed before the boundary
+      // crossing. Because media identities just exchanged logical slots 0/1,
+      // leaving the permutation unchanged produces exactly the visible A<->B
+      // crossing the user requested while Layer 3 stays in its prior position.
+      if (!_setVisualOrderNative(oldEditState.visualOrder)) {
+        final swapError = _error;
+        final rolledBack = await restoreOldComposition();
+        _error = rolledBack
+            ? (swapError ?? 'The visual layer order could not be restored.')
+            : 'Layer role swap failed and the previous composition could not be restored.';
+        notifyListeners();
+        return false;
+      }
+
+      _seekSourceFrameClamped(newPlayheadFrame);
+
+      // A base-role change creates a new clip authority (profile, duration,
+      // frame zero). Treat it as a new composition baseline rather than
+      // allowing older history entries from the previous base to rebuild
+      // against incompatible clip coordinates.
+      _undoStack.clear();
+      _redoStack.clear();
+      _error = null;
       notifyListeners();
-      return false;
+      return true;
     });
   }
 
@@ -3238,16 +3410,45 @@ class PlayerEngine extends ChangeNotifier {
     return position > 0;
   }
 
+  bool _moveCrossesBaseSecondaryBoundary(
+    int layerIndex,
+    int direction,
+  ) {
+    final present = _presentVisualOrder();
+    final position = present.indexOf(layerIndex);
+    final otherPosition = position + direction;
+
+    if (position < 0 ||
+        otherPosition < 0 ||
+        otherPosition >= present.length) {
+      return false;
+    }
+
+    final otherLayer = present[otherPosition];
+    return (layerIndex == _baseLayerIndex &&
+            otherLayer == _secondaryLayerIndex) ||
+        (layerIndex == _secondaryLayerIndex &&
+            otherLayer == _baseLayerIndex);
+  }
+
+  @visibleForTesting
+  bool moveCrossesBaseSecondaryBoundaryForTesting(
+    int layerIndex,
+    int direction,
+  ) =>
+      _moveCrossesBaseSecondaryBoundary(layerIndex, direction);
+
   Future<bool> moveLayerUp(int layerIndex) async {
     if (!canMoveLayerUp(layerIndex)) {
       return false;
     }
 
-    // With exactly two layers, crossing the Layer-1/Layer-2 boundary is a
-    // role swap, not merely a Z-order change. The promoted timed video becomes
-    // the new base authority and the displaced base becomes the overlay, which
-    // means the full Layer-2 control set follows the Layer-2 role.
-    if (!_editStateTestMode && trackCount == 2) {
+    // Crossing the Layer-1/Layer-2 boundary is a role swap, not merely a
+    // Z-order change. This remains true with Layer 3 present: Layer 3 keeps its
+    // logical role while the two adjacent media assets exchange base/overlay
+    // authority. Layer 3 crossing either neighbor is still visual-order only.
+    if (!_editStateTestMode &&
+        _moveCrossesBaseSecondaryBoundary(layerIndex, 1)) {
       return _swapBaseAndSecondaryRoles();
     }
 
@@ -3259,7 +3460,8 @@ class PlayerEngine extends ChangeNotifier {
       return false;
     }
 
-    if (!_editStateTestMode && trackCount == 2) {
+    if (!_editStateTestMode &&
+        _moveCrossesBaseSecondaryBoundary(layerIndex, -1)) {
       return _swapBaseAndSecondaryRoles();
     }
 
