@@ -432,6 +432,11 @@ export graph is built**. Frame boundaries are converted by time so export
 In/Out and Layer 2/3 START/END keep their temporal positions when output rate
 differs from the source rate.
 
+The deterministic frame-rate smoke test also renders a three-layer 25 → 29.97
+fixture and samples the encoded output around the expected transition frames.
+That regression covers overlay START/END together with timed-video SOURCE IN /
+SOURCE OUT instead of testing frame-rate conform only on a one-layer movie.
+
 ### Known MLT 7.22 audio-flush warning
 
 Successful encoded video exports with audio can emit:
@@ -552,7 +557,8 @@ It covers:
 5. timed-overlay SOURCE IN / SOURCE OUT
 6. generalized layer ordering
 7. video export presets
-8. video export frame-rate conform
+8. video export frame-rate conform, including rendered layered START/END and
+   SOURCE IN/SOURCE OUT coverage across 25 → 29.97
 
 Parity coverage includes two- and three-layer compositions, still/timed media,
 exact placement, source trim, geometry/opacity, alpha, audio gain, visual order,
@@ -658,7 +664,28 @@ tools/smoke.sh
 
 ## License
 
-MIT License
+MLT Player's own source code is licensed under the MIT License. The MIT badge
+and [`LICENSE`](LICENSE) describe the license for code authored for this
+repository; they do not replace the licenses of MLT, FFmpeg, codec libraries,
+or other third-party components used at runtime or included in a binary
+package.
+
+### Third-party licensing
+
+MLT Player dynamically links the installed `mlt-framework-7`. The MLT project
+licenses its framework/client libraries under LGPL-2.1, while modules/plugins
+can carry different licenses and some MLT build configurations enable GPL
+components. FFmpeg is normally LGPL-2.1-or-later, but its effective license can
+become GPL when GPL components or external libraries such as `libx264` are
+enabled.
+
+Anyone distributing prebuilt MLT Player binaries should audit the exact MLT
+modules, FFmpeg build configuration, codec libraries, and other dependencies
+being shipped, then satisfy the notices and distribution obligations that
+actually apply. See [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for the
+project's distribution checklist and upstream references.
+
+### MIT License
 
 Copyright (c) 2026 nathanfx330
 
