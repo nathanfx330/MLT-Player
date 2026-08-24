@@ -3925,17 +3925,47 @@ int mlt_bridge_open(
         return 0;
     }
 
+    const int path_is_still =
+        path_has_still_image_extension(path);
+
     /*
      * First open discovers the geometry, second open runs against a
      * profile that matches it. Doing this in one pass would leave
      * the producer configured for whatever the default profile was.
+     *
+     * Still images must not use MLT's automatic producer selection here.
+     * On Linux that can choose qimage, which initializes Qt from the MLT
+     * render path. This application is GTK/Flutter, and creating a
+     * QApplication away from the main thread is unsafe. Layers 2 and 3
+     * already avoid that path; the primary producer must follow the same
+     * rule.
      */
-    mlt_producer probe_producer =
-        mlt_factory_producer(
-            current_engine()->e_profile,
-            NULL,
-            path
-        );
+    mlt_producer probe_producer = NULL;
+
+    if (path_is_still) {
+        probe_producer =
+            mlt_factory_producer(
+                current_engine()->e_profile,
+                "pixbuf",
+                path
+            );
+
+        if (probe_producer == NULL) {
+            probe_producer =
+                mlt_factory_producer(
+                    current_engine()->e_profile,
+                    "avformat",
+                    path
+                );
+        }
+    } else {
+        probe_producer =
+            mlt_factory_producer(
+                current_engine()->e_profile,
+                NULL,
+                path
+            );
+    }
 
     if (probe_producer == NULL) {
         set_error(
@@ -3951,14 +3981,33 @@ int mlt_bridge_open(
     mlt_profile_from_producer(current_engine()->e_profile, probe_producer);
     mlt_producer_close(probe_producer);
 
-    current_engine()->e_primary_producer =
-        mlt_factory_producer(
-            current_engine()->e_profile,
-            NULL,
-            path
-        );
+    if (path_is_still) {
+        current_engine()->e_primary_producer =
+            mlt_factory_producer(
+                current_engine()->e_profile,
+                "pixbuf",
+                path
+            );
 
-    current_engine()->e_producer = current_engine()->e_primary_producer;
+        if (current_engine()->e_primary_producer == NULL) {
+            current_engine()->e_primary_producer =
+                mlt_factory_producer(
+                    current_engine()->e_profile,
+                    "avformat",
+                    path
+                );
+        }
+    } else {
+        current_engine()->e_primary_producer =
+            mlt_factory_producer(
+                current_engine()->e_profile,
+                NULL,
+                path
+            );
+    }
+
+    current_engine()->e_producer =
+        current_engine()->e_primary_producer;
 
     if (current_engine()->e_producer == NULL) {
         set_error(
@@ -3977,7 +4026,11 @@ int mlt_bridge_open(
         MLT_PRODUCER_PROPERTIES(current_engine()->e_producer);
 
     const MediaKind kind =
-        classify_producer_locked(current_engine()->e_producer);
+        path_is_still
+            ? MEDIA_STILL
+            : classify_producer_locked(
+                  current_engine()->e_producer
+              );
 
     if (kind == MEDIA_UNSUPPORTED) {
         char message[512];
