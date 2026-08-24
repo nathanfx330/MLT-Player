@@ -50,7 +50,6 @@ Built and tested against **MLT 7.22.0** on Linux.
 | Still + alpha-capable overlay layers | Done |
 | Per-track audio levels | Done |
 | Layer source replacement | Done |
-| Two-layer base/overlay order swap | Done |
 | Layer removal + composition Undo / Redo | Done |
 | Seamless Layer 3 remove / Undo restore | Done |
 | Tractor-aware three-layer composition export | Done |
@@ -61,22 +60,41 @@ Built and tested against **MLT 7.22.0** on Linux.
 | Explicit output frame-rate control | Done |
 | Layer START / END timing | Done |
 | Timed-overlay SOURCE IN / SOURCE OUT trimming | Done |
-| Generalized Layer 1 / 2 / 3 reordering | Next |
+| Generalized Layer 1 / 2 / 3 visual reordering | Done |
+| True two-layer base / overlay role swap | Done |
+| Cross-aspect role-swap fitting | Done |
+| Atomic role-swap / timing presentation | Done |
+| Three-layer arbitrary base-role promotion | Planned |
 | Blend-mode exploration | Planned |
 | Broader alpha / color policy | Planned |
 | MLT XML interchange | Planned |
 
-The current checkpoint is a **hardened three-layer composition and timing
-system**. Layer 1 is the timed base movie. Layers 2 and 3 can be timed video or
-held stills and carry independent geometry, opacity, visibility, alpha
-interpretation, audio gain, timeline placement, and—in the case of timed
-video—independent source In/Out trims.
+The current checkpoint is a **hardened three-layer composition, timing,
+ordering, and export system**.
 
-Preview and export rebuild the same indexed composition state on separate MLT
-graphs. Export policy is independently selectable from composition state:
-current video presets include **H.264 Delivery** and **ProRes 422 HQ Master**,
-and the output frame rate can follow the source or conform to an explicit
-supported rate.
+Layers 2 and 3 can be timed video or held stills and carry independent
+geometry, opacity, visibility, alpha interpretation, audio gain, timeline
+START/END, and—in the case of timed video—independent SOURCE IN/SOURCE OUT.
+
+Visual Z-order is explicit state. Layer 1, Layer 2, and Layer 3 can participate
+in Move Up / Move Down ordering without losing their indexed composition state.
+Preview and export carry the same order permutation.
+
+With exactly two layers, moving timed Layer 2 into the Layer-1 role performs a
+**true role swap**: Layer 2 becomes the new base/profile authority and the
+former base becomes a normal editable Layer 2. Cross-frame-rate boundaries are
+converted through time, and cross-aspect sources are fitted against the new
+canvas rather than inheriting an unrelated overlay transform.
+
+Graph-changing edits are presented atomically. The player combines Dart
+notification batching, native frame-publication freeze, a final-frame readiness
+barrier, double-buffered OpenGL textures, Flutter `Texture.freeze`, and a
+first-swap hidden-texture prewarm. The goal is simple: keep the old completed
+composition on screen until the new completed composition is ready.
+
+Current video presets include **H.264 Delivery** and **ProRes 422 HQ Master**,
+and output frame rate can follow the source or conform to an explicit supported
+rate.
 
 Engineering notes live in [`docs/`](docs/README.md).
 
@@ -129,28 +147,11 @@ DNxHR, MJPEG, or image sequences.
 
 The Inspector reports metadata from the media MLT actually opened.
 
-Current readouts include:
-
-- frame size
-- display aspect
-- frame rate
-- duration
-- frame count
-- file size
-- average whole-file data rate
-- selected video and audio stream indices
-- codec short and long names
-- pixel format
-- colorspace
-- transfer characteristic
-- color range
-- source timecode when present
-- complete stream list
-- stream language
-- stream bitrate
-- video dimensions
-- audio channel count
-- audio sample rate
+Current readouts include frame size, display aspect, frame rate, duration,
+frame count, file size, average whole-file data rate, selected video/audio
+stream indices, codec names, pixel format, colorspace, transfer characteristic,
+color range, source timecode, complete stream list, language, bitrate, video
+dimensions, audio channel count, and audio sample rate.
 
 The **Layers** inspector exposes the current composition state for Layers 1–3.
 
@@ -184,8 +185,7 @@ Selection is frame-based.
 - Play Selection plays only the marked range.
 - Loop + Play Selection loops In → Out → In.
 - Trim Selection turns the marked range into the active clip.
-- Trim is non-destructive.
-- Trims can be nested.
+- Trim is non-destructive and can be nested.
 - Clip-relative frames restart at frame 1 after a trim.
 - Generated clip timecode restarts at `00:00:00:00`.
 - Embedded source timecode remains tied to the original source position.
@@ -196,10 +196,10 @@ Undo and Redo are application-owned edit history:
 - `Ctrl+Shift+Z` — Redo
 
 Composition edits participate in the same history. Explicit layer removal is
-undoable. Layer timing and source-trim edits rebuild the composition as edit
-transactions, preserving prior history and rolling back when a rebuild fails.
+undoable. Timing/source-trim edits rebuild transactionally and roll back when a
+rebuild fails.
 
-Adding Layer 2 or Layer 3 establishes a new composition baseline, so walking
+Adding Layer 2 or Layer 3 establishes a new composition baseline so walking
 backward through later property edits does not accidentally un-add the layer.
 
 ---
@@ -217,12 +217,12 @@ Layer 2 playlist / producer -------+--> tractor --> preview consumer
 Layer 3 playlist / producer -------+
 ```
 
-Layer slots are stable and indexed internally:
+The logical slots remain stable and indexed internally:
 
 ```text
-slot 0 = Layer 1 / base movie
-slot 1 = Layer 2 / overlay
-slot 2 = Layer 3 / overlay
+slot 0 = Layer 1
+slot 1 = Layer 2
+slot 2 = Layer 3
 ```
 
 A fourth layer is currently rejected rather than silently changing topology.
@@ -231,9 +231,9 @@ A fourth layer is currently rejected rather than silently changing topology.
 
 Layer 1 is the timed base movie. It defines:
 
-- the movie canvas/profile
+- movie canvas/profile
 - frame zero
-- the overall movie duration
+- overall movie duration
 
 A still image cannot become Layer 1 in the current model.
 
@@ -245,16 +245,9 @@ Add to Movie places a new overlay at the currently parked playhead. Internally,
 MLT Player builds a playlist with a blank lead-in so the added media starts at
 the requested movie frame.
 
-Overlay presentation controls include:
-
-- opacity
-- show / hide
-- replace source
-- per-track audio level
-- alpha interpretation: Auto / Straight / Premultiplied
-- X / Y position
-- uniform scale from 10% to 300%
-- nine-position anchor grid
+Overlay presentation controls include opacity, visibility, source replacement,
+per-track audio level, alpha interpretation, X/Y position, scale from 10% to
+300%, and a nine-position anchor grid.
 
 Video compositing uses MLT `composite` transitions. Audio-bearing tracks are
 summed with MLT `mix` transitions after track-local `volume` filters.
@@ -273,11 +266,8 @@ Layer 3                    |------------|
 The Layers inspector exposes START and END as frame-accurate timecode with
 ±1-frame and ±10-frame controls.
 
-START cannot cross END and END cannot cross START. A layer can therefore be
-moved or shortened without producing an invalid placement range.
-
-For still images, START / END controls the duration of the hold. A still no
-longer has to remain visible through the final frame of Layer 1.
+START cannot cross END and END cannot cross START. For still images, START / END
+controls the hold duration.
 
 ### Timed-video SOURCE IN / SOURCE OUT
 
@@ -295,36 +285,62 @@ MOVIE TIMELINE
 
 There is no implicit speed change or time stretch.
 
-- If the timeline window is shorter than the selected source range, MLT Player
-  uses only the beginning of the selected source range.
+- If the timeline window is shorter than the selected source range, only the
+  beginning of the selected source range is used.
 - If the selected source range is shorter than the timeline window, the layer
   naturally ends when the selected source range runs out.
-- Still images do not expose SOURCE IN / SOURCE OUT because their source is a
-  held image rather than timed media.
+- Still images do not expose SOURCE IN / SOURCE OUT.
 
 SOURCE IN / SOURCE OUT edits participate in Undo / Redo, Layer 3 restoration,
 preview/export parity, and output-frame-rate conform.
 
-### Current ordering rule
+### Visual ordering
 
-The existing Layer 1 / Layer 2 swap remains a two-layer operation. It is
-disabled while Layer 3 exists; remove the top layer first rather than
-implicitly reindexing the stack.
+Visual Z-order is independent state. Move Up / Move Down can reorder the three
+present logical layers without swapping their source/timing/geometry/audio
+state.
 
-Generalized three-layer **Move Up / Move Down** behavior is the next composition
-milestone.
+The Layers inspector displays the actual visual stack, and export reconstructs
+the same order on its independent graph.
 
-### Seamless Layer 3 removal and Undo
+### Two-layer base-role swapping
 
-Layer 3 removal and history restoration use a small preview transaction.
+With exactly Layer 1 + Layer 2, crossing the Layer-1 boundary is stronger than a
+visual reorder.
 
-During the graph rebuild, native frame publication is frozen and Dart
-`ChangeNotifier` updates are batched. The last valid texture remains on screen
-until the replacement graph and all saved Layer 3 properties are ready. The
-transaction then publishes one final state.
+If Layer 2 is timed video, it can become the new Layer 1/base. The displaced
+former base becomes a normal Layer 2 and gains the full overlay control set.
 
-That prevents the viewer from flashing through intermediate Layer 1 / Layer 2
-rebuild states during Remove or Undo.
+The swap converts timing/playhead values through seconds when frame rates
+differ. When aspect ratios differ, the displaced source is fitted to the new
+base canvas using its own media characteristics rather than inheriting the
+promoted clip's old overlay transform.
+
+A still image cannot be promoted to the base role.
+
+Arbitrary three-layer **base-role promotion** remains a separate future product
+decision. Three-layer visual ordering and two-layer role swapping are explicit,
+distinct behaviors.
+
+### Atomic graph-changing edits
+
+Layer 3 Remove/Undo, timing/source-trim rebuilds, and two-layer role swaps are
+presented as transactions rather than visible assembly sequences.
+
+The presentation path combines:
+
+```text
+Dart notification batching
+native frame publication freeze
+final-frame readiness barrier
+double-buffered OpenGL texture names
+Flutter Texture.freeze
+first-swap alternate-profile prewarming
+```
+
+The old completed texture stays visible while the replacement graph is built.
+Cross-aspect swaps allocate the new-size texture off-screen. The UI and texture
+are released only when the finished replacement state is ready.
 
 ---
 
@@ -333,30 +349,9 @@ rebuild states during Remove or Undo.
 Export runs on a **separate native MLT graph**. The encoder never steals or
 mutates the live preview tractor.
 
-The bridge snapshots the indexed composition state and rebuilds it with fresh
-objects on the worker thread:
-
-```text
-preview
-  Layer 1 producer
-  Layer 2 playlist
-  Layer 3 playlist (when present)
-  tractor
-  composite / mix transitions
-  sdl2_audio consumer
-
-export worker
-  fresh Layer 1 producer
-  fresh Layer 2 playlist
-  fresh Layer 3 playlist (when present)
-  fresh tractor
-  fresh composite / mix transitions
-  avformat consumer
-```
-
-The snapshot carries presence, placement, source range, still/timed
-classification, geometry, opacity/visibility result, alpha interpretation,
-audio presence, and audio gain for each indexed layer.
+The bridge snapshots the indexed composition state—including timing, source
+ranges, presentation state, audio state, and visual order—and rebuilds it with
+fresh MLT objects on the worker thread.
 
 ### Export range
 
@@ -373,11 +368,8 @@ RANGE
 ```
 
 **Whole Movie is the default.** For a trimmed movie it means the current active
-trim bounds. `In / Out` is available when a valid marked range exists.
-
-The range is fail-closed: In / Out export requires a complete valid pair. A
-completed In/Out pair can select the In / Out mode automatically until the user
-explicitly chooses a range mode; an explicit Whole Movie choice remains sticky.
+trim bounds. In / Out requires a complete valid pair and fails closed before
+native work begins when the range is invalid.
 
 ### Current export families
 
@@ -392,9 +384,6 @@ explicitly chooses a range mode; an explicit Whole Movie choice remains sticky.
 - `Ctrl+E` — run the currently selected Export mode
 - `Ctrl+Alt+E` — one-shot PNG image-sequence export
 - `Ctrl+Shift+E` — export the current frame as PNG
-
-`Ctrl+Alt+E` is a pure action: it does not change the persistent split-button
-Export mode.
 
 ### Video presets
 
@@ -426,8 +415,7 @@ Codec preset and output frame rate are independent choices.
 
 ### Explicit output frame rate
 
-Video export can follow the source rate or conform to one of the currently
-supported explicit rates:
+Video export can follow the source rate or conform to:
 
 - Source
 - 23.976 (`24000/1001`)
@@ -440,43 +428,32 @@ supported explicit rates:
 - 60
 
 The implementation changes the **MLT export profile before the independent
-export graph is built**. It is therefore a real render/timeline conform rather
-than merely writing different encoder metadata.
-
-Frame boundaries are converted by time. Export In/Out and Layer 2/3 START/END
-therefore keep their temporal positions when the output rate differs from the
-source rate.
-
-The source ranges inside timed overlays remain source-media frame ranges; their
-timeline placement is what is conformed to the output profile.
+export graph is built**. Frame boundaries are converted by time so export
+In/Out and Layer 2/3 START/END keep their temporal positions when output rate
+differs from the source rate.
 
 ### Known MLT 7.22 audio-flush warning
 
-On MLT 7.22, successful encoded video exports with an audio stream can emit:
+Successful encoded video exports with audio can emit:
 
 ```text
 Timestamps are unset in a packet for stream 1
 Encoder did not produce proper pts, making some up.
 ```
 
-Current deterministic coverage shows successful completion despite this known
-warning. The warning is tracked separately from export correctness so it does
-not mask new failures.
+Deterministic coverage shows successful completion despite this known MLT 7.22
+warning. It is tracked separately from export correctness.
 
 ### Current-frame PNG
 
-PNG exports are rendered from the MLT composition graph rather than copied
-from the Flutter texture.
-
-For anamorphic sources, PNG output is written at **display dimensions with
-square pixels**. For example, a 1440×1080 source with 16:9 display aspect is
-written as approximately 1920×1080 rather than as a squeezed 1440×1080 PNG.
-
-Offline PNG scaling uses Lanczos interpolation and preserves RGBA.
+PNG exports are rendered from the MLT composition graph rather than copied from
+the Flutter texture. Anamorphic sources are written at display dimensions with
+square pixels, using Lanczos scaling and preserving RGBA.
 
 ### PNG image sequence
 
-Image-sequence export writes to a fresh dedicated directory:
+Image-sequence export writes deterministic owned filenames into a fresh empty
+directory:
 
 ```text
 movie_frames/
@@ -486,27 +463,14 @@ movie_frames/
   ...
 ```
 
-The native bridge requires the destination directory to exist and be empty.
-Completion validation checks the expected frame count, numbering range, and
-that every owned PNG is non-empty.
-
-Cancelled or failed sequence exports remove only filenames owned by the export
-and remove the directory only if it becomes empty.
+Completion validation checks expected count, numbering range, and non-empty
+output. Failed/cancelled jobs remove only files owned by that export.
 
 ### WAV audio export
 
-The fixed audio interchange preset is:
-
-```text
-Container:  WAV
-Codec:      PCM signed 24-bit little-endian
-Video:      disabled
-Rate:       preserve an audio-bearing source rate when available
-Channels:   preserve an audio-bearing source channel count when available
-```
-
-With multiple audio-bearing layers this is a **composition mixdown**, not merely
-a copy of Layer 1 audio. Track gains and tractor mixes are rendered into the WAV.
+The fixed audio interchange preset is 24-bit PCM WAV with video disabled. With
+multiple audio-bearing layers this is a **composition mixdown**, not merely a
+copy of Layer 1 audio.
 
 ---
 
@@ -516,12 +480,13 @@ a copy of Layer 1 audio. Track gains and tractor mixes are rendered into the WAV
 Flutter UI
     |
     +-- PlayerEngine
-    |      +-- transport
-    |      +-- selection / trim
+    |      +-- transport / selection / trim
     |      +-- composition history
     |      +-- Layer 1 / 2 / 3 indexed state
+    |      +-- visual Z-order
     |      +-- layer timing + source trims
     |      +-- export range / preset / rate / status
+    |      +-- atomic presentation transactions
     |
     +-- Dart FFI --------------------------> libmlt_bridge.so
     |                                           |
@@ -542,11 +507,11 @@ Flutter UI
                       |
                render threads + RGBA
                       |
-               triple frame buffer
+                CPU frame buffers
                       |
-              OpenGL external texture
+          double-buffered OpenGL textures
                       |
-                   Flutter
+             Flutter Texture widget
 ```
 
 Important architecture rules:
@@ -556,21 +521,17 @@ Important architecture rules:
 - Public media/transport/property entry points fail closed when no engine is
   active.
 - Dart resolves the bridge with `DynamicLibrary.process()`.
-- The GTK runner links the same bridge into the application process.
 - The Flutter texture registrar is process-wide, with one engine selected as
   its current texture source.
-- The MLT frame callback never takes the main engine mutex.
-- Video frame transfer uses three buffers so producer and Flutter raster
-  threads can own buffers independently.
-- Scaling, deinterlacing, and image conversion happen on MLT render threads.
-- Retired OpenGL texture names are deleted only while Flutter has a valid GL
-  context, rather than from arbitrary teardown code.
 - Preview and export represent the same indexed composition but share no live
   producer/playlist/tractor objects.
-- Graph-rebuilding composition edits can freeze frame publication temporarily
-  so history operations become visually atomic.
-- Timeline and source-range edits are application-owned state and are rebuilt
-  transactionally into MLT graphs.
+- Visual order is composition state and is reproduced in export.
+- Graph-rebuilding edits freeze both model publication and rendered-frame
+  presentation until the replacement state is complete.
+- The currently displayed GL texture is not resized in place during an atomic
+  cross-aspect swap; a hidden back texture is prepared first.
+- The alternate-size texture path is prewarmed before the first role swap so
+  the first visible transition uses the same hot path as later swaps.
 
 ---
 
@@ -582,145 +543,71 @@ The main native safety net is:
 tools/smoke.sh
 ```
 
-It builds the bridge and runs independent checks for:
+It covers:
 
-1. **no-active-engine guards** — deliberately destroys the active engine and
-   verifies public calls fail closed and return safe sentinel values.
-2. **native smoke** — transport, engine isolation, composition, still/alpha
-   behavior, audio levels, export, reopen/reset, and teardown.
-3. **preview/export parity** — derives state from the live preview graph and a
-   freshly constructed export graph, then compares them.
-4. **layer timing** — verifies explicit START / END boundaries for Layer 2 and
-   Layer 3 and rejects reversed ranges without damaging the composition.
-5. **layer source trim** — verifies independent timeline and SOURCE IN / SOURCE
-   OUT ranges for timed Layer 2 and Layer 3.
-6. **video export presets** — validates H.264 Delivery and ProRes 422 HQ Master
-   policy.
-7. **video export frame rate** — verifies a 25 fps source conforms to
-   `30000/1001` without changing one-second duration and produces 30 output
-   frames.
-8. **MP4 PTS diagnosis** — tracks the known MLT 7.22 encoded-audio timestamp
-   warning separately from export success.
+1. no-active-engine guards
+2. native transport/composition smoke
+3. preview/export parity
+4. bounded layer START / END
+5. timed-overlay SOURCE IN / SOURCE OUT
+6. generalized layer ordering
+7. video export presets
+8. video export frame-rate conform
 
-Parity coverage includes:
+Parity coverage includes two- and three-layer compositions, still/timed media,
+exact placement, source trim, geometry/opacity, alpha, audio gain, visual order,
+profile dimensions/rate, composition length, and export range.
 
-- timed Layer 2
-- held-still Layer 2
-- timed/audio Layer 3
-- held-alpha Layer 3
-- exact insertion frames
-- bounded timeline START / END
-- timed-video SOURCE IN / SOURCE OUT
-- layer counts
-- output profile dimensions and frame rate
-- composition length and export range
-- still/timed classification
-- alpha mode
-- presentation geometry and opacity
-- per-track audio presence and gain
-- rejection of a fourth layer without damaging the three-layer tractor
-
-The deterministic export fixture generator is also available:
+The current Flutter suite is also run with:
 
 ```bash
-bash tools/generate_export_fixtures.sh
+flutter analyze
+flutter test
 ```
 
-This keeps "MLT graph problem" and "Flutter integration problem" as separate
-questions during debugging.
+At the ordering/role-swap checkpoint, the Flutter suite reports **17 passing
+tests** and the native smoke groups report zero failures.
 
 ---
 
 ## Roadmap
 
-### POC 0–5 — playback foundation — complete
+### POC 0–9 — complete
 
-Flutter shell, MLT lifecycle, media open/reopen, OpenGL texture, audio,
-seek/scrub, fullscreen, drag/drop, stills, audio-only playback, anamorphic
-display handling, and smoke testing.
+Playback foundation, precise transport, inspection, selection/trim, and the
+independent background-export system are complete.
 
-### POC 6 — precise transport — complete
+### POC 10 — tracks and composition — current hardened checkpoint
 
-Exact frame stepping, J/K/L shuttle, reverse playback, Loop, Play All Frames,
-generated timecode, and embedded source timecode.
+Completed milestones now include:
 
-### POC 7 — inspection — complete
-
-Codec/stream topology, geometry, rate/duration/frame count, data size, pixel
-format, colorspace, transfer characteristic, color range, and source timecode.
-
-### POC 8 — selection and trim — complete
-
-In/Out, Play Selection, Loop Selection, Undo/Redo, non-destructive trim,
-nested trims, and trim-aware transport.
-
-### POC 9 — export foundation — complete
-
-Independent background export graph, MP4, current-frame PNG, PNG sequence,
-24-bit PCM WAV, progress/cancel, partial-output cleanup, grouped Export UI,
-progressive output policy, Lanczos PNG scaling, deterministic fixtures, and
-sequence validation.
-
-### POC 10 — tracks and composition — hardened three-layer checkpoint
-
-The original POC 10 progression established opaque engine handles, a second
-track, playhead-relative placement, opacity, track audio, still/alpha support,
-replacement/visibility/order, geometry, and tractor-aware export.
-
-The hardening and Layer 3 work added:
-
-- shared preview/export timing helpers
-- export diagnostics and range-state hardening
-- native module split (`bridge`, `composition`, `export`)
-- preview/export parity instrumentation
-- Linux CI for analyzer + smoke/parity
-- MLT 7.22 PTS diagnosis
-- composition-aware Undo/Redo and explicit layer removal
-- macro-alias cleanup
-- no-active-engine guards
-- safe OpenGL texture retirement/deletion
-- indexed three-slot composition snapshots
-- real third tractor track in preview and export
-- Layer 3 Flutter/FFI and Layers inspector controls
-- atomic frame + notification transactions for seamless Layer 3 remove/Undo
-
-The completed export/timing milestone added:
-
-- H.264 Delivery and ProRes 422 HQ Master video presets
-- independently selectable output frame rate
-- rational 23.976 / 29.97 / 59.94 support
-- real MLT profile frame-rate conform
-- time-preserving export-range and layer-boundary conversion
-- explicit Layer 2 / Layer 3 timeline START / END
-- bounded still holds
+- opaque engine handles
+- three-layer tractor composition
+- playhead-relative layers
+- still/alpha support
+- independent geometry / opacity / visibility / audio gain
+- Layer 2 / Layer 3 timeline START / END
 - timed-overlay SOURCE IN / SOURCE OUT
-- independent source-range versus timeline-window semantics
-- Undo/Redo and rollback for graph-rebuilding timing edits
-- Layer 3 restoration of timing and source trims
-- deterministic native coverage for presets, frame rate, layer timing, and
-  source trimming
+- composition-aware Undo / Redo and layer removal
+- seamless Layer 3 Remove / Undo
+- H.264 Delivery + ProRes 422 HQ Master presets
+- explicit output-rate conform
+- preview/export parity
+- generalized three-layer visual Z-order
+- true two-layer base-role swapping
+- cross-aspect displaced-base fitting
+- atomic timing/source-trim/role-swap presentation
+- double-buffered GL texture handoff
+- Flutter `Texture.freeze` presentation boundary
+- first-swap alternate-profile prewarming
 
-### Next — generalized layer ordering
+### Next composition work
 
-The next isolated composition milestone is generalized Layer 1 / Layer 2 /
-Layer 3 reordering.
+Likely next steps:
 
-Target behavior:
-
-- Move Up / Move Down across the three-layer stack
-- preserve each layer's source, timing, source trim, geometry, visibility,
-  opacity, alpha interpretation, and audio gain
-- preserve the base-movie/profile authority rules explicitly rather than
-  accidentally changing them during a visual-order move
-- make reordering undoable
-- verify preview/export parity after reorder
-- retire the current special-case two-layer-only swap once the generalized path
-  is proven
-
-After that:
-
+- arbitrary three-layer base-role promotion, if the product needs it
 - blend-mode exploration
-- broader alpha/color policy
+- broader alpha / color policy
 
 ### POC 11 — interchange
 
@@ -734,13 +621,11 @@ Planned:
 
 ## Engineering notes
 
-The implementation notes are intentionally written as field notes for people
-embedding MLT rather than only driving it through `melt`:
-
 - [Documentation index](docs/README.md)
 - [Embedding MLT in a Flutter/Linux Desktop Player](docs/embedding-mlt-in-a-flutter-linux-app.md)
 - [POC 9: Export Formats and Hardening](docs/poc-9-export-formats-and-hardening.md)
 - [POC 10: Multitrack, Compositing, and Tractor-Aware Export](docs/poc-10-multitrack-compositing-and-export.md)
+- [POC 10 continuation: Layer Ordering, Role Swaps, and Atomic Presentation](docs/poc-10-layer-ordering-and-atomic-role-swaps.md)
 
 ---
 
