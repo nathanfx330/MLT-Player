@@ -1,3 +1,5 @@
+<!-- README.md -->
+
 # MLT Player
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -37,7 +39,7 @@ Built and tested against **MLT 7.22.0** on Linux.
 | Play Selection / Loop Selection | Done |
 | Undo / Redo | Done |
 | Non-destructive Trim Selection | Done |
-| Background MP4 export | Done |
+| Background video export | Done |
 | Current-frame PNG export | Done |
 | PNG image-sequence export | Done |
 | WAV audio export | Done |
@@ -55,16 +57,26 @@ Built and tested against **MLT 7.22.0** on Linux.
 | Preview / export parity harness | Done |
 | No-active-engine guard regression | Done |
 | Linux CI smoke + parity | Done |
-| Export preset / codec selection | Next |
-| Explicit output frame-rate control | Next |
-| Richer layer timing / ordering operations | Planned |
+| Export preset / codec selection | Done |
+| Explicit output frame-rate control | Done |
+| Layer START / END timing | Done |
+| Timed-overlay SOURCE IN / SOURCE OUT trimming | Done |
+| Generalized Layer 1 / 2 / 3 reordering | Next |
+| Blend-mode exploration | Planned |
+| Broader alpha / color policy | Planned |
 | MLT XML interchange | Planned |
 
-The current checkpoint is a **hardened three-layer composition system**. Layer 1
-is the timed base movie. Layers 2 and 3 can be timed video or held stills, can
-start at the parked playhead, and carry independent geometry, opacity,
-visibility, alpha interpretation, and audio gain. Preview and export rebuild the
-same indexed composition state on separate MLT graphs.
+The current checkpoint is a **hardened three-layer composition and timing
+system**. Layer 1 is the timed base movie. Layers 2 and 3 can be timed video or
+held stills and carry independent geometry, opacity, visibility, alpha
+interpretation, audio gain, timeline placement, and—in the case of timed
+video—independent source In/Out trims.
+
+Preview and export rebuild the same indexed composition state on separate MLT
+graphs. Export policy is independently selectable from composition state:
+current video presets include **H.264 Delivery** and **ProRes 422 HQ Master**,
+and the output frame rate can follow the source or conform to an explicit
+supported rate.
 
 Engineering notes live in [`docs/`](docs/README.md).
 
@@ -141,8 +153,19 @@ Current readouts include:
 - audio sample rate
 
 The **Layers** inspector exposes the current composition state for Layers 1–3.
-Overlay controls include opacity, visibility, alpha interpretation, X/Y
-position, scale, anchors, source replacement, and per-track audio gain.
+
+Overlay controls include:
+
+- opacity
+- show / hide
+- replace source
+- per-track audio level
+- alpha interpretation
+- X / Y position
+- uniform scale
+- nine-position anchors
+- timeline START / END
+- timed-video SOURCE IN / SOURCE OUT
 
 Color primaries are intentionally not shown yet because the current MLT 7.22
 metadata path used here does not expose an independent source-primaries value
@@ -173,9 +196,11 @@ Undo and Redo are application-owned edit history:
 - `Ctrl+Shift+Z` — Redo
 
 Composition edits participate in the same history. Explicit layer removal is
-undoable. Adding Layer 2 or Layer 3 establishes a new composition baseline, so
-walking backward through later property edits does not accidentally un-add the
-layer.
+undoable. Layer timing and source-trim edits rebuild the composition as edit
+transactions, preserving prior history and rolling back when a rebuild fails.
+
+Adding Layer 2 or Layer 3 establishes a new composition baseline, so walking
+backward through later property edits does not accidentally un-add the layer.
 
 ---
 
@@ -220,7 +245,7 @@ Add to Movie places a new overlay at the currently parked playhead. Internally,
 MLT Player builds a playlist with a blank lead-in so the added media starts at
 the requested movie frame.
 
-Overlay controls include:
+Overlay presentation controls include:
 
 - opacity
 - show / hide
@@ -231,16 +256,63 @@ Overlay controls include:
 - uniform scale from 10% to 300%
 - nine-position anchor grid
 
-Still images are held from their insertion frame through the end of Layer 1.
-Small stills keep native display size when they already fit the canvas; larger
-stills scale down to fit.
-
 Video compositing uses MLT `composite` transitions. Audio-bearing tracks are
 summed with MLT `mix` transitions after track-local `volume` filters.
 
-The existing Layer 1 / Layer 2 swap remains a two-layer operation. It is disabled
-while Layer 3 exists; remove the top layer first rather than implicitly
-reindexing the stack.
+### Timeline START / END
+
+Layers 2 and 3 can be bounded independently on the movie timeline.
+
+```text
+Layer 1  |----------------------------------------|
+Layer 2        |-------------------|
+Layer 3                    |------------|
+               ^ START     ^ END
+```
+
+The Layers inspector exposes START and END as frame-accurate timecode with
+±1-frame and ±10-frame controls.
+
+START cannot cross END and END cannot cross START. A layer can therefore be
+moved or shortened without producing an invalid placement range.
+
+For still images, START / END controls the duration of the hold. A still no
+longer has to remain visible through the final frame of Layer 1.
+
+### Timed-video SOURCE IN / SOURCE OUT
+
+Timed overlays have a second, independent range inside their source media:
+
+```text
+SOURCE MEDIA
+|---------|=====================|---------|
+          SRC IN                SRC OUT
+
+MOVIE TIMELINE
+      |------------- Layer 2 -------------|
+      START                              END
+```
+
+There is no implicit speed change or time stretch.
+
+- If the timeline window is shorter than the selected source range, MLT Player
+  uses only the beginning of the selected source range.
+- If the selected source range is shorter than the timeline window, the layer
+  naturally ends when the selected source range runs out.
+- Still images do not expose SOURCE IN / SOURCE OUT because their source is a
+  held image rather than timed media.
+
+SOURCE IN / SOURCE OUT edits participate in Undo / Redo, Layer 3 restoration,
+preview/export parity, and output-frame-rate conform.
+
+### Current ordering rule
+
+The existing Layer 1 / Layer 2 swap remains a two-layer operation. It is
+disabled while Layer 3 exists; remove the top layer first rather than
+implicitly reindexing the stack.
+
+Generalized three-layer **Move Up / Move Down** behavior is the next composition
+milestone.
 
 ### Seamless Layer 3 removal and Undo
 
@@ -282,9 +354,9 @@ export worker
   avformat consumer
 ```
 
-The snapshot carries presence, placement, still/timed classification, geometry,
-opacity/visibility result, alpha interpretation, audio presence, and audio gain
-for each indexed layer.
+The snapshot carries presence, placement, source range, still/timed
+classification, geometry, opacity/visibility result, alpha interpretation,
+audio presence, and audio gain for each indexed layer.
 
 ### Export range
 
@@ -309,7 +381,8 @@ explicitly chooses a range mode; an explicit Whole Movie choice remains sticky.
 
 ### Current export families
 
-- composited MP4 video
+- composited H.264 / MP4 video
+- composited ProRes / MOV master video
 - composited current-frame PNG
 - composited PNG image sequence
 - mixed WAV audio
@@ -323,9 +396,9 @@ explicitly chooses a range mode; an explicit Whole Movie choice remains sticky.
 `Ctrl+Alt+E` is a pure action: it does not change the persistent split-button
 Export mode.
 
-### MP4 preset
+### Video presets
 
-The fixed movie preset is currently:
+#### H.264 Delivery
 
 ```text
 Container:   MP4
@@ -338,25 +411,57 @@ Fast start:  yes
 Frames:      progressive output
 ```
 
-The native exporter uses parallel MLT rendering for offline output. Export
-telemetry is written to a sidecar JSON file while an export runs; it records
-frame progress, wall time, throughput, CPU usage, graph setup, and result state.
+#### ProRes 422 HQ Master
 
-A composition with no audio does not receive a manufactured silent AAC stream.
+```text
+Container:   MOV
+Video:       prores_ks
+Profile:     HQ
+Pixel fmt:   yuv422p10le
+Audio:       PCM signed 24-bit little-endian when audio is present
+Frames:      progressive output
+```
+
+Codec preset and output frame rate are independent choices.
+
+### Explicit output frame rate
+
+Video export can follow the source rate or conform to one of the currently
+supported explicit rates:
+
+- Source
+- 23.976 (`24000/1001`)
+- 24
+- 25
+- 29.97 (`30000/1001`)
+- 30
+- 50
+- 59.94 (`60000/1001`)
+- 60
+
+The implementation changes the **MLT export profile before the independent
+export graph is built**. It is therefore a real render/timeline conform rather
+than merely writing different encoder metadata.
+
+Frame boundaries are converted by time. Export In/Out and Layer 2/3 START/END
+therefore keep their temporal positions when the output rate differs from the
+source rate.
+
+The source ranges inside timed overlays remain source-media frame ranges; their
+timeline placement is what is conformed to the output profile.
 
 ### Known MLT 7.22 audio-flush warning
 
-On MLT 7.22, successful MP4 exports with an encoded audio stream can emit:
+On MLT 7.22, successful encoded video exports with an audio stream can emit:
 
 ```text
 Timestamps are unset in a packet for stream 1
 Encoder did not produce proper pts, making some up.
 ```
 
-The project PTS diagnostic demonstrates that this follows the presence of an
-encoded audio stream: audio fixtures warn, silent fixtures do not. The bridge
-does not handle FFmpeg packets directly, so the project does not locally patch
-packet timestamps in the exporter.
+Current deterministic coverage shows successful completion despite this known
+warning. The warning is tracked separately from export correctness so it does
+not mask new failures.
 
 ### Current-frame PNG
 
@@ -414,8 +519,9 @@ Flutter UI
     |      +-- transport
     |      +-- selection / trim
     |      +-- composition history
-    |      +-- Layer 1 / 2 / 3 state
-    |      +-- export range / status
+    |      +-- Layer 1 / 2 / 3 indexed state
+    |      +-- layer timing + source trims
+    |      +-- export range / preset / rate / status
     |
     +-- Dart FFI --------------------------> libmlt_bridge.so
     |                                           |
@@ -461,8 +567,10 @@ Important architecture rules:
   context, rather than from arbitrary teardown code.
 - Preview and export represent the same indexed composition but share no live
   producer/playlist/tractor objects.
-- Layer 3 graph changes can freeze frame publication temporarily so history
-  operations become visually atomic.
+- Graph-rebuilding composition edits can freeze frame publication temporarily
+  so history operations become visually atomic.
+- Timeline and source-range edits are application-owned state and are rebuilt
+  transactionally into MLT graphs.
 
 ---
 
@@ -474,24 +582,35 @@ The main native safety net is:
 tools/smoke.sh
 ```
 
-It builds the bridge and runs several independent checks:
+It builds the bridge and runs independent checks for:
 
 1. **no-active-engine guards** — deliberately destroys the active engine and
    verifies public calls fail closed and return safe sentinel values.
-2. **native smoke** — transport, engine isolation, Layer 2 composition,
-   still/alpha behavior, audio levels, export, reopen/reset, and teardown.
+2. **native smoke** — transport, engine isolation, composition, still/alpha
+   behavior, audio levels, export, reopen/reset, and teardown.
 3. **preview/export parity** — derives state from the live preview graph and a
    freshly constructed export graph, then compares them.
-4. **MP4 PTS diagnosis** — compares audio and silent exports and reports whether
-   the known MLT 7.22 unset-PTS warning appears.
+4. **layer timing** — verifies explicit START / END boundaries for Layer 2 and
+   Layer 3 and rejects reversed ranges without damaging the composition.
+5. **layer source trim** — verifies independent timeline and SOURCE IN / SOURCE
+   OUT ranges for timed Layer 2 and Layer 3.
+6. **video export presets** — validates H.264 Delivery and ProRes 422 HQ Master
+   policy.
+7. **video export frame rate** — verifies a 25 fps source conforms to
+   `30000/1001` without changing one-second duration and produces 30 output
+   frames.
+8. **MP4 PTS diagnosis** — tracks the known MLT 7.22 encoded-audio timestamp
+   warning separately from export success.
 
-Parity includes:
+Parity coverage includes:
 
 - timed Layer 2
 - held-still Layer 2
 - timed/audio Layer 3
 - held-alpha Layer 3
 - exact insertion frames
+- bounded timeline START / END
+- timed-video SOURCE IN / SOURCE OUT
 - layer counts
 - output profile dimensions and frame rate
 - composition length and export range
@@ -548,7 +667,7 @@ The original POC 10 progression established opaque engine handles, a second
 track, playhead-relative placement, opacity, track audio, still/alpha support,
 replacement/visibility/order, geometry, and tractor-aware export.
 
-The hardening and Layer 3 work then added:
+The hardening and Layer 3 work added:
 
 - shared preview/export timing helpers
 - export diagnostics and range-state hardening
@@ -565,12 +684,41 @@ The hardening and Layer 3 work then added:
 - Layer 3 Flutter/FFI and Layers inspector controls
 - atomic frame + notification transactions for seamless Layer 3 remove/Undo
 
-### Next
+The completed export/timing milestone added:
 
-- export preset / codec selection
-- explicit output frame-rate control
-- richer layer timing/edit operations
-- broader layer-order/reordering rules
+- H.264 Delivery and ProRes 422 HQ Master video presets
+- independently selectable output frame rate
+- rational 23.976 / 29.97 / 59.94 support
+- real MLT profile frame-rate conform
+- time-preserving export-range and layer-boundary conversion
+- explicit Layer 2 / Layer 3 timeline START / END
+- bounded still holds
+- timed-overlay SOURCE IN / SOURCE OUT
+- independent source-range versus timeline-window semantics
+- Undo/Redo and rollback for graph-rebuilding timing edits
+- Layer 3 restoration of timing and source trims
+- deterministic native coverage for presets, frame rate, layer timing, and
+  source trimming
+
+### Next — generalized layer ordering
+
+The next isolated composition milestone is generalized Layer 1 / Layer 2 /
+Layer 3 reordering.
+
+Target behavior:
+
+- Move Up / Move Down across the three-layer stack
+- preserve each layer's source, timing, source trim, geometry, visibility,
+  opacity, alpha interpretation, and audio gain
+- preserve the base-movie/profile authority rules explicitly rather than
+  accidentally changing them during a visual-order move
+- make reordering undoable
+- verify preview/export parity after reorder
+- retire the current special-case two-layer-only swap once the generalized path
+  is proven
+
+After that:
+
 - blend-mode exploration
 - broader alpha/color policy
 
@@ -613,29 +761,36 @@ flutter analyze
 flutter run -d linux
 ```
 
-Native regression pass:
+Full regression pass:
 
 ```bash
+flutter analyze
+flutter test
 tools/smoke.sh
 ```
-
-Common Ubuntu development dependencies include:
-
-```text
-melt
-libmlt-dev
-libmlt-data
-libmlt++-dev
-libepoxy-dev
-libgtk-3-dev
-pkg-config
-build-essential
-```
-
-`libmlt-data` matters because MLT service dictionaries are loaded at runtime.
 
 ---
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT License
+
+Copyright (c) 2026 nathanfx330
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
