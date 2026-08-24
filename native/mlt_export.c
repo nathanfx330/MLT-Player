@@ -75,6 +75,7 @@ typedef struct _ExportJob {
     int export_has_secondary;
     int export_has_tertiary;
     int export_snapshot_valid;
+    int export_visual_order[MLT_COMPOSITION_MAX_LAYERS];
     int export_primary_has_audio;
     int export_secondary_has_audio;
     int export_secondary_is_still;
@@ -107,6 +108,9 @@ typedef struct _ExportGraph {
     mlt_producer export_tertiary;
     mlt_playlist export_tertiary_playlist;
     mlt_tractor export_tractor;
+    mlt_playlist export_visual_canvas;
+    mlt_transition export_primary_composite;
+    mlt_transition export_primary_mix;
     mlt_transition export_composite;
     mlt_transition export_mix;
     mlt_transition export_tertiary_composite;
@@ -1024,6 +1028,21 @@ static void export_graph_close(ExportGraph *graph)
         graph->export_tractor = NULL;
     }
 
+    if (graph->export_visual_canvas != NULL) {
+        mlt_playlist_close(graph->export_visual_canvas);
+        graph->export_visual_canvas = NULL;
+    }
+
+    if (graph->export_primary_composite != NULL) {
+        mlt_transition_close(graph->export_primary_composite);
+        graph->export_primary_composite = NULL;
+    }
+
+    if (graph->export_primary_mix != NULL) {
+        mlt_transition_close(graph->export_primary_mix);
+        graph->export_primary_mix = NULL;
+    }
+
     if (graph->export_composite != NULL) {
         mlt_transition_close(graph->export_composite);
         graph->export_composite = NULL;
@@ -1159,6 +1178,253 @@ static int export_attach_alpha_interpretation(
            ) != NULL;
 }
 
+
+static int export_visual_order_is_permutation(
+    const int order[MLT_COMPOSITION_MAX_LAYERS])
+{
+    int seen[MLT_COMPOSITION_MAX_LAYERS] = {0};
+    for (int position = 0; position < MLT_COMPOSITION_MAX_LAYERS; position++) {
+        const int layer = order[position];
+        if (layer < 0 || layer >= MLT_COMPOSITION_MAX_LAYERS || seen[layer]) {
+            return 0;
+        }
+        seen[layer] = 1;
+    }
+    return 1;
+}
+
+static mlt_producer export_logical_layer_producer(
+    ExportGraph *graph,
+    int layer_index)
+{
+    if (graph == NULL) {
+        return NULL;
+    }
+    if (layer_index == MLT_COMPOSITION_BASE_LAYER) {
+        return graph->export_primary;
+    }
+    if (layer_index == MLT_COMPOSITION_FIRST_OVERLAY &&
+        graph->export_secondary_playlist != NULL) {
+        return mlt_playlist_producer(graph->export_secondary_playlist);
+    }
+    if (layer_index == MLT_COMPOSITION_SECOND_OVERLAY &&
+        graph->export_tertiary_playlist != NULL) {
+        return mlt_playlist_producer(graph->export_tertiary_playlist);
+    }
+    return NULL;
+}
+
+static int export_configure_sum_mix(mlt_transition transition)
+{
+    if (transition == NULL) {
+        return 0;
+    }
+    mlt_properties properties = MLT_TRANSITION_PROPERTIES(transition);
+    mlt_properties_set_int(properties, "always_active", 1);
+    mlt_properties_set_double(properties, "start", 1.0);
+    mlt_properties_set_double(properties, "end", 1.0);
+    mlt_properties_set_int(properties, "sum", 1);
+    return 1;
+}
+
+static int export_rebuild_visual_order(
+    const ExportJob *job,
+    ExportGraph *graph,
+    char *failure,
+    size_t failure_size)
+{
+    if (job == NULL || graph == NULL || graph->derived.layer_count <= 1) {
+        return 1;
+    }
+    if (!export_visual_order_is_permutation(job->export_visual_order)) {
+        export_set_failure(failure, failure_size, "The export visual layer order is invalid.");
+        return 0;
+    }
+
+    int present_order[MLT_COMPOSITION_MAX_LAYERS] = {-1, -1, -1};
+    int present_count = 0;
+    for (int position = 0; position < MLT_COMPOSITION_MAX_LAYERS; position++) {
+        const int logical = job->export_visual_order[position];
+        if (logical < graph->derived.layer_count) {
+            present_order[present_count++] = logical;
+        }
+    }
+    if (present_count != graph->derived.layer_count) {
+        export_set_failure(failure, failure_size, "The export visual order is missing a present layer.");
+        return 0;
+    }
+
+    int already_default = 1;
+    for (int position = 0; position < present_count; position++) {
+        if (present_order[position] != position) {
+            already_default = 0;
+            break;
+        }
+    }
+    if (already_default) {
+        return 1;
+    }
+
+    const int64_t length = graph->derived.composition_length;
+    if (length <= 0) {
+        export_set_failure(failure, failure_size, "The reordered export has no timeline.");
+        return 0;
+    }
+
+    mlt_playlist pending_canvas = mlt_playlist_new(graph->export_profile);
+    mlt_tractor pending_tractor = NULL;
+    mlt_transition pending_video[MLT_COMPOSITION_MAX_LAYERS] = {NULL, NULL, NULL};
+    mlt_transition pending_mix[MLT_COMPOSITION_MAX_LAYERS] = {NULL, NULL, NULL};
+    int succeeded = 0;
+
+    if (pending_canvas == NULL ||
+        mlt_playlist_blank(pending_canvas, (mlt_position)length - 1) != 0) {
+        export_set_failure(failure, failure_size, "Could not create the reordered export canvas.");
+        goto export_visual_cleanup;
+    }
+
+    pending_tractor = mlt_tractor_new();
+    if (pending_tractor == NULL) {
+        export_set_failure(failure, failure_size, "Could not create the reordered export tractor.");
+        goto export_visual_cleanup;
+    }
+    mlt_service_set_profile(
+        MLT_TRACTOR_SERVICE(pending_tractor),
+        graph->export_profile
+    );
+
+    if (mlt_tractor_set_track(
+            pending_tractor,
+            mlt_playlist_producer(pending_canvas),
+            0) != 0) {
+        export_set_failure(failure, failure_size, "Could not connect the reordered export canvas.");
+        goto export_visual_cleanup;
+    }
+
+    for (int visual = 0; visual < present_count; visual++) {
+        const int logical = present_order[visual];
+        mlt_producer producer = export_logical_layer_producer(graph, logical);
+        if (producer == NULL ||
+            mlt_tractor_set_track(pending_tractor, producer, visual + 1) != 0) {
+            export_set_failure(failure, failure_size, "Could not connect a reordered export layer.");
+            goto export_visual_cleanup;
+        }
+    }
+
+    mlt_field field = mlt_tractor_field(pending_tractor);
+    if (field == NULL) {
+        export_set_failure(failure, failure_size, "The reordered export tractor has no MLT field.");
+        goto export_visual_cleanup;
+    }
+
+    for (int visual = 0; visual < present_count; visual++) {
+        const int logical = present_order[visual];
+        const int physical = visual + 1;
+        const MltCompositionLayerDerivedState *layer = &graph->derived.layers[logical];
+
+        pending_video[logical] =
+            mlt_factory_transition(graph->export_profile, "composite", NULL);
+        if (pending_video[logical] == NULL ||
+            !mlt_composition_configure_transition(
+                pending_video[logical],
+                layer->x,
+                layer->y,
+                layer->width,
+                layer->height,
+                layer->opacity) ||
+            mlt_field_plant_transition(
+                field,
+                pending_video[logical],
+                0,
+                physical) != 0) {
+            export_set_failure(failure, failure_size, "Could not plant a reordered export video composite.");
+            goto export_visual_cleanup;
+        }
+
+        if (layer->has_audio) {
+            pending_mix[logical] =
+                mlt_factory_transition(graph->export_profile, "mix", NULL);
+            if (pending_mix[logical] == NULL ||
+                !export_configure_sum_mix(pending_mix[logical]) ||
+                mlt_field_plant_transition(
+                    field,
+                    pending_mix[logical],
+                    0,
+                    physical) != 0) {
+                export_set_failure(failure, failure_size, "Could not plant a reordered export audio mix.");
+                goto export_visual_cleanup;
+            }
+        }
+    }
+
+    mlt_tractor_refresh(pending_tractor);
+    mlt_producer pending_top = mlt_tractor_producer(pending_tractor);
+    if (pending_top == NULL) {
+        export_set_failure(failure, failure_size, "The reordered export tractor did not expose a producer.");
+        goto export_visual_cleanup;
+    }
+
+    if (graph->export_tractor != NULL) {
+        mlt_tractor_close(graph->export_tractor);
+    }
+    if (graph->export_visual_canvas != NULL) {
+        mlt_playlist_close(graph->export_visual_canvas);
+    }
+    if (graph->export_primary_composite != NULL) {
+        mlt_transition_close(graph->export_primary_composite);
+    }
+    if (graph->export_primary_mix != NULL) {
+        mlt_transition_close(graph->export_primary_mix);
+    }
+    if (graph->export_composite != NULL) {
+        mlt_transition_close(graph->export_composite);
+    }
+    if (graph->export_mix != NULL) {
+        mlt_transition_close(graph->export_mix);
+    }
+    if (graph->export_tertiary_composite != NULL) {
+        mlt_transition_close(graph->export_tertiary_composite);
+    }
+    if (graph->export_tertiary_mix != NULL) {
+        mlt_transition_close(graph->export_tertiary_mix);
+    }
+
+    graph->export_tractor = pending_tractor;
+    graph->export_visual_canvas = pending_canvas;
+    graph->export_primary_composite = pending_video[0];
+    graph->export_primary_mix = pending_mix[0];
+    graph->export_composite = pending_video[1];
+    graph->export_mix = pending_mix[1];
+    graph->export_tertiary_composite = pending_video[2];
+    graph->export_tertiary_mix = pending_mix[2];
+    graph->export_top = pending_top;
+
+    pending_tractor = NULL;
+    pending_canvas = NULL;
+    for (int logical = 0; logical < MLT_COMPOSITION_MAX_LAYERS; logical++) {
+        pending_video[logical] = NULL;
+        pending_mix[logical] = NULL;
+    }
+    succeeded = 1;
+
+export_visual_cleanup:
+    if (pending_tractor != NULL) {
+        mlt_tractor_close(pending_tractor);
+    }
+    if (pending_canvas != NULL) {
+        mlt_playlist_close(pending_canvas);
+    }
+    for (int logical = 0; logical < MLT_COMPOSITION_MAX_LAYERS; logical++) {
+        if (pending_video[logical] != NULL) {
+            mlt_transition_close(pending_video[logical]);
+        }
+        if (pending_mix[logical] != NULL) {
+            mlt_transition_close(pending_mix[logical]);
+        }
+    }
+    return succeeded;
+}
+
 /*
  * Build an export-only graph from a snapshot of the open movie. With one
  * layer this remains the original source-only path. With overlay layers it
@@ -1185,10 +1451,12 @@ static int export_prepare_source_graph(
     }
 
     memset(graph, 0, sizeof(*graph));
-    for (int index = MLT_COMPOSITION_FIRST_OVERLAY;
-         index < MLT_COMPOSITION_MAX_LAYERS;
-         index++) {
-        graph->derived.layers[index].start_frame = -1;
+    for (int index = 0; index < MLT_COMPOSITION_MAX_LAYERS; index++) {
+        graph->derived.visual_order[index] =
+            job->export_snapshot_valid ? job->export_visual_order[index] : index;
+        if (index >= MLT_COMPOSITION_FIRST_OVERLAY) {
+            graph->derived.layers[index].start_frame = -1;
+        }
     }
 
     graph->export_profile = mlt_profile_init(NULL);
@@ -2041,6 +2309,10 @@ static int export_prepare_source_graph(
             failure_size,
             "The export tractor did not expose a producer."
         );
+        goto fail;
+    }
+
+    if (!export_rebuild_visual_order(job, graph, failure, failure_size)) {
         goto fail;
     }
 
@@ -3101,6 +3373,12 @@ static void export_job_apply_composition_snapshot(
         &snapshot->layers[MLT_COMPOSITION_BASE_LAYER];
 
     job->export_snapshot_valid = 1;
+    const int snapshot_order_valid =
+        export_visual_order_is_permutation(snapshot->visual_order);
+    for (int index = 0; index < MLT_COMPOSITION_MAX_LAYERS; index++) {
+        job->export_visual_order[index] =
+            snapshot_order_valid ? snapshot->visual_order[index] : index;
+    }
     job->export_primary_has_audio = base->has_audio ? 1 : 0;
     job->export_primary_audio_gain =
         CLAMP(base->audio_gain, 0.0, 1.0);

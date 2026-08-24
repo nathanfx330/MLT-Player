@@ -50,6 +50,8 @@ typedef struct _MltCompositionDerivedState {
     int64_t range_in_frame;
     int64_t range_out_frame;
 
+    int visual_order[MLT_COMPOSITION_MAX_LAYERS];
+
     MltCompositionLayerDerivedState layers[MLT_COMPOSITION_MAX_LAYERS];
 } MltCompositionDerivedState;
 

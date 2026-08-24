@@ -9,6 +9,15 @@ import 'mlt_bridge.dart';
 
 typedef _PreviewUpdateNative = Int32 Function(Pointer<Void>);
 typedef _PreviewUpdateDart = int Function(Pointer<Void>);
+typedef _PreviewTextureSerialNative = Uint64 Function(Pointer<Void>);
+typedef _PreviewTextureSerialDart = int Function(Pointer<Void>);
+typedef _PreviewFrameSerialNative = Uint64 Function(Pointer<Void>);
+typedef _PreviewFrameSerialDart = int Function(Pointer<Void>);
+
+typedef _PreviewPrewarmNative = Int32 Function(Pointer<Void>, Int32);
+typedef _PreviewPrewarmDart = int Function(Pointer<Void>, int);
+typedef _PreviewPrewarmSerialNative = Uint64 Function(Pointer<Void>);
+typedef _PreviewPrewarmSerialDart = int Function(Pointer<Void>);
 
 typedef _AddTrackBoundedNative = Int32 Function(
   Pointer<Utf8>,
@@ -118,6 +127,9 @@ typedef _IndexedGeometryDart = int Function(
   double,
 );
 
+typedef _SetVisualOrderNative = Int32 Function(Int32, Int32, Int32);
+typedef _SetVisualOrderDart = int Function(int, int, int);
+
 /// Indexed composition-layer API introduced with the Layer 3 native graph.
 ///
 /// Indices are stable and zero-based:
@@ -139,6 +151,29 @@ extension MltLayerBridge on MltBridge {
   static final _PreviewUpdateDart _previewUpdateEnd =
       _library.lookupFunction<_PreviewUpdateNative, _PreviewUpdateDart>(
     'mlt_bridge_preview_update_end',
+  );
+
+  static final _PreviewTextureSerialDart _previewTextureSerial =
+      _library.lookupFunction<
+          _PreviewTextureSerialNative, _PreviewTextureSerialDart>(
+    'mlt_bridge_preview_texture_serial',
+  );
+
+  static final _PreviewFrameSerialDart _previewFrameSerial =
+      _library.lookupFunction<
+          _PreviewFrameSerialNative, _PreviewFrameSerialDart>(
+    'mlt_bridge_preview_frame_serial',
+  );
+
+  static final _PreviewPrewarmDart _previewPrewarmLayer =
+      _library.lookupFunction<_PreviewPrewarmNative, _PreviewPrewarmDart>(
+    'mlt_bridge_preview_prewarm_layer',
+  );
+
+  static final _PreviewPrewarmSerialDart _previewPrewarmSerial =
+      _library.lookupFunction<
+          _PreviewPrewarmSerialNative, _PreviewPrewarmSerialDart>(
+    'mlt_bridge_preview_prewarm_serial',
   );
 
   static final _AddTrackBoundedDart _addTrackBounded =
@@ -243,6 +278,16 @@ extension MltLayerBridge on MltBridge {
     'mlt_bridge_layer_alpha_mode',
   );
 
+  static final _SetVisualOrderDart _setLayerVisualOrder =
+      _library.lookupFunction<_SetVisualOrderNative, _SetVisualOrderDart>(
+    'mlt_bridge_set_layer_visual_order',
+  );
+
+  static final _IndexedIntDart _layerVisualPosition =
+      _library.lookupFunction<_IndexedIntNative, _IndexedIntDart>(
+    'mlt_bridge_layer_visual_position',
+  );
+
   Pointer<Void> get _layerEnginePointer =>
       Pointer<Void>.fromAddress(engineAddress);
 
@@ -251,6 +296,18 @@ extension MltLayerBridge on MltBridge {
 
   bool endPreviewUpdate() =>
       _previewUpdateEnd(_layerEnginePointer) != 0;
+
+  int get previewTextureSerial =>
+      _previewTextureSerial(_layerEnginePointer);
+
+  int get previewFrameSerial =>
+      _previewFrameSerial(_layerEnginePointer);
+
+  bool prewarmPreviewLayer(int layerIndex) =>
+      _previewPrewarmLayer(_layerEnginePointer, layerIndex) != 0;
+
+  int get previewPrewarmSerial =>
+      _previewPrewarmSerial(_layerEnginePointer);
 
   bool addTrackBounded(
     String path, {
@@ -396,6 +453,12 @@ extension MltLayerBridge on MltBridge {
       _setLayerAlphaMode(layerIndex, mode) != 0;
 
   int layerAlphaMode(int layerIndex) => _layerAlphaMode(layerIndex);
+  bool setLayerVisualOrder(int bottom, int middle, int top) =>
+      _setLayerVisualOrder(bottom, middle, top) != 0;
+
+  int layerVisualPosition(int layerIndex) =>
+      _layerVisualPosition(layerIndex);
+
 }
 
 Future<bool> addTrackBoundedOnHelperIsolate(

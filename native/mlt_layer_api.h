@@ -24,6 +24,31 @@ extern "C" {
 MLT_LAYER_API_EXPORT int mlt_bridge_preview_update_begin(MltBridgeEngine *engine);
 MLT_LAYER_API_EXPORT int mlt_bridge_preview_update_end(MltBridgeEngine *engine);
 
+/*
+ * Monotonic serial advanced only after Flutter has consumed a newly-published
+ * frame into the GL texture. Kept for diagnostics and texture-delivery tests.
+ */
+MLT_LAYER_API_EXPORT uint64_t mlt_bridge_preview_texture_serial(MltBridgeEngine *engine);
+
+/*
+ * Monotonic serial advanced when the fully rendered MLT frame is published
+ * into the native ready slot, before Flutter consumes it. This lets Dart keep
+ * Texture(freeze:true) until the replacement frame is waiting, then release
+ * layout and texture presentation together.
+ */
+MLT_LAYER_API_EXPORT uint64_t mlt_bridge_preview_frame_serial(MltBridgeEngine *engine);
+
+/*
+ * Preallocate the inactive Flutter GL texture to the exact profile dimensions
+ * a logical layer would use if promoted to the base. This is a presentation
+ * preflight only; it does not change the visible texture or composition.
+ */
+MLT_LAYER_API_EXPORT int mlt_bridge_preview_prewarm_layer(
+    MltBridgeEngine *engine,
+    int layer_index);
+MLT_LAYER_API_EXPORT uint64_t mlt_bridge_preview_prewarm_serial(
+    MltBridgeEngine *engine);
+
 /* Zero-based layer indices: 0 base, 1 Layer 2, 2 Layer 3. */
 
 /*
@@ -81,6 +106,18 @@ MLT_LAYER_API_EXPORT int mlt_bridge_layer_is_still(int layer_index);
 MLT_LAYER_API_EXPORT int mlt_bridge_layer_has_alpha(int layer_index);
 MLT_LAYER_API_EXPORT int mlt_bridge_set_layer_alpha_mode(int layer_index, int mode);
 MLT_LAYER_API_EXPORT int mlt_bridge_layer_alpha_mode(int layer_index);
+
+/*
+ * Visual stacking is independent from logical slot identity. The three
+ * arguments are logical layer indices ordered bottom -> top. Absent logical
+ * slots may remain in the permutation; only currently-present layers are
+ * planted into the live tractor.
+ */
+MLT_LAYER_API_EXPORT int mlt_bridge_set_layer_visual_order(
+    int bottom_layer,
+    int middle_layer,
+    int top_layer);
+MLT_LAYER_API_EXPORT int mlt_bridge_layer_visual_position(int layer_index);
 
 #ifdef __cplusplus
 }

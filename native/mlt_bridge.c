@@ -82,10 +82,14 @@ struct _MltBridgeEngine {
     mlt_producer e_tertiary_producer;
     mlt_playlist e_tertiary_playlist;
     mlt_tractor e_tractor;
+    mlt_playlist e_visual_canvas_playlist;
+    mlt_transition e_primary_video_composite;
+    mlt_transition e_primary_audio_mix;
     mlt_transition e_video_composite;
     mlt_transition e_audio_mix;
     mlt_transition e_tertiary_video_composite;
     mlt_transition e_tertiary_audio_mix;
+    int e_visual_order[MLT_COMPOSITION_MAX_LAYERS];
 
     /*
      * Track-local audio gain is applied before the tractor's A+B mix.
@@ -181,6 +185,29 @@ struct _MltBridgeEngine {
     int e_slot_display;
     int e_slot_ready_valid;
     int64_t e_last_frame_position;
+
+    /*
+     * Advanced only when Flutter's raster thread consumes a newly-ready frame
+     * into the GL texture. Protected by e_frame_mutex. This is deliberately
+     * stronger than the MLT frame callback: UI state may commit only after the
+     * replacement pixels are actually available to the texture.
+     */
+    uint64_t e_preview_texture_serial;
+
+    /*
+     * Advanced as soon as a fully rendered frame reaches the CPU ready slot.
+     * Unlike e_preview_texture_serial, this does not require Flutter to call
+     * populate(), so it remains usable while Texture(freeze:true) is holding
+     * the old presentation on screen.
+     */
+    uint64_t e_preview_frame_serial;
+
+    /*
+     * Advanced after Flutter's raster thread has preallocated the hidden GL
+     * texture to a requested would-be base profile. This removes the one-time
+     * glTexImage2D allocation cost from the first cross-aspect role swap.
+     */
+    uint64_t e_preview_prewarm_serial;
 };
 
 /*
@@ -237,10 +264,28 @@ static gint frame_notification_pending = 0;
 typedef struct _MltVideoTexture {
     FlTextureGL parent_instance;
 
-    GLuint gl_texture_id;
+    /*
+     * Flutter may still be sampling the currently displayed GL texture while
+     * a replacement frame is prepared. Keep two texture names and upload each
+     * new frame into the inactive one, then return that name from populate().
+     * This avoids redefining or rewriting a live texture in-place when a role
+     * swap changes frame dimensions (for example landscape <-> vertical).
+     */
+    GLuint gl_texture_ids[2];
+    int uploaded_width[2];
+    int uploaded_height[2];
+    int front_texture_index;
 
-    int uploaded_width;
-    int uploaded_height;
+    /*
+     * A role-swap preflight may request storage for the dimensions that an
+     * overlay will use if promoted to the base. populate() performs the GL
+     * allocation in Flutter's raster context without changing the front
+     * texture, so the first real swap follows the already-hot path.
+     */
+    int prewarm_width;
+    int prewarm_height;
+    int prewarm_pending;
+    MltBridgeEngine *prewarm_engine;
 } MltVideoTexture;
 
 typedef struct _MltVideoTextureClass {
@@ -428,6 +473,8 @@ static void invalidate_frames(void)
 /* Flutter texture implementation                                            */
 /* ------------------------------------------------------------------------- */
 
+static void notify_flutter_frame_available(void);
+
 static gboolean mlt_video_texture_populate(
     FlTextureGL *texture,
     uint32_t *target,
@@ -455,9 +502,7 @@ static gboolean mlt_video_texture_populate(
      * FlTextureGL guarantees that Flutter's GL context is current only while
      * populate() is running. Texture IDs retired by an earlier unregister are
      * therefore deleted here instead of making an unsafe GL call from the GTK
-     * teardown thread. This closes the leak across texture re-registration and
-     * hot-restart cycles; process exit still lets the driver reclaim the final
-     * context-owned resources naturally.
+     * teardown thread.
      */
     if (retired_gl_textures != NULL &&
         retired_gl_textures->len > 0) {
@@ -479,14 +524,52 @@ static gboolean mlt_video_texture_populate(
 
     g_mutex_lock(&current_engine()->e_frame_mutex);
 
+    int consumed_ready_frame = 0;
+
     if (current_engine()->e_slot_ready_valid) {
         const int previous_display =
             current_engine()->e_slot_display;
 
-        current_engine()->e_slot_display = current_engine()->e_slot_ready;
-        current_engine()->e_slot_ready = previous_display;
+        current_engine()->e_slot_display =
+            current_engine()->e_slot_ready;
+        current_engine()->e_slot_ready =
+            previous_display;
 
         current_engine()->e_slot_ready_valid = 0;
+        consumed_ready_frame = 1;
+    }
+
+    int prewarm_width = 0;
+    int prewarm_height = 0;
+    int perform_prewarm = 0;
+    int retry_prewarm = 0;
+
+    if (self->prewarm_pending &&
+        self->prewarm_engine != current_engine()) {
+        self->prewarm_pending = 0;
+        self->prewarm_width = 0;
+        self->prewarm_height = 0;
+        self->prewarm_engine = NULL;
+    }
+
+    if (self->prewarm_pending) {
+        if (!consumed_ready_frame &&
+            self->front_texture_index >= 0) {
+            prewarm_width = self->prewarm_width;
+            prewarm_height = self->prewarm_height;
+            self->prewarm_pending = 0;
+            self->prewarm_engine = NULL;
+            perform_prewarm =
+                prewarm_width > 0 && prewarm_height > 0;
+        } else {
+            /*
+             * If this populate is also consuming a real frame, first return
+             * that frame as the new front. A second populate can then resize
+             * the now-hidden texture without ever mutating a texture Flutter
+             * may still be sampling.
+             */
+            retry_prewarm = 1;
+        }
     }
 
     const int display_index =
@@ -516,91 +599,224 @@ static gboolean mlt_video_texture_populate(
         return FALSE;
     }
 
-    if (self->gl_texture_id == 0) {
-        glGenTextures(
-            1,
-            &self->gl_texture_id
-        );
+    /*
+     * Never rewrite the GL texture Flutter is currently presenting.
+     *
+     * A newly-ready CPU frame is uploaded into the inactive texture name.
+     * Only after that upload is complete do we flip front_texture_index and
+     * return the new name to Flutter. This is especially important when the
+     * new frame changes dimensions: glTexImage2D() then reallocates only the
+     * hidden back texture instead of redefining the on-screen texture.
+     */
+    int upload_index = self->front_texture_index;
 
-        glBindTexture(
-            GL_TEXTURE_2D,
-            self->gl_texture_id
-        );
+    if (consumed_ready_frame) {
+        upload_index =
+            self->front_texture_index < 0
+                ? 0
+                : 1 - self->front_texture_index;
+    } else if (self->front_texture_index < 0) {
+        /*
+         * Flutter may ask for the texture before the first MLT frame has been
+         * published. There is no stable front texture to return yet.
+         */
+        g_mutex_lock(&current_engine()->e_frame_mutex);
 
-        glTexParameteri(
-            GL_TEXTURE_2D,
-            GL_TEXTURE_MIN_FILTER,
-            GL_LINEAR
-        );
+        current_engine()->e_active_frame_readers -= 1;
 
-        glTexParameteri(
-            GL_TEXTURE_2D,
-            GL_TEXTURE_MAG_FILTER,
-            GL_LINEAR
-        );
+        if (current_engine()->e_active_frame_readers == 0) {
+            g_cond_broadcast(&current_engine()->e_frame_idle_cond);
+        }
 
-        glTexParameteri(
-            GL_TEXTURE_2D,
-            GL_TEXTURE_WRAP_S,
-            GL_CLAMP_TO_EDGE
-        );
+        g_mutex_unlock(&current_engine()->e_frame_mutex);
 
-        glTexParameteri(
-            GL_TEXTURE_2D,
-            GL_TEXTURE_WRAP_T,
-            GL_CLAMP_TO_EDGE
-        );
-    } else {
-        glBindTexture(
-            GL_TEXTURE_2D,
-            self->gl_texture_id
-        );
+        return FALSE;
     }
 
-    glPixelStorei(
-        GL_UNPACK_ALIGNMENT,
-        1
-    );
+    if (consumed_ready_frame) {
+        if (self->gl_texture_ids[upload_index] == 0) {
+            glGenTextures(
+                1,
+                &self->gl_texture_ids[upload_index]
+            );
 
-    if (self->uploaded_width != slot->width ||
-        self->uploaded_height != slot->height) {
-        glTexImage2D(
-            GL_TEXTURE_2D,
-            0,
-            GL_RGBA8,
-            slot->width,
-            slot->height,
-            0,
-            GL_RGBA,
-            GL_UNSIGNED_BYTE,
-            slot->data
+            glBindTexture(
+                GL_TEXTURE_2D,
+                self->gl_texture_ids[upload_index]
+            );
+
+            glTexParameteri(
+                GL_TEXTURE_2D,
+                GL_TEXTURE_MIN_FILTER,
+                GL_LINEAR
+            );
+
+            glTexParameteri(
+                GL_TEXTURE_2D,
+                GL_TEXTURE_MAG_FILTER,
+                GL_LINEAR
+            );
+
+            glTexParameteri(
+                GL_TEXTURE_2D,
+                GL_TEXTURE_WRAP_S,
+                GL_CLAMP_TO_EDGE
+            );
+
+            glTexParameteri(
+                GL_TEXTURE_2D,
+                GL_TEXTURE_WRAP_T,
+                GL_CLAMP_TO_EDGE
+            );
+        } else {
+            glBindTexture(
+                GL_TEXTURE_2D,
+                self->gl_texture_ids[upload_index]
+            );
+        }
+
+        glPixelStorei(
+            GL_UNPACK_ALIGNMENT,
+            1
         );
 
-        self->uploaded_width =
-            slot->width;
+        if (self->uploaded_width[upload_index] != slot->width ||
+            self->uploaded_height[upload_index] != slot->height) {
+            glTexImage2D(
+                GL_TEXTURE_2D,
+                0,
+                GL_RGBA8,
+                slot->width,
+                slot->height,
+                0,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                slot->data
+            );
 
-        self->uploaded_height =
-            slot->height;
-    } else {
-        glTexSubImage2D(
-            GL_TEXTURE_2D,
-            0,
-            0,
-            0,
-            slot->width,
-            slot->height,
-            GL_RGBA,
-            GL_UNSIGNED_BYTE,
-            slot->data
-        );
+            self->uploaded_width[upload_index] =
+                slot->width;
+            self->uploaded_height[upload_index] =
+                slot->height;
+        } else {
+            glTexSubImage2D(
+                GL_TEXTURE_2D,
+                0,
+                0,
+                0,
+                slot->width,
+                slot->height,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                slot->data
+            );
+        }
+
+        /*
+         * GL commands in this callback execute in Flutter's raster context.
+         * The upload is therefore ordered before Flutter consumes the returned
+         * texture name for this frame. Switch the logical front only now.
+         */
+        self->front_texture_index = upload_index;
+    }
+
+    if (perform_prewarm) {
+        const int prewarm_index =
+            self->front_texture_index < 0
+                ? 0
+                : 1 - self->front_texture_index;
+
+        if (self->gl_texture_ids[prewarm_index] == 0) {
+            glGenTextures(
+                1,
+                &self->gl_texture_ids[prewarm_index]
+            );
+
+            glBindTexture(
+                GL_TEXTURE_2D,
+                self->gl_texture_ids[prewarm_index]
+            );
+
+            glTexParameteri(
+                GL_TEXTURE_2D,
+                GL_TEXTURE_MIN_FILTER,
+                GL_LINEAR
+            );
+            glTexParameteri(
+                GL_TEXTURE_2D,
+                GL_TEXTURE_MAG_FILTER,
+                GL_LINEAR
+            );
+            glTexParameteri(
+                GL_TEXTURE_2D,
+                GL_TEXTURE_WRAP_S,
+                GL_CLAMP_TO_EDGE
+            );
+            glTexParameteri(
+                GL_TEXTURE_2D,
+                GL_TEXTURE_WRAP_T,
+                GL_CLAMP_TO_EDGE
+            );
+        } else {
+            glBindTexture(
+                GL_TEXTURE_2D,
+                self->gl_texture_ids[prewarm_index]
+            );
+        }
+
+        if (self->uploaded_width[prewarm_index] != prewarm_width ||
+            self->uploaded_height[prewarm_index] != prewarm_height) {
+            glTexImage2D(
+                GL_TEXTURE_2D,
+                0,
+                GL_RGBA8,
+                prewarm_width,
+                prewarm_height,
+                0,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                NULL
+            );
+
+            self->uploaded_width[prewarm_index] = prewarm_width;
+            self->uploaded_height[prewarm_index] = prewarm_height;
+        }
+
+        g_mutex_lock(&current_engine()->e_frame_mutex);
+        current_engine()->e_preview_prewarm_serial += 1;
+        g_mutex_unlock(&current_engine()->e_frame_mutex);
+    }
+
+    const int front_index =
+        self->front_texture_index;
+
+    if (front_index < 0 ||
+        self->gl_texture_ids[front_index] == 0 ||
+        self->uploaded_width[front_index] <= 0 ||
+        self->uploaded_height[front_index] <= 0) {
+        g_mutex_lock(&current_engine()->e_frame_mutex);
+
+        current_engine()->e_active_frame_readers -= 1;
+
+        if (current_engine()->e_active_frame_readers == 0) {
+            g_cond_broadcast(&current_engine()->e_frame_idle_cond);
+        }
+
+        g_mutex_unlock(&current_engine()->e_frame_mutex);
+
+        return FALSE;
     }
 
     *target = GL_TEXTURE_2D;
-    *name = self->gl_texture_id;
-    *width = (uint32_t)slot->width;
-    *height = (uint32_t)slot->height;
+    *name = self->gl_texture_ids[front_index];
+    *width = (uint32_t)self->uploaded_width[front_index];
+    *height = (uint32_t)self->uploaded_height[front_index];
 
     g_mutex_lock(&current_engine()->e_frame_mutex);
+
+    if (consumed_ready_frame) {
+        current_engine()->e_preview_texture_serial += 1;
+    }
 
     current_engine()->e_active_frame_readers -= 1;
 
@@ -609,6 +825,10 @@ static gboolean mlt_video_texture_populate(
     }
 
     g_mutex_unlock(&current_engine()->e_frame_mutex);
+
+    if (retry_prewarm) {
+        notify_flutter_frame_available();
+    }
 
     return TRUE;
 }
@@ -623,9 +843,20 @@ static void mlt_video_texture_class_init(
 static void mlt_video_texture_init(
     MltVideoTexture *self)
 {
-    self->gl_texture_id = 0;
-    self->uploaded_width = 0;
-    self->uploaded_height = 0;
+    self->gl_texture_ids[0] = 0;
+    self->gl_texture_ids[1] = 0;
+
+    self->uploaded_width[0] = 0;
+    self->uploaded_width[1] = 0;
+
+    self->uploaded_height[0] = 0;
+    self->uploaded_height[1] = 0;
+
+    self->front_texture_index = -1;
+    self->prewarm_width = 0;
+    self->prewarm_height = 0;
+    self->prewarm_pending = 0;
+    self->prewarm_engine = NULL;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -843,6 +1074,7 @@ static void on_consumer_frame_show(
     current_engine()->e_slot_write = previous_ready;
 
     current_engine()->e_slot_ready_valid = 1;
+    current_engine()->e_preview_frame_serial += 1;
 
     current_engine()->e_last_frame_position = position;
 
@@ -988,20 +1220,27 @@ void mlt_bridge_unregister_flutter_texture(void)
     if (local_texture != NULL) {
         g_mutex_lock(&texture_mutex);
 
-        if (local_texture->gl_texture_id != 0 &&
-            retired_gl_textures != NULL) {
-            const GLuint retired_id =
-                local_texture->gl_texture_id;
+        if (retired_gl_textures != NULL) {
+            for (int index = 0; index < 2; index++) {
+                if (local_texture->gl_texture_ids[index] == 0) {
+                    continue;
+                }
 
-            g_array_append_val(
-                retired_gl_textures,
-                retired_id
-            );
+                const GLuint retired_id =
+                    local_texture->gl_texture_ids[index];
 
-            local_texture->gl_texture_id = 0;
-            local_texture->uploaded_width = 0;
-            local_texture->uploaded_height = 0;
+                g_array_append_val(
+                    retired_gl_textures,
+                    retired_id
+                );
+
+                local_texture->gl_texture_ids[index] = 0;
+                local_texture->uploaded_width[index] = 0;
+                local_texture->uploaded_height[index] = 0;
+            }
         }
+
+        local_texture->front_texture_index = -1;
 
         g_mutex_unlock(&texture_mutex);
 
@@ -1034,6 +1273,30 @@ int mlt_bridge_preview_update_begin(
         depth,
         depth + 1
     ));
+
+    if (depth == 0) {
+        ensure_locks();
+
+        g_mutex_lock(&engine->e_frame_mutex);
+
+        /*
+         * Pin the texture to the last frame that Flutter fully uploaded. If a
+         * completed-but-not-yet-consumed frame was pending when the rebuild
+         * began, discard that publication rather than letting it slip through
+         * during the frozen transaction. Also wait for an upload already in
+         * progress so the texture serial is stable when Dart snapshots it.
+         */
+        while (engine->e_active_frame_readers > 0) {
+            g_cond_wait(
+                &engine->e_frame_idle_cond,
+                &engine->e_frame_mutex
+            );
+        }
+
+        engine->e_slot_ready_valid = 0;
+
+        g_mutex_unlock(&engine->e_frame_mutex);
+    }
 
     return 1;
 }
@@ -1078,6 +1341,133 @@ int mlt_bridge_preview_update_end(
         g_mutex_unlock(&engine->e_mutex);
     }
 
+    return 1;
+}
+
+MLT_LAYER_API_EXPORT
+uint64_t mlt_bridge_preview_texture_serial(
+    MltBridgeEngine *engine)
+{
+    if (engine == NULL) {
+        return 0;
+    }
+
+    ensure_locks();
+
+    g_mutex_lock(&engine->e_frame_mutex);
+    const uint64_t serial = engine->e_preview_texture_serial;
+    g_mutex_unlock(&engine->e_frame_mutex);
+
+    return serial;
+}
+
+MLT_LAYER_API_EXPORT
+uint64_t mlt_bridge_preview_frame_serial(
+    MltBridgeEngine *engine)
+{
+    if (engine == NULL) {
+        return 0;
+    }
+
+    ensure_locks();
+
+    g_mutex_lock(&engine->e_frame_mutex);
+    const uint64_t serial = engine->e_preview_frame_serial;
+    g_mutex_unlock(&engine->e_frame_mutex);
+
+    return serial;
+}
+
+MLT_LAYER_API_EXPORT
+uint64_t mlt_bridge_preview_prewarm_serial(
+    MltBridgeEngine *engine)
+{
+    if (engine == NULL) {
+        return 0;
+    }
+
+    ensure_locks();
+
+    g_mutex_lock(&engine->e_frame_mutex);
+    const uint64_t serial = engine->e_preview_prewarm_serial;
+    g_mutex_unlock(&engine->e_frame_mutex);
+
+    return serial;
+}
+
+MLT_LAYER_API_EXPORT
+int mlt_bridge_preview_prewarm_layer(
+    MltBridgeEngine *engine,
+    int layer_index)
+{
+    if (engine == NULL ||
+        layer_index < 0 ||
+        layer_index >= MLT_COMPOSITION_MAX_LAYERS) {
+        return 0;
+    }
+
+    activate_engine_local(engine);
+    ensure_locks();
+
+    int width = 0;
+    int height = 0;
+
+    g_mutex_lock(&engine->e_mutex);
+
+    mlt_producer source = NULL;
+    switch (layer_index) {
+        case MLT_COMPOSITION_BASE_LAYER:
+            source = engine->e_primary_producer;
+            break;
+        case MLT_COMPOSITION_FIRST_OVERLAY:
+            source = engine->e_secondary_producer;
+            break;
+        case MLT_COMPOSITION_SECOND_OVERLAY:
+            source = engine->e_tertiary_producer;
+            break;
+        default:
+            break;
+    }
+
+    if (source != NULL) {
+        mlt_profile source_profile =
+            mlt_profile_init(NULL);
+
+        if (source_profile != NULL) {
+            mlt_profile_from_producer(
+                source_profile,
+                source
+            );
+
+            width = source_profile->width;
+            height = source_profile->height;
+
+            mlt_profile_close(source_profile);
+        }
+    }
+
+    g_mutex_unlock(&engine->e_mutex);
+
+    if (width <= 0 || height <= 0) {
+        return 0;
+    }
+
+    g_mutex_lock(&texture_mutex);
+
+    if (texture_engine != engine ||
+        video_texture == NULL) {
+        g_mutex_unlock(&texture_mutex);
+        return 0;
+    }
+
+    video_texture->prewarm_width = width;
+    video_texture->prewarm_height = height;
+    video_texture->prewarm_pending = 1;
+    video_texture->prewarm_engine = engine;
+
+    g_mutex_unlock(&texture_mutex);
+
+    notify_flutter_frame_available();
     return 1;
 }
 
@@ -1263,6 +1653,21 @@ static void close_producer_locked(void)
         current_engine()->e_tractor = NULL;
     }
 
+    if (current_engine()->e_visual_canvas_playlist != NULL) {
+        mlt_playlist_close(current_engine()->e_visual_canvas_playlist);
+        current_engine()->e_visual_canvas_playlist = NULL;
+    }
+
+    if (current_engine()->e_primary_video_composite != NULL) {
+        mlt_transition_close(current_engine()->e_primary_video_composite);
+        current_engine()->e_primary_video_composite = NULL;
+    }
+
+    if (current_engine()->e_primary_audio_mix != NULL) {
+        mlt_transition_close(current_engine()->e_primary_audio_mix);
+        current_engine()->e_primary_audio_mix = NULL;
+    }
+
     /*
      * The field/tractor graph holds its own references to planted
      * transitions. Our engine retains the factory references so later POC 10
@@ -1354,6 +1759,7 @@ static void close_producer_locked(void)
     for (int index = 0; index < MLT_COMPOSITION_MAX_LAYERS; index++) {
         current_engine()->e_track_audio_gain[index] = 1.0;
         current_engine()->e_track_has_audio[index] = 0;
+        current_engine()->e_visual_order[index] = index;
     }
 
     current_engine()->e_has_video = 0;
@@ -2187,6 +2593,7 @@ MltBridgeEngine *mlt_bridge_engine_create(void)
     engine->e_tertiary_is_still = 0;
     for (int index = 0; index < MLT_COMPOSITION_MAX_LAYERS; index++) {
         engine->e_track_audio_gain[index] = 1.0;
+        engine->e_visual_order[index] = index;
     }
     engine->e_selected_video_stream_index = -1;
     engine->e_selected_audio_stream_index = -1;
@@ -2412,6 +2819,7 @@ static int snapshot_export_composition_locked(
     memset(snapshot, 0, sizeof(*snapshot));
 
     for (int index = 0; index < MLT_COMPOSITION_MAX_LAYERS; index++) {
+        snapshot->visual_order[index] = current_engine()->e_visual_order[index];
         snapshot->layers[index].opacity = 1.0;
         snapshot->layers[index].scale = 1.0;
         snapshot->layers[index].audio_gain = 1.0;
@@ -2569,10 +2977,11 @@ static int derive_preview_composition_locked(
     }
 
     memset(state, 0, sizeof(*state));
-    for (int index = MLT_COMPOSITION_FIRST_OVERLAY;
-         index < MLT_COMPOSITION_MAX_LAYERS;
-         index++) {
-        state->layers[index].start_frame = -1;
+    for (int index = 0; index < MLT_COMPOSITION_MAX_LAYERS; index++) {
+        state->visual_order[index] = current_engine()->e_visual_order[index];
+        if (index >= MLT_COMPOSITION_FIRST_OVERLAY) {
+            state->layers[index].start_frame = -1;
+        }
     }
 
     const int64_t composition_length =
@@ -3832,6 +4241,7 @@ int mlt_bridge_open(
         current_engine()->e_track_audio_gain[index] = 1.0;
         current_engine()->e_track_has_audio[index] = 0;
         current_engine()->e_track_audio_filters[index] = NULL;
+        current_engine()->e_visual_order[index] = index;
     }
     current_engine()->e_track_has_audio[0] = current_engine()->e_has_audio ? 1 : 0;
 
@@ -5874,6 +6284,391 @@ int mlt_bridge_secondary_alpha_mode(void)
         );
     }
 
+    g_mutex_unlock(&current_engine()->e_mutex);
+    return result;
+}
+
+
+static int visual_order_is_permutation(const int order[MLT_COMPOSITION_MAX_LAYERS])
+{
+    if (order == NULL) {
+        return 0;
+    }
+
+    int seen[MLT_COMPOSITION_MAX_LAYERS] = {0};
+    for (int position = 0; position < MLT_COMPOSITION_MAX_LAYERS; position++) {
+        const int layer = order[position];
+        if (layer < 0 || layer >= MLT_COMPOSITION_MAX_LAYERS || seen[layer]) {
+            return 0;
+        }
+        seen[layer] = 1;
+    }
+    return 1;
+}
+
+static mlt_producer logical_layer_producer_locked(int layer_index)
+{
+    if (layer_index == MLT_COMPOSITION_BASE_LAYER) {
+        return current_engine()->e_primary_producer;
+    }
+    if (layer_index == MLT_COMPOSITION_FIRST_OVERLAY &&
+        current_engine()->e_secondary_playlist != NULL) {
+        return mlt_playlist_producer(current_engine()->e_secondary_playlist);
+    }
+    if (layer_index == MLT_COMPOSITION_SECOND_OVERLAY &&
+        current_engine()->e_tertiary_playlist != NULL) {
+        return mlt_playlist_producer(current_engine()->e_tertiary_playlist);
+    }
+    return NULL;
+}
+
+static int configure_logical_layer_composite_locked(
+    int layer_index,
+    mlt_transition transition)
+{
+    if (transition == NULL || current_engine()->e_profile == NULL) {
+        return 0;
+    }
+
+    if (layer_index == MLT_COMPOSITION_BASE_LAYER) {
+        return mlt_composition_configure_transition(
+            transition,
+            0.0,
+            0.0,
+            current_engine()->e_profile->width,
+            current_engine()->e_profile->height,
+            1.0
+        );
+    }
+
+    if (layer_index == MLT_COMPOSITION_FIRST_OVERLAY) {
+        return mlt_composition_configure_transition(
+            transition,
+            current_engine()->e_secondary_x,
+            current_engine()->e_secondary_y,
+            current_engine()->e_secondary_base_width * current_engine()->e_secondary_scale,
+            current_engine()->e_secondary_base_height * current_engine()->e_secondary_scale,
+            current_engine()->e_secondary_opacity
+        );
+    }
+
+    if (layer_index == MLT_COMPOSITION_SECOND_OVERLAY) {
+        return mlt_composition_configure_transition(
+            transition,
+            current_engine()->e_tertiary_x,
+            current_engine()->e_tertiary_y,
+            current_engine()->e_tertiary_base_width * current_engine()->e_tertiary_scale,
+            current_engine()->e_tertiary_base_height * current_engine()->e_tertiary_scale,
+            current_engine()->e_tertiary_opacity
+        );
+    }
+
+    return 0;
+}
+
+static int configure_sum_mix(mlt_transition transition)
+{
+    if (transition == NULL) {
+        return 0;
+    }
+    mlt_properties properties = MLT_TRANSITION_PROPERTIES(transition);
+    mlt_properties_set_int(properties, "always_active", 1);
+    mlt_properties_set_double(properties, "start", 1.0);
+    mlt_properties_set_double(properties, "end", 1.0);
+    mlt_properties_set_int(properties, "sum", 1);
+    return 1;
+}
+
+/*
+ * Rebuild only the visible stacking graph. Logical layer ownership remains
+ * fixed: Layer 1 continues to own profile, duration, inspection, and frame
+ * zero. A blank canvas becomes physical track 0, while the present logical
+ * assets are planted on physical tracks 1..N in requested bottom->top order.
+ * Every asset therefore keeps its own geometry even when it sits below the
+ * base video.
+ */
+static int rebuild_visual_order_locked(
+    const int order[MLT_COMPOSITION_MAX_LAYERS])
+{
+    if (!visual_order_is_permutation(order) ||
+        current_engine()->e_profile == NULL ||
+        current_engine()->e_primary_producer == NULL ||
+        current_engine()->e_track_count < 1 ||
+        current_engine()->e_track_count > MLT_COMPOSITION_MAX_LAYERS) {
+        set_error("The requested visual layer order is invalid.");
+        return 0;
+    }
+
+    if (current_engine()->e_track_count == 1) {
+        for (int i = 0; i < MLT_COMPOSITION_MAX_LAYERS; i++) {
+            current_engine()->e_visual_order[i] = order[i];
+        }
+        set_error(NULL);
+        return 1;
+    }
+
+    const int64_t primary_length =
+        (int64_t)mlt_producer_get_length(current_engine()->e_primary_producer);
+    if (primary_length <= 0) {
+        set_error("The base layer has no usable timeline for reordering.");
+        return 0;
+    }
+
+    int present_order[MLT_COMPOSITION_MAX_LAYERS] = {-1, -1, -1};
+    int present_count = 0;
+    for (int position = 0; position < MLT_COMPOSITION_MAX_LAYERS; position++) {
+        const int layer = order[position];
+        if (layer < current_engine()->e_track_count) {
+            present_order[present_count++] = layer;
+        }
+    }
+    if (present_count != current_engine()->e_track_count) {
+        set_error("The visual order does not contain every present layer.");
+        return 0;
+    }
+
+    const mlt_position saved_position = current_engine()->e_producer != NULL
+        ? mlt_producer_position(current_engine()->e_producer)
+        : 0;
+    mlt_producer old_top = current_engine()->e_producer;
+    mlt_tractor old_tractor = current_engine()->e_tractor;
+    mlt_playlist old_canvas = current_engine()->e_visual_canvas_playlist;
+    mlt_transition old_video[MLT_COMPOSITION_MAX_LAYERS] = {
+        current_engine()->e_primary_video_composite,
+        current_engine()->e_video_composite,
+        current_engine()->e_tertiary_video_composite
+    };
+    mlt_transition old_mix[MLT_COMPOSITION_MAX_LAYERS] = {
+        current_engine()->e_primary_audio_mix,
+        current_engine()->e_audio_mix,
+        current_engine()->e_tertiary_audio_mix
+    };
+
+    mlt_playlist pending_canvas = NULL;
+    mlt_tractor pending_tractor = NULL;
+    mlt_transition pending_video[MLT_COMPOSITION_MAX_LAYERS] = {NULL, NULL, NULL};
+    mlt_transition pending_mix[MLT_COMPOSITION_MAX_LAYERS] = {NULL, NULL, NULL};
+    int consumer_switched = 0;
+    int succeeded = 0;
+    char failure[512] = "";
+
+    pending_canvas = mlt_playlist_new(current_engine()->e_profile);
+    if (pending_canvas == NULL ||
+        mlt_playlist_blank(pending_canvas, (mlt_position)primary_length - 1) != 0) {
+        snprintf(failure, sizeof(failure), "%s", "Could not create the visual-order canvas.");
+        goto visual_order_cleanup;
+    }
+
+    pending_tractor = mlt_tractor_new();
+    if (pending_tractor == NULL) {
+        snprintf(failure, sizeof(failure), "%s", "Could not create the visual-order tractor.");
+        goto visual_order_cleanup;
+    }
+    mlt_service_set_profile(
+        MLT_TRACTOR_SERVICE(pending_tractor),
+        current_engine()->e_profile
+    );
+
+    if (mlt_tractor_set_track(
+            pending_tractor,
+            mlt_playlist_producer(pending_canvas),
+            0) != 0) {
+        snprintf(failure, sizeof(failure), "%s", "Could not connect the visual-order canvas.");
+        goto visual_order_cleanup;
+    }
+
+    for (int visual = 0; visual < present_count; visual++) {
+        const int logical = present_order[visual];
+        mlt_producer producer = logical_layer_producer_locked(logical);
+        if (producer == NULL ||
+            mlt_tractor_set_track(pending_tractor, producer, visual + 1) != 0) {
+            snprintf(failure, sizeof(failure), "%s", "Could not connect a visual-order layer.");
+            goto visual_order_cleanup;
+        }
+    }
+
+    mlt_field field = mlt_tractor_field(pending_tractor);
+    if (field == NULL) {
+        snprintf(failure, sizeof(failure), "%s", "The visual-order tractor has no MLT field.");
+        goto visual_order_cleanup;
+    }
+
+    for (int visual = 0; visual < present_count; visual++) {
+        const int logical = present_order[visual];
+        const int physical_track = visual + 1;
+
+        pending_video[logical] =
+            mlt_factory_transition(current_engine()->e_profile, "composite", NULL);
+        if (pending_video[logical] == NULL ||
+            !configure_logical_layer_composite_locked(logical, pending_video[logical]) ||
+            mlt_field_plant_transition(
+                field,
+                pending_video[logical],
+                0,
+                physical_track) != 0) {
+            snprintf(failure, sizeof(failure), "%s", "Could not plant a visual-order video composite.");
+            goto visual_order_cleanup;
+        }
+
+        if (current_engine()->e_track_has_audio[logical]) {
+            pending_mix[logical] =
+                mlt_factory_transition(current_engine()->e_profile, "mix", NULL);
+            if (pending_mix[logical] == NULL ||
+                !configure_sum_mix(pending_mix[logical]) ||
+                mlt_field_plant_transition(
+                    field,
+                    pending_mix[logical],
+                    0,
+                    physical_track) != 0) {
+                snprintf(failure, sizeof(failure), "%s", "Could not plant a visual-order audio mix.");
+                goto visual_order_cleanup;
+            }
+        }
+    }
+
+    mlt_tractor_refresh(pending_tractor);
+    mlt_producer pending_top = mlt_tractor_producer(pending_tractor);
+    if (pending_top == NULL) {
+        snprintf(failure, sizeof(failure), "%s", "The visual-order tractor did not expose a producer.");
+        goto visual_order_cleanup;
+    }
+
+    mlt_producer_set_in_and_out(pending_top, 0, (mlt_position)primary_length - 1);
+    mlt_producer_set_speed(pending_top, 0.0);
+    mlt_producer_seek(pending_top, saved_position);
+
+    if (g_atomic_int_get(&current_engine()->e_preview_enabled)) {
+        close_consumer_locked();
+        current_engine()->e_producer = pending_top;
+        consumer_switched = 1;
+
+        if (!create_consumer_locked() ||
+            mlt_consumer_start(current_engine()->e_consumer) != 0) {
+            snprintf(
+                failure,
+                sizeof(failure),
+                "%s",
+                current_engine()->e_last_error[0] != '\0'
+                    ? current_engine()->e_last_error
+                    : "Could not start preview for the reordered layer graph."
+            );
+            close_consumer_locked();
+            current_engine()->e_producer = old_top;
+            if (old_top != NULL && create_consumer_locked()) {
+                if (mlt_consumer_start(current_engine()->e_consumer) == 0) {
+                    refresh_locked();
+                }
+            }
+            goto visual_order_cleanup;
+        }
+        refresh_locked();
+    } else {
+        current_engine()->e_producer = pending_top;
+    }
+
+    if (old_tractor != NULL) {
+        mlt_tractor_close(old_tractor);
+    }
+    if (old_canvas != NULL) {
+        mlt_playlist_close(old_canvas);
+    }
+    for (int logical = 0; logical < MLT_COMPOSITION_MAX_LAYERS; logical++) {
+        if (old_video[logical] != NULL) {
+            mlt_transition_close(old_video[logical]);
+        }
+        if (old_mix[logical] != NULL) {
+            mlt_transition_close(old_mix[logical]);
+        }
+    }
+
+    current_engine()->e_tractor = pending_tractor;
+    current_engine()->e_visual_canvas_playlist = pending_canvas;
+    current_engine()->e_primary_video_composite = pending_video[0];
+    current_engine()->e_primary_audio_mix = pending_mix[0];
+    current_engine()->e_video_composite = pending_video[1];
+    current_engine()->e_audio_mix = pending_mix[1];
+    current_engine()->e_tertiary_video_composite = pending_video[2];
+    current_engine()->e_tertiary_audio_mix = pending_mix[2];
+    for (int i = 0; i < MLT_COMPOSITION_MAX_LAYERS; i++) {
+        current_engine()->e_visual_order[i] = order[i];
+    }
+
+    pending_tractor = NULL;
+    pending_canvas = NULL;
+    for (int logical = 0; logical < MLT_COMPOSITION_MAX_LAYERS; logical++) {
+        pending_video[logical] = NULL;
+        pending_mix[logical] = NULL;
+    }
+
+    set_error(NULL);
+    succeeded = 1;
+
+visual_order_cleanup:
+    if (!succeeded) {
+        if (!consumer_switched) {
+            current_engine()->e_producer = old_top;
+        }
+        if (pending_tractor != NULL) {
+            mlt_tractor_close(pending_tractor);
+        }
+        if (pending_canvas != NULL) {
+            mlt_playlist_close(pending_canvas);
+        }
+        for (int logical = 0; logical < MLT_COMPOSITION_MAX_LAYERS; logical++) {
+            if (pending_video[logical] != NULL) {
+                mlt_transition_close(pending_video[logical]);
+            }
+            if (pending_mix[logical] != NULL) {
+                mlt_transition_close(pending_mix[logical]);
+            }
+        }
+        set_error(failure[0] != '\0' ? failure : "Could not rebuild the visual layer order.");
+    }
+
+    return succeeded;
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_set_layer_visual_order(
+    int bottom_layer,
+    int middle_layer,
+    int top_layer)
+{
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
+    const int order[MLT_COMPOSITION_MAX_LAYERS] = {
+        bottom_layer,
+        middle_layer,
+        top_layer
+    };
+
+    ensure_locks();
+    g_mutex_lock(&current_engine()->e_mutex);
+    const int result = rebuild_visual_order_locked(order);
+    g_mutex_unlock(&current_engine()->e_mutex);
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_layer_visual_position(int layer_index)
+{
+    if (require_current_engine() == NULL ||
+        layer_index < 0 ||
+        layer_index >= MLT_COMPOSITION_MAX_LAYERS) {
+        return -1;
+    }
+
+    ensure_locks();
+    g_mutex_lock(&current_engine()->e_mutex);
+    int result = -1;
+    for (int position = 0; position < MLT_COMPOSITION_MAX_LAYERS; position++) {
+        if (current_engine()->e_visual_order[position] == layer_index) {
+            result = position;
+            break;
+        }
+    }
     g_mutex_unlock(&current_engine()->e_mutex);
     return result;
 }

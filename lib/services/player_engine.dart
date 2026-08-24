@@ -4,6 +4,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/scheduler.dart';
 
 import '../models/media_info.dart';
 import 'mlt_bridge.dart';
@@ -39,6 +40,7 @@ class CompositionLayerState {
     required this.alphaMode,
     required this.hasAudio,
     required this.audioGain,
+    this.visualPosition = 0,
   });
 
   final int index;
@@ -59,6 +61,7 @@ class CompositionLayerState {
   final int alphaMode;
   final bool hasAudio;
   final double audioGain;
+  final int visualPosition;
 }
 
 /// Immutable per-layer snapshot used by clip/composition Undo and Redo.
@@ -230,14 +233,18 @@ class _ClipEditState {
     required this.inFrame,
     required this.outFrame,
     required List<_LayerEditState> layers,
+    required List<int> visualOrder,
   })  : assert(layers.length == _layerSlotCount),
-        layers = List<_LayerEditState>.unmodifiable(layers);
+        assert(visualOrder.length == _layerSlotCount),
+        layers = List<_LayerEditState>.unmodifiable(layers),
+        visualOrder = List<int>.unmodifiable(visualOrder);
 
   final int trimInFrame;
   final int trimOutFrame;
   final int? inFrame;
   final int? outFrame;
   final List<_LayerEditState> layers;
+  final List<int> visualOrder;
 
   static bool _near(double a, double b) => _LayerEditState._near(a, b);
 
@@ -246,8 +253,15 @@ class _ClipEditState {
         trimOutFrame != other.trimOutFrame ||
         inFrame != other.inFrame ||
         outFrame != other.outFrame ||
-        layers.length != other.layers.length) {
+        layers.length != other.layers.length ||
+        visualOrder.length != other.visualOrder.length) {
       return false;
+    }
+
+    for (var index = 0; index < visualOrder.length; index++) {
+      if (visualOrder[index] != other.visualOrder[index]) {
+        return false;
+      }
     }
 
     for (var index = 0; index < layers.length; index++) {
@@ -299,6 +313,7 @@ class PlayerEngine extends ChangeNotifier {
     (_) => _LayerRuntimeState(),
     growable: false,
   );
+  List<int> _visualOrder = <int>[0, 1, 2];
 
   bool _playing = false;
   bool _playingSelection = false;
@@ -340,6 +355,8 @@ class PlayerEngine extends ChangeNotifier {
   double _speed = 0.0;
   int _positionMs = 0;
   int _textureId = -1;
+  bool _textureFrozen = false;
+  int _textureFreezeDepth = 0;
 
   double _volume = 1.0;
   double _volumeBeforeMute = 1.0;
@@ -349,6 +366,7 @@ class PlayerEngine extends ChangeNotifier {
   String? get error => _error;
   bool get opening => _opening;
   bool get addingTrack => _addingTrack;
+  bool get textureFrozen => _textureFrozen;
 
   /// Fixed composition slots aligned with the native layer ABI.
   ///
@@ -363,6 +381,8 @@ class PlayerEngine extends ChangeNotifier {
           growable: false,
         ),
       );
+
+  List<int> get visualOrder => List<int>.unmodifiable(_visualOrder);
 
   CompositionLayerState layerState(int layerIndex) {
     if (layerIndex < 0 || layerIndex >= _layerSlotCount) {
@@ -394,6 +414,7 @@ class PlayerEngine extends ChangeNotifier {
       alphaMode: layer.alphaMode,
       hasAudio: layer.hasAudio,
       audioGain: layer.audioGain,
+      visualPosition: _visualOrder.indexOf(layerIndex),
     );
   }
 
@@ -404,6 +425,20 @@ class PlayerEngine extends ChangeNotifier {
 
   int get trackCount =>
       _layers.where((_LayerRuntimeState layer) => layer.present).length;
+
+  int? get topOverlayLayerIndex {
+    // Overlay removal still follows the native contiguous-slot topology:
+    // Layer 3 must be removed before Layer 2. Visual Z-order is independent
+    // from that ownership rule, so do not make a visually higher Layer 2 look
+    // removable while Layer 3 still exists.
+    if (hasLayer(_tertiaryLayerIndex)) {
+      return _tertiaryLayerIndex;
+    }
+    if (hasLayer(_secondaryLayerIndex)) {
+      return _secondaryLayerIndex;
+    }
+    return null;
+  }
   bool get exportsAvailable =>
       _media != null && !_media!.isStill && _media!.frames > 0;
   bool get exportHasAudio => _layers.any(
@@ -540,6 +575,7 @@ class PlayerEngine extends ChangeNotifier {
       layers: _layers
           .map((_LayerRuntimeState layer) => layer.snapshot())
           .toList(growable: false),
+      visualOrder: _visualOrder,
     );
   }
 
@@ -548,6 +584,7 @@ class PlayerEngine extends ChangeNotifier {
     _trimOutFrame = state.trimOutFrame;
     _inFrame = state.inFrame;
     _outFrame = state.outFrame;
+    _visualOrder = List<int>.from(state.visualOrder);
 
     if (_editStateTestMode) {
       for (var index = 0; index < _layerSlotCount; index++) {
@@ -571,6 +608,7 @@ class PlayerEngine extends ChangeNotifier {
     for (final layer in _layers) {
       layer.reset();
     }
+    _visualOrder = <int>[0, 1, 2];
   }
 
   void _syncBaseLayerFromMedia(String path) {
@@ -647,6 +685,7 @@ class PlayerEngine extends ChangeNotifier {
     required int? inFrame,
     required int? outFrame,
     required List<CompositionLayerState> layers,
+    List<int> visualOrder = const <int>[0, 1, 2],
   }) {
     if (layers.length != _layerSlotCount) {
       throw ArgumentError.value(
@@ -662,6 +701,19 @@ class PlayerEngine extends ChangeNotifier {
           'Layer slot $index contains state for index ${layers[index].index}.',
         );
       }
+    }
+
+    if (visualOrder.length != _layerSlotCount ||
+        visualOrder.toSet().length != _layerSlotCount ||
+        visualOrder.any(
+          (int layerIndex) =>
+              layerIndex < 0 || layerIndex >= _layerSlotCount,
+        )) {
+      throw ArgumentError.value(
+        visualOrder,
+        'visualOrder',
+        'Visual order must be a permutation of 0, 1, and 2.',
+      );
     }
 
     return _ClipEditState(
@@ -692,6 +744,7 @@ class PlayerEngine extends ChangeNotifier {
             ),
           )
           .toList(growable: false),
+      visualOrder: visualOrder,
     );
   }
 
@@ -703,6 +756,7 @@ class PlayerEngine extends ChangeNotifier {
       'trimOutFrame': state.trimOutFrame,
       'inFrame': state.inFrame,
       'outFrame': state.outFrame,
+      'visualOrder': List<int>.from(state.visualOrder),
       'layers': state.layers
           .map(
             (_LayerEditState layer) => <String, Object?>{
@@ -828,9 +882,29 @@ class PlayerEngine extends ChangeNotifier {
   Future<bool> _runWithFrozenPreview(
     Future<bool> Function() operation,
   ) async {
+    final firstFlutterFreeze = _textureFreezeDepth == 0;
+    _textureFreezeDepth += 1;
+
+    if (firstFlutterFreeze) {
+      // Freeze the Texture widget itself before native graph mutation begins.
+      // This is stronger than merely withholding MLT frames: Flutter keeps
+      // presenting the exact last composited texture while media dimensions,
+      // layer roles, and inspector state are rebuilt behind it.
+      _textureFrozen = true;
+      super.notifyListeners();
+
+      // Make sure one Flutter frame has actually observed freeze=true before
+      // we touch the native graph. Otherwise a fast rebuild can outrun the
+      // widget update and still expose a one-frame cross-aspect intermediate.
+      SchedulerBinding.instance.scheduleFrame();
+      await SchedulerBinding.instance.endOfFrame;
+    }
+
     _holdNotifications();
 
     final began = bridge.beginPreviewUpdate();
+    final frameSerialBefore =
+        began ? bridge.previewFrameSerial : 0;
     var ended = true;
 
     try {
@@ -840,10 +914,24 @@ class PlayerEngine extends ChangeNotifier {
         ended = bridge.endPreviewUpdate();
       }
 
-      if (result && !ended) {
-        _error = bridge.lastError.isEmpty
-            ? 'MLT could not publish the rebuilt composition frame.'
-            : bridge.lastError;
+      if (!ended) {
+        if (result) {
+          _error = bridge.lastError.isEmpty
+              ? 'MLT could not publish the rebuilt composition frame.'
+              : bridge.lastError;
+        }
+        return false;
+      }
+
+      // While Flutter's Texture remains frozen, wait only for the fully
+      // configured replacement frame to reach the native ready slot. On the
+      // final Dart notification we change layout/aspect and unfreeze Texture
+      // together, so Flutter's first allowed populate in the new layout pulls
+      // this final frame rather than an intermediate one.
+      if (began &&
+          !await _waitForPreviewFrameReady(frameSerialBefore)) {
+        _error =
+            'The rebuilt preview frame did not reach the native ready slot.';
         return false;
       }
 
@@ -854,8 +942,90 @@ class PlayerEngine extends ChangeNotifier {
       }
       rethrow;
     } finally {
+      _textureFreezeDepth -= 1;
+      if (_textureFreezeDepth == 0) {
+        _textureFrozen = false;
+        // A notification is already being held for successful rebuilds, but
+        // guarantee that Texture(freeze:false) and the final media/layout state
+        // are published in the same Flutter rebuild even on no-op/failure paths.
+        _notificationPending = true;
+      }
       _releaseNotifications();
     }
+  }
+
+  Future<bool> _waitForPreviewFrameReady(int previousSerial) async {
+    const pollInterval = Duration(milliseconds: 4);
+    const maxPolls = 750;
+
+    for (var attempt = 0; attempt < maxPolls; attempt++) {
+      if (bridge.previewFrameSerial != previousSerial) {
+        return true;
+      }
+      await Future<void>.delayed(pollInterval);
+    }
+
+    return false;
+  }
+
+  Future<bool> _waitForPreviewPrewarm(int previousSerial) async {
+    const pollInterval = Duration(milliseconds: 4);
+    const maxPolls = 750;
+
+    for (var attempt = 0; attempt < maxPolls; attempt++) {
+      if (bridge.previewPrewarmSerial != previousSerial) {
+        return true;
+      }
+      await Future<void>.delayed(pollInterval);
+    }
+
+    return false;
+  }
+
+  bool _isVisualOrderPermutation(List<int> order) {
+    if (order.length != _layerSlotCount) {
+      return false;
+    }
+    final seen = <int>{};
+    for (final layerIndex in order) {
+      if (layerIndex < 0 ||
+          layerIndex >= _layerSlotCount ||
+          !seen.add(layerIndex)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  bool _setVisualOrderNative(List<int> order) {
+    if (!_isVisualOrderPermutation(order)) {
+      _error = 'The requested visual layer order is invalid.';
+      return false;
+    }
+    if (_editStateTestMode) {
+      _visualOrder = List<int>.from(order);
+      return true;
+    }
+
+    final began = bridge.beginPreviewUpdate();
+    final applied = bridge.setLayerVisualOrder(order[0], order[1], order[2]);
+    final ended = !began || bridge.endPreviewUpdate();
+
+    if (!applied) {
+      _error = bridge.lastError.isEmpty
+          ? 'MLT could not apply the visual layer order.'
+          : bridge.lastError;
+      return false;
+    }
+    if (!ended) {
+      _error = bridge.lastError.isEmpty
+          ? 'MLT could not publish the reordered composition frame.'
+          : bridge.lastError;
+      return false;
+    }
+
+    _visualOrder = List<int>.from(order);
+    return true;
   }
 
   bool _canRestoreOnlyTertiary(_ClipEditState state) {
@@ -950,6 +1120,10 @@ class PlayerEngine extends ChangeNotifier {
         ? bridge.trackAudioGain(2).clamp(0.0, 1.0).toDouble()
         : state.layers[_tertiaryLayerIndex].audioGain;
 
+    if (!_setVisualOrderNative(state.visualOrder)) {
+      return false;
+    }
+
     _restoreClipFields(state);
     _error = null;
     return true;
@@ -1031,6 +1205,7 @@ class PlayerEngine extends ChangeNotifier {
           editState: state,
           undoState: const <_ClipEditState>[],
           redoState: const <_ClipEditState>[],
+          visualOrder: state.visualOrder,
         ),
       );
       if (restored) {
@@ -1143,6 +1318,12 @@ class PlayerEngine extends ChangeNotifier {
         }
         _syncTrackAudioGain(2);
       }
+    }
+
+    if (!listEquals(state.visualOrder, _visualOrder) &&
+        trackCount > 1 &&
+        !_setVisualOrderNative(state.visualOrder)) {
+      return false;
     }
 
     _assignEditStateFields(state);
@@ -2261,6 +2442,15 @@ class PlayerEngine extends ChangeNotifier {
 
     _syncLayerSourceRangeFromNative(targetLayerIndex);
 
+    final desiredVisualOrder = List<int>.from(_visualOrder)
+      ..remove(targetLayerIndex)
+      ..add(targetLayerIndex);
+    if (!_setVisualOrderNative(desiredVisualOrder)) {
+      _error ??= 'MLT added the layer but could not preserve visual order.';
+      notifyListeners();
+      return false;
+    }
+
     _layers[_baseLayerIndex].audioGain =
         bridge.trackAudioGain(0).clamp(0.0, 1.0).toDouble();
     if (hasLayer(_secondaryLayerIndex)) {
@@ -2828,13 +3018,16 @@ class PlayerEngine extends ChangeNotifier {
     return true;
   }
 
-  /// POC 10.7: exchange the media in the BASE and OVERLAY slots.
+  /// Exchange the media occupying the Layer 1/base and Layer 2/overlay roles.
   ///
-  /// This is deliberately a layer-order operation, not timeline editing.
-  /// Layer 1 remains the timed base slot at frame zero; Layer 2 keeps its
-  /// existing start/end timing, opacity, visibility, and audio-gain controls.
-  /// A still image cannot be swapped into Layer 1.
-  Future<bool> swapLayerOrder() async {
+  /// This is intentionally stronger than a visual Z-order swap. The promoted
+  /// Layer 2 source becomes the authoritative base movie, while the displaced
+  /// old base is rebuilt into Layer 2 and therefore receives the normal
+  /// overlay controls (timing, opacity, geometry, visibility, alpha, audio).
+  ///
+  /// The role boundary remains timed-video-only: a still cannot become Layer 1.
+  /// Layer 3 is intentionally excluded from this focused correction.
+  Future<bool> _swapBaseAndSecondaryRoles() async {
     final oldMedia = _media;
     final oldSecondaryPath = _layers[_secondaryLayerIndex].path;
 
@@ -2847,7 +3040,8 @@ class PlayerEngine extends ChangeNotifier {
         _layers[_secondaryLayerIndex].isStill ||
         _opening ||
         _addingTrack ||
-        _exporting) {
+        _exporting ||
+        _restoringEditState) {
       if (_layers[_secondaryLayerIndex].isStill) {
         _error = 'A still image cannot become the base layer.';
         notifyListeners();
@@ -2859,130 +3053,322 @@ class PlayerEngine extends ChangeNotifier {
       return false;
     }
 
-    final oldBasePath = oldMedia.path;
-    final oldStartFrame = _layers[_secondaryLayerIndex].startFrame ?? 0;
-    final oldStartSeconds = oldMedia.fps > 0
-        ? oldStartFrame / oldMedia.fps
-        : 0.0;
-    final oldEndFrame = _layers[_secondaryLayerIndex].endFrame;
-    final oldEndBoundarySeconds = oldMedia.fps > 0 && oldEndFrame != null
-        ? (oldEndFrame + 1) / oldMedia.fps
-        : null;
-    final oldPlayheadFrame = bridge.positionFrame;
-    final oldPlayheadSeconds = oldMedia.fps > 0
-        ? oldPlayheadFrame / oldMedia.fps
-        : 0.0;
+    // First-swap preflight: allocate the inactive GL texture to the exact
+    // profile dimensions Layer 2 will use when promoted to Layer 1. This runs
+    // while the current composition is still fully visible and before Flutter
+    // freezes presentation, so the first cross-aspect swap pays no lazy GL
+    // allocation cost. Subsequent swaps are already hot, but repeating this
+    // preflight is cheap and also covers a replaced Layer-2 source.
+    final prewarmSerialBefore = bridge.previewPrewarmSerial;
+    if (bridge.prewarmPreviewLayer(_secondaryLayerIndex)) {
+      await _waitForPreviewPrewarm(prewarmSerialBefore);
+    }
 
-    final oldEditState = _captureEditState();
-    final oldUndoState = List<_ClipEditState>.from(_undoStack);
-    final oldRedoState = List<_ClipEditState>.from(_redoStack);
+    // Keep the last fully composed frame published while `open()` temporarily
+    // creates the promoted base with default properties and the old base is
+    // rebuilt as Layer 2. Nested preview-update holds are supported natively,
+    // so `_rebuildLayerStack` may safely use its normal visual-order path.
+    return _runWithFrozenPreview(() async {
+      final oldBasePath = oldMedia.path;
+      final oldPlayheadFrame = bridge.positionFrame;
+      final oldPlayheadSeconds = oldMedia.fps > 0
+          ? oldPlayheadFrame / oldMedia.fps
+          : 0.0;
 
-    final opacity = _layers[_secondaryLayerIndex].opacity;
-    final secondaryX = _layers[_secondaryLayerIndex].x;
-    final secondaryY = _layers[_secondaryLayerIndex].y;
-    final secondaryScale = _layers[_secondaryLayerIndex].scale;
-    final visible = _layers[_secondaryLayerIndex].visible;
-    final oldAlphaMode = _layers[_secondaryLayerIndex].alphaMode;
-    final primaryGain = _layers[_baseLayerIndex].audioGain;
-    final secondaryGain = _layers[_secondaryLayerIndex].audioGain;
+      final oldEditState = _captureEditState();
+      final oldUndoState = List<_ClipEditState>.from(_undoStack);
+      final oldRedoState = List<_ClipEditState>.from(_redoStack);
 
-    // Probe the would-be base through the normal open path. This gives us its
-    // authoritative frame rate and defensively rejects anything that MLT does
-    // not classify as a timed video source.
-    final opened = await open(oldSecondaryPath);
-    final newBase = _media;
+      final oldBaseGain = _layers[_baseLayerIndex].audioGain;
+      final oldOverlayGain = _layers[_secondaryLayerIndex].audioGain;
 
-    if (!opened ||
-        newBase == null ||
-        newBase.isStill ||
-        !newBase.hasVideo) {
-      final swapError = !opened
-          ? _error
-          : 'Only a timed video can become the base layer.';
+      // Probe the would-be base through the normal open path so its frame rate,
+      // dimensions, duration, and timed/still classification become authoritative.
+      final opened = await open(oldSecondaryPath);
+      final newBase = _media;
 
-      await _rebuildLayerStack(
+      if (!opened ||
+          newBase == null ||
+          newBase.isStill ||
+          !newBase.hasVideo) {
+        final swapError = !opened
+            ? _error
+            : 'Only a timed video can become the base layer.';
+
+        await _rebuildLayerStack(
+          primaryPath: oldBasePath,
+          secondaryPath: oldSecondaryPath,
+          secondaryStartFrame: oldEditState.layers[_secondaryLayerIndex].startFrame,
+          secondaryEndFrame: oldEditState.layers[_secondaryLayerIndex].endFrame,
+          secondarySourceInFrame:
+              oldEditState.layers[_secondaryLayerIndex].sourceInFrame,
+          secondarySourceOutFrame:
+              oldEditState.layers[_secondaryLayerIndex].sourceOutFrame,
+          playheadFrame: oldPlayheadFrame,
+          primaryGain: oldBaseGain,
+          secondaryGain: oldOverlayGain,
+          secondaryOpacity: oldEditState.layers[_secondaryLayerIndex].opacity,
+          secondaryX: oldEditState.layers[_secondaryLayerIndex].x,
+          secondaryY: oldEditState.layers[_secondaryLayerIndex].y,
+          secondaryScale: oldEditState.layers[_secondaryLayerIndex].scale,
+          secondaryVisible: oldEditState.layers[_secondaryLayerIndex].visible,
+          secondaryAlphaMode: oldEditState.layers[_secondaryLayerIndex].alphaMode,
+          editState: oldEditState,
+          undoState: oldUndoState,
+          redoState: oldRedoState,
+          visualOrder: oldEditState.visualOrder,
+        );
+
+        _error = swapError ?? 'The layer roles could not be changed.';
+        notifyListeners();
+        return false;
+      }
+
+      final newFps = newBase.fps;
+      final newPlayheadFrame = newFps > 0
+          ? (oldPlayheadSeconds * newFps).round()
+          : 0;
+
+      // Presentation/edit properties belong to the media asset, not to the
+      // numbered role it happens to occupy. The promoted former Layer 2 now
+      // becomes a normal full-frame base. The displaced old base is added back
+      // as a fresh overlay at frame zero so native MLT computes an appropriate
+      // fit/center geometry for the *new* canvas. In particular, do not copy a
+      // vertical clip's old X/Y/scale onto a landscape clip (or vice versa).
+      //
+      // The displaced old base keeps its own audio gain. Its new overlay
+      // opacity/visibility/geometry start from the native defaults that match
+      // its own source and the new base profile.
+      final addedOldBase = await _addTrackAtFrame(
+        oldBasePath,
+        0,
+        endFrame: newBase.frames > 0 ? newBase.frames - 1 : null,
+      );
+
+      if (addedOldBase) {
+        if (trackHasAudio(_baseLayerIndex)) {
+          setTrackAudioGain(
+            _baseLayerIndex,
+            oldOverlayGain,
+            recordEdit: false,
+          );
+        }
+        if (trackHasAudio(_secondaryLayerIndex)) {
+          setTrackAudioGain(
+            _secondaryLayerIndex,
+            oldBaseGain,
+            recordEdit: false,
+          );
+        }
+
+        _seekSourceFrameClamped(newPlayheadFrame);
+
+        // A base-role change creates a new clip authority (profile, duration,
+        // frame zero). Treat it as a new composition baseline rather than
+        // allowing older history entries from the previous base to rebuild
+        // against incompatible clip coordinates.
+        _undoStack.clear();
+        _redoStack.clear();
+        _visualOrder = <int>[0, 1, 2];
+        _error = null;
+        notifyListeners();
+        return true;
+      }
+
+      final swapError = _error;
+      final rolledBack = await _rebuildLayerStack(
         primaryPath: oldBasePath,
         secondaryPath: oldSecondaryPath,
-        secondaryStartFrame: oldStartFrame,
+        secondaryStartFrame: oldEditState.layers[_secondaryLayerIndex].startFrame,
         secondaryEndFrame: oldEditState.layers[_secondaryLayerIndex].endFrame,
+        secondarySourceInFrame:
+            oldEditState.layers[_secondaryLayerIndex].sourceInFrame,
+        secondarySourceOutFrame:
+            oldEditState.layers[_secondaryLayerIndex].sourceOutFrame,
         playheadFrame: oldPlayheadFrame,
-        primaryGain: primaryGain,
-        secondaryGain: secondaryGain,
-        secondaryOpacity: opacity,
-        secondaryX: secondaryX,
-        secondaryY: secondaryY,
-        secondaryScale: secondaryScale,
-        secondaryVisible: visible,
-        secondaryAlphaMode: oldAlphaMode,
+        primaryGain: oldBaseGain,
+        secondaryGain: oldOverlayGain,
+        secondaryOpacity: oldEditState.layers[_secondaryLayerIndex].opacity,
+        secondaryX: oldEditState.layers[_secondaryLayerIndex].x,
+        secondaryY: oldEditState.layers[_secondaryLayerIndex].y,
+        secondaryScale: oldEditState.layers[_secondaryLayerIndex].scale,
+        secondaryVisible: oldEditState.layers[_secondaryLayerIndex].visible,
+        secondaryAlphaMode: oldEditState.layers[_secondaryLayerIndex].alphaMode,
         editState: oldEditState,
         undoState: oldUndoState,
         redoState: oldRedoState,
+        visualOrder: oldEditState.visualOrder,
       );
 
-      _error = swapError ?? 'The layer order could not be changed.';
+      _error = rolledBack
+          ? (swapError ?? 'The layer roles could not be changed.')
+          : 'Layer role swap failed and the previous composition could not be restored.';
       notifyListeners();
+      return false;
+    });
+  }
+
+  List<int> _presentVisualOrder() => _visualOrder
+      .where((int layerIndex) => hasLayer(layerIndex))
+      .toList(growable: false);
+
+  bool canMoveLayerUp(int layerIndex) {
+    if (!hasLayer(layerIndex) ||
+        _opening ||
+        _addingTrack ||
+        _exporting ||
+        _restoringEditState) {
+      return false;
+    }
+    final present = _presentVisualOrder();
+    final position = present.indexOf(layerIndex);
+    return position >= 0 && position < present.length - 1;
+  }
+
+  bool canMoveLayerDown(int layerIndex) {
+    if (!hasLayer(layerIndex) ||
+        _opening ||
+        _addingTrack ||
+        _exporting ||
+        _restoringEditState) {
+      return false;
+    }
+    final present = _presentVisualOrder();
+    final position = present.indexOf(layerIndex);
+    return position > 0;
+  }
+
+  Future<bool> moveLayerUp(int layerIndex) async {
+    if (!canMoveLayerUp(layerIndex)) {
       return false;
     }
 
-    final newFps = newBase.fps;
-    final newStartFrame = newFps > 0
-        ? (oldStartSeconds * newFps).round()
-        : 0;
-    final newEndFrame = newFps > 0 && oldEndBoundarySeconds != null
-        ? (oldEndBoundarySeconds * newFps).round() - 1
-        : null;
-    final newPlayheadFrame = newFps > 0
-        ? (oldPlayheadSeconds * newFps).round()
-        : 0;
-
-    final swapped = await _rebuildLayerStack(
-      primaryPath: oldSecondaryPath,
-      secondaryPath: oldBasePath,
-      secondaryStartFrame: newStartFrame,
-      secondaryEndFrame: newEndFrame,
-      playheadFrame: newPlayheadFrame,
-      primaryGain: primaryGain,
-      secondaryGain: secondaryGain,
-      secondaryOpacity: opacity,
-      secondaryX: secondaryX,
-      secondaryY: secondaryY,
-      secondaryScale: secondaryScale,
-      secondaryVisible: visible,
-      // Alpha interpretation belongs to the asset. The old base is a new
-      // overlay source, so begin conservatively in Auto.
-      secondaryAlphaMode: 0,
-    );
-
-    if (swapped) {
-      _error = null;
-      notifyListeners();
-      return true;
+    // With exactly two layers, crossing the Layer-1/Layer-2 boundary is a
+    // role swap, not merely a Z-order change. The promoted timed video becomes
+    // the new base authority and the displaced base becomes the overlay, which
+    // means the full Layer-2 control set follows the Layer-2 role.
+    if (!_editStateTestMode && trackCount == 2) {
+      return _swapBaseAndSecondaryRoles();
     }
 
-    final swapError = _error;
-    final rolledBack = await _rebuildLayerStack(
-      primaryPath: oldBasePath,
-      secondaryPath: oldSecondaryPath,
-      secondaryStartFrame: oldStartFrame,
-      secondaryEndFrame: oldEditState.layers[_secondaryLayerIndex].endFrame,
-      playheadFrame: oldPlayheadFrame,
-      primaryGain: primaryGain,
-      secondaryGain: secondaryGain,
-      secondaryOpacity: opacity,
-      secondaryX: secondaryX,
-      secondaryY: secondaryY,
-      secondaryScale: secondaryScale,
-      secondaryVisible: visible,
-      secondaryAlphaMode: oldAlphaMode,
-      editState: oldEditState,
-      undoState: oldUndoState,
-      redoState: oldRedoState,
-    );
+    return _moveLayerVisualOrder(layerIndex, 1);
+  }
 
-    _error = rolledBack
-        ? (swapError ?? 'The layer order could not be changed.')
-        : 'Layer swap failed and the previous composition could not be restored.';
+  Future<bool> moveLayerDown(int layerIndex) async {
+    if (!canMoveLayerDown(layerIndex)) {
+      return false;
+    }
+
+    if (!_editStateTestMode && trackCount == 2) {
+      return _swapBaseAndSecondaryRoles();
+    }
+
+    return _moveLayerVisualOrder(layerIndex, -1);
+  }
+
+  List<int> _visualOrderMoved(int layerIndex, int direction) {
+    final result = List<int>.from(_visualOrder);
+    final present = _presentVisualOrder();
+    final currentPresentPosition = present.indexOf(layerIndex);
+    final swapPresentPosition = currentPresentPosition + direction;
+    final otherLayer = present[swapPresentPosition];
+    final a = result.indexOf(layerIndex);
+    final b = result.indexOf(otherLayer);
+    result[a] = otherLayer;
+    result[b] = layerIndex;
+    return result;
+  }
+
+  Future<bool> _moveLayerVisualOrder(int layerIndex, int direction) async {
+    final before = _captureEditState();
+    final desired = _ClipEditState(
+      trimInFrame: before.trimInFrame,
+      trimOutFrame: before.trimOutFrame,
+      inFrame: before.inFrame,
+      outFrame: before.outFrame,
+      layers: before.layers,
+      visualOrder: _visualOrderMoved(layerIndex, direction),
+    );
+    final originalUndo = List<_ClipEditState>.from(_undoStack);
+    final originalRedo = List<_ClipEditState>.from(_redoStack);
+
+    String basePath = '';
+    int playheadFrame = 0;
+
+    if (!_editStateTestMode) {
+      final media = _media;
+      if (!initialized || media == null || media.isStill || !media.hasVideo) {
+        return false;
+      }
+      if (!await _parkPlaybackForLayerChange()) {
+        return false;
+      }
+      basePath = _layers[_baseLayerIndex].path ?? media.path;
+      playheadFrame = bridge.positionFrame;
+    }
+
+    _finishContinuousEditGroup();
+    _restoringEditState = true;
     notifyListeners();
+
+    try {
+      final reordered = await _applyEditState(
+        desired,
+        basePath: basePath,
+        playheadFrame: playheadFrame,
+      );
+
+      if (!reordered) {
+        final reorderError = _error;
+        final rolledBack = await _applyEditState(
+          before,
+          basePath: basePath,
+          playheadFrame: playheadFrame,
+        );
+
+        _undoStack
+          ..clear()
+          ..addAll(originalUndo);
+        _redoStack
+          ..clear()
+          ..addAll(originalRedo);
+
+        _error = rolledBack
+            ? (reorderError ?? 'The layer order could not be changed.')
+            : 'Layer reorder failed and the previous composition could not be restored.';
+        return false;
+      }
+
+      final after = _captureEditState();
+      _undoStack
+        ..clear()
+        ..addAll(originalUndo);
+      _redoStack.clear();
+      if (!before.sameAs(after)) {
+        _undoStack.add(before);
+      }
+      _error = null;
+      return true;
+    } finally {
+      _restoringEditState = false;
+      notifyListeners();
+    }
+  }
+
+  /// Compatibility alias for the old two-layer swap command.
+  ///
+  /// The generalized ordering model no longer exchanges source identities.
+  /// It swaps only visual Z-order while Layer 1 remains the base authority.
+  Future<bool> swapLayerOrder() async {
+    if (trackCount != 2) {
+      return false;
+    }
+    if (canMoveLayerUp(_baseLayerIndex)) {
+      return moveLayerUp(_baseLayerIndex);
+    }
+    if (canMoveLayerDown(_baseLayerIndex)) {
+      return moveLayerDown(_baseLayerIndex);
+    }
     return false;
   }
 
@@ -3017,7 +3403,11 @@ class PlayerEngine extends ChangeNotifier {
     _ClipEditState? editState,
     List<_ClipEditState>? undoState,
     List<_ClipEditState>? redoState,
+    List<int>? visualOrder,
   }) async {
+    final preservedVisualOrder = List<int>.from(
+      visualOrder ?? editState?.visualOrder ?? _visualOrder,
+    );
     final preservedExportRangeMode =
         editState != null ? _exportRangeMode : null;
     final preservedExportRangeModeExplicit =
@@ -3136,6 +3526,13 @@ class PlayerEngine extends ChangeNotifier {
         _syncExportRangeState();
       }
     }
+
+    final desiredVisualOrder = preservedVisualOrder;
+    if (trackCount > 1 && !_setVisualOrderNative(desiredVisualOrder)) {
+      notifyListeners();
+      return false;
+    }
+    _visualOrder = List<int>.from(desiredVisualOrder);
 
     _seekSourceFrameClamped(playheadFrame);
     if (editState != null) {
@@ -3268,6 +3665,7 @@ class PlayerEngine extends ChangeNotifier {
       inFrame: before.inFrame,
       outFrame: before.outFrame,
       layers: desiredLayers,
+      visualOrder: before.visualOrder,
     );
 
     final basePath = _layers[_baseLayerIndex].path ?? media.path;
@@ -3285,18 +3683,22 @@ class PlayerEngine extends ChangeNotifier {
 
       final playheadFrame = bridge.positionFrame;
 
-      restored = await _applyEditState(
-        desired,
-        basePath: basePath,
-        playheadFrame: playheadFrame,
+      restored = await _runWithFrozenPreview(
+        () => _applyEditState(
+          desired,
+          basePath: basePath,
+          playheadFrame: playheadFrame,
+        ),
       );
 
       if (!restored) {
         timingError = _error;
-        final rolledBack = await _applyEditState(
-          before,
-          basePath: basePath,
-          playheadFrame: playheadFrame,
+        final rolledBack = await _runWithFrozenPreview(
+          () => _applyEditState(
+            before,
+            basePath: basePath,
+            playheadFrame: playheadFrame,
+          ),
         );
 
         _undoStack
@@ -3443,6 +3845,7 @@ class PlayerEngine extends ChangeNotifier {
       inFrame: before.inFrame,
       outFrame: before.outFrame,
       layers: desiredLayers,
+      visualOrder: before.visualOrder,
     );
 
     final basePath = _layers[_baseLayerIndex].path ?? media.path;
@@ -3457,18 +3860,22 @@ class PlayerEngine extends ChangeNotifier {
       }
 
       final playheadFrame = bridge.positionFrame;
-      final restored = await _applyEditState(
-        desired,
-        basePath: basePath,
-        playheadFrame: playheadFrame,
+      final restored = await _runWithFrozenPreview(
+        () => _applyEditState(
+          desired,
+          basePath: basePath,
+          playheadFrame: playheadFrame,
+        ),
       );
 
       if (!restored) {
         final sourceError = _error;
-        final rolledBack = await _applyEditState(
-          before,
-          basePath: basePath,
-          playheadFrame: playheadFrame,
+        final rolledBack = await _runWithFrozenPreview(
+          () => _applyEditState(
+            before,
+            basePath: basePath,
+            playheadFrame: playheadFrame,
+          ),
         );
 
         _undoStack

@@ -377,7 +377,10 @@ class _PlayerPageState extends State<PlayerPage>
       return;
     }
 
-    final topLayerIndex = _engine.trackCount - 1;
+    final topLayerIndex = _engine.topOverlayLayerIndex;
+    if (topLayerIndex == null) {
+      return;
+    }
     final removed = await _engine.removeLayer(topLayerIndex);
 
     if (mounted) {
@@ -440,18 +443,29 @@ class _PlayerPageState extends State<PlayerPage>
     }
   }
 
-  Future<void> _swapLayerOrder() async {
-    if (!_engine.hasLayer(1) ||
-        _engine.trackCount != 2 ||
-        _engine.layerState(1).isStill ||
-        _engine.opening ||
-        _engine.addingTrack ||
-        _engine.exporting) {
+  Future<void> _moveLayerUp(int layerIndex) async {
+    if (!_engine.canMoveLayerUp(layerIndex)) {
       return;
     }
 
     _showOverlay();
-    await _engine.swapLayerOrder();
+    await _engine.moveLayerUp(layerIndex);
+
+    if (mounted) {
+      setState(() {
+        _tracksOpen = _engine.hasLayer(1);
+      });
+      _showOverlay();
+    }
+  }
+
+  Future<void> _moveLayerDown(int layerIndex) async {
+    if (!_engine.canMoveLayerDown(layerIndex)) {
+      return;
+    }
+
+    _showOverlay();
+    await _engine.moveLayerDown(layerIndex);
 
     if (mounted) {
       setState(() {
@@ -1227,6 +1241,7 @@ class _PlayerPageState extends State<PlayerPage>
         aspectRatio: media.viewportAspect,
         child: Texture(
           textureId: _engine.textureId,
+          freeze: _engine.textureFrozen,
           filterQuality: FilterQuality.medium,
         ),
       ),
@@ -1303,8 +1318,9 @@ class _PlayerPageState extends State<PlayerPage>
             baseWidth: media.width,
             baseHeight: media.height,
             canAddLayer: _engine.trackCount < layers.length,
-            canSwapLayers:
-                _engine.trackCount == 2 && !_engine.layerState(1).isStill,
+            reorderEnabled: !_engine.opening &&
+                !_engine.addingTrack &&
+                !_engine.exporting,
             onAudioChanged: (layerIndex, value) =>
                 _engine.setTrackAudioGain(layerIndex, value),
             onOpacityChanged: (layerIndex, value) =>
@@ -1335,7 +1351,8 @@ class _PlayerPageState extends State<PlayerPage>
             onToggleVisible: _engine.toggleLayerVisible,
             onAddLayer: _pickNextTrack,
             onRemoveTopLayer: _removeTopLayer,
-            onSwapLayers: _swapLayerOrder,
+            onMoveUp: (layerIndex) => unawaited(_moveLayerUp(layerIndex)),
+            onMoveDown: (layerIndex) => unawaited(_moveLayerDown(layerIndex)),
             onClose: _toggleTracksInspector,
           ),
         ),

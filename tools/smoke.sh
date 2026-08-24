@@ -132,6 +132,20 @@ gcc \
     -Wall -Wextra -Werror
 
 
+echo "smoke: building the layer order test"
+
+gcc \
+    native/mlt_layer_order_smoke.c \
+    -o "$WORK/mlt_layer_order_smoke" \
+    -Inative \
+    $(pkg-config --cflags glib-2.0) \
+    $(pkg-config --libs glib-2.0) \
+    -L"$WORK" -lmlt_bridge \
+    -Wl,-rpath,"$WORK" \
+    -Wall -Wextra -Werror \
+    -lm
+
+
 echo "smoke: building the video export preset test"
 
 gcc \
@@ -273,6 +287,14 @@ echo
 LD_LIBRARY_PATH="$WORK" \
 SDL_AUDIODRIVER=dummy \
     "$WORK/mlt_layer_source_trim_smoke" "$MEDIA"
+
+echo
+echo "smoke: running layer order coverage"
+echo
+
+LD_LIBRARY_PATH="$WORK" \
+SDL_AUDIODRIVER=dummy \
+    "$WORK/mlt_layer_order_smoke" "$MEDIA"
 
 echo
 echo "smoke: running video export preset coverage"

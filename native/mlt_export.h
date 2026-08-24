@@ -44,6 +44,7 @@ typedef struct _MltExportLayerSnapshot {
  */
 typedef struct _MltExportCompositionSnapshot {
     int layer_count;
+    int visual_order[MLT_COMPOSITION_MAX_LAYERS];
     MltExportLayerSnapshot layers[MLT_COMPOSITION_MAX_LAYERS];
 } MltExportCompositionSnapshot;
 

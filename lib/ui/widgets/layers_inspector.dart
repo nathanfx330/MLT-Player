@@ -19,7 +19,7 @@ class LayersInspector extends StatelessWidget {
     required this.baseWidth,
     required this.baseHeight,
     required this.canAddLayer,
-    required this.canSwapLayers,
+    required this.reorderEnabled,
     required this.onAudioChanged,
     required this.onOpacityChanged,
     required this.onAlphaModeChanged,
@@ -35,7 +35,8 @@ class LayersInspector extends StatelessWidget {
     required this.onToggleVisible,
     required this.onAddLayer,
     required this.onRemoveTopLayer,
-    required this.onSwapLayers,
+    required this.onMoveUp,
+    required this.onMoveDown,
     required this.onClose,
   });
 
@@ -45,7 +46,7 @@ class LayersInspector extends StatelessWidget {
   final int baseHeight;
 
   final bool canAddLayer;
-  final bool canSwapLayers;
+  final bool reorderEnabled;
 
   final LayerDoubleChanged onAudioChanged;
   final LayerDoubleChanged onOpacityChanged;
@@ -62,7 +63,8 @@ class LayersInspector extends StatelessWidget {
   final LayerAction onToggleVisible;
   final VoidCallback onAddLayer;
   final VoidCallback onRemoveTopLayer;
-  final VoidCallback onSwapLayers;
+  final LayerAction onMoveUp;
+  final LayerAction onMoveDown;
   final VoidCallback onClose;
 
   String _displayName(CompositionLayerState layer) {
@@ -80,8 +82,23 @@ class LayersInspector extends StatelessWidget {
   Widget build(BuildContext context) {
     final visibleLayers = layers
         .where((CompositionLayerState layer) => layer.present)
-        .toList(growable: false);
+        .toList(growable: false)
+      ..sort(
+        (CompositionLayerState a, CompositionLayerState b) =>
+            b.visualPosition.compareTo(a.visualPosition),
+      );
     final layerCount = visibleLayers.length;
+
+    bool canMoveUp(CompositionLayerState layer) => reorderEnabled &&
+        visibleLayers.any(
+          (CompositionLayerState other) =>
+              other.visualPosition > layer.visualPosition,
+        );
+    bool canMoveDown(CompositionLayerState layer) => reorderEnabled &&
+        visibleLayers.any(
+          (CompositionLayerState other) =>
+              other.visualPosition < layer.visualPosition,
+        );
 
     final availableBodyHeight =
         (MediaQuery.sizeOf(context).height - 120)
@@ -105,6 +122,11 @@ class LayersInspector extends StatelessWidget {
             audioEnabled: layer.hasAudio,
             audioGain: layer.audioGain,
             onAudioChanged: (value) => onAudioChanged(layer.index, value),
+            showOrderControls: true,
+            canMoveUp: canMoveUp(layer),
+            canMoveDown: canMoveDown(layer),
+            onMoveUp: () => onMoveUp(layer.index),
+            onMoveDown: () => onMoveDown(layer.index),
             onReplaceSource: () => onReplaceSource(layer.index),
           ),
         );
@@ -155,6 +177,11 @@ class LayersInspector extends StatelessWidget {
           onAlphaModeChanged: (mode) => onAlphaModeChanged(layer.index, mode),
           onReplaceSource: () => onReplaceSource(layer.index),
           onToggleVideoVisible: () => onToggleVisible(layer.index),
+          showOrderControls: true,
+          canMoveUp: canMoveUp(layer),
+          canMoveDown: canMoveDown(layer),
+          onMoveUp: () => onMoveUp(layer.index),
+          onMoveDown: () => onMoveDown(layer.index),
         ),
       );
     }
@@ -238,31 +265,15 @@ class LayersInspector extends StatelessWidget {
               ),
             ),
             IconButton(
-              tooltip: 'Remove Layer $layerCount — Undo restores it',
+              tooltip: layerCount >= 3
+                  ? 'Remove Layer 3 — Undo restores it'
+                  : 'Remove Layer 2 — Undo restores it',
               visualDensity: VisualDensity.compact,
               iconSize: 17,
               onPressed: layerCount > 1 ? onRemoveTopLayer : null,
               icon: const Icon(
                 Icons.remove_circle_outline,
                 color: Colors.white60,
-              ),
-            ),
-            Tooltip(
-              message: canSwapLayers
-                  ? 'Swap Layer 1 and Layer 2'
-                  : layerCount > 2
-                      ? 'Remove Layer 3 before swapping the lower layers'
-                      : 'A still image cannot become the base layer',
-              child: IconButton(
-                visualDensity: VisualDensity.compact,
-                iconSize: 17,
-                onPressed: canSwapLayers ? onSwapLayers : null,
-                icon: Icon(
-                  Icons.swap_vert,
-                  color: canSwapLayers
-                      ? const Color(0xFFE8A33D)
-                      : Colors.white24,
-                ),
               ),
             ),
             IconButton(
@@ -313,6 +324,11 @@ class _LayerSection extends StatelessWidget {
     this.onAnchorChanged,
     this.onAlphaModeChanged,
     this.onToggleVideoVisible,
+    this.showOrderControls = false,
+    this.canMoveUp = false,
+    this.canMoveDown = false,
+    this.onMoveUp,
+    this.onMoveDown,
     required this.onReplaceSource,
   });
 
@@ -348,6 +364,11 @@ class _LayerSection extends StatelessWidget {
   final ValueChanged<int>? onAnchorChanged;
   final ValueChanged<int>? onAlphaModeChanged;
   final VoidCallback? onToggleVideoVisible;
+  final bool showOrderControls;
+  final bool canMoveUp;
+  final bool canMoveDown;
+  final VoidCallback? onMoveUp;
+  final VoidCallback? onMoveDown;
   final VoidCallback onReplaceSource;
 
   bool get hasGeometry =>
@@ -397,6 +418,40 @@ class _LayerSection extends StatelessWidget {
                     ),
                   ),
                 ),
+                if (showOrderControls) ...[
+                  Tooltip(
+                    message: canMoveUp
+                        ? 'Move Layer $number up'
+                        : 'Layer $number is already at the top',
+                    child: IconButton(
+                      visualDensity: VisualDensity.compact,
+                      iconSize: 16,
+                      onPressed: canMoveUp ? onMoveUp : null,
+                      icon: Icon(
+                        Icons.keyboard_arrow_up,
+                        color: canMoveUp
+                            ? const Color(0xFFE8A33D)
+                            : Colors.white24,
+                      ),
+                    ),
+                  ),
+                  Tooltip(
+                    message: canMoveDown
+                        ? 'Move Layer $number down'
+                        : 'Layer $number is already at the bottom',
+                    child: IconButton(
+                      visualDensity: VisualDensity.compact,
+                      iconSize: 16,
+                      onPressed: canMoveDown ? onMoveDown : null,
+                      icon: Icon(
+                        Icons.keyboard_arrow_down,
+                        color: canMoveDown
+                            ? const Color(0xFFE8A33D)
+                            : Colors.white24,
+                      ),
+                    ),
+                  ),
+                ],
                 if (onToggleVideoVisible != null)
                   IconButton(
                     tooltip: videoVisible
