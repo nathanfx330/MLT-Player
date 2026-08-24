@@ -15,6 +15,7 @@ import 'services/mlt_export_frame_rate_bridge.dart';
 import 'services/mlt_export_preset_bridge.dart';
 import 'services/player_engine.dart';
 import 'ui/widgets/media_inspector.dart';
+import 'ui/explorer_page.dart';
 import 'ui/widgets/layers_inspector.dart';
 
 // ---------------------------------------------------------------------------
@@ -62,12 +63,72 @@ class MltPlayerApp extends StatelessWidget {
         colorSchemeSeed: const Color(0xFFE8A33D),
         scaffoldBackgroundColor: Colors.black,
       ),
-      home: PlayerPage(
+      home: _MltExplorerShell(
         bridge: bridge,
         initialized: initialized,
         version: version,
         startupError: startupError,
       ),
+    );
+  }
+}
+
+class _MltExplorerShell extends StatefulWidget {
+  const _MltExplorerShell({
+    required this.bridge,
+    required this.initialized,
+    required this.version,
+    this.startupError,
+  });
+
+  final MltBridge bridge;
+  final bool initialized;
+  final String version;
+  final String? startupError;
+
+  @override
+  State<_MltExplorerShell> createState() => _MltExplorerShellState();
+}
+
+class _MltExplorerShellState extends State<_MltExplorerShell> {
+  String? _playerPath;
+  int _playerOpenRequest = 0;
+  bool _showPlayer = false;
+
+  void _openInPlayer(String path) {
+    setState(() {
+      _playerPath = path;
+      _playerOpenRequest += 1;
+      _showPlayer = true;
+    });
+  }
+
+  void _returnToExplorer() {
+    setState(() => _showPlayer = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return IndexedStack(
+      index: _showPlayer ? 1 : 0,
+      children: [
+        ExplorerPage(
+          initialized: widget.initialized,
+          version: widget.version,
+          startupError: widget.startupError,
+          onOpenMedia: _openInPlayer,
+          active: !_showPlayer,
+        ),
+        PlayerPage(
+          bridge: widget.bridge,
+          initialized: widget.initialized,
+          version: widget.version,
+          startupError: widget.startupError,
+          initialPath: _playerPath,
+          openRequestSerial: _playerOpenRequest,
+          onBack: _returnToExplorer,
+        ),
+      ],
     );
   }
 }
@@ -104,12 +165,18 @@ class PlayerPage extends StatefulWidget {
     required this.initialized,
     required this.version,
     this.startupError,
+    this.initialPath,
+    this.openRequestSerial = 0,
+    this.onBack,
   });
 
   final MltBridge bridge;
   final bool initialized;
   final String version;
   final String? startupError;
+  final String? initialPath;
+  final int openRequestSerial;
+  final VoidCallback? onBack;
 
   @override
   State<PlayerPage> createState() => _PlayerPageState();
@@ -196,6 +263,32 @@ class _PlayerPageState extends State<PlayerPage>
 
     _resolveTextureId();
     _restartOverlayTimer();
+
+    final initialPath = widget.initialPath;
+    if (initialPath != null && initialPath.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          unawaited(_openPath(initialPath));
+        }
+      });
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant PlayerPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+
+    final path = widget.initialPath;
+    if (path != null &&
+        path.isNotEmpty &&
+        (path != oldWidget.initialPath ||
+            widget.openRequestSerial != oldWidget.openRequestSerial)) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          unawaited(_openPath(path));
+        }
+      });
+    }
   }
 
   @override
@@ -486,8 +579,16 @@ class _PlayerPageState extends State<PlayerPage>
     }
     await _engine.open(path);
     if (mounted) {
+      _keyboardFocus.requestFocus();
       _showOverlay();
     }
+  }
+
+  void _returnToExplorer() {
+    if (_engine.playing) {
+      _engine.pausePlayback();
+    }
+    widget.onBack?.call();
   }
 
   static String _mediaStem(String name) {
@@ -1044,7 +1145,11 @@ class _PlayerPageState extends State<PlayerPage>
     }
 
     if (key == LogicalKeyboardKey.escape) {
-      _exitFullscreen();
+      if (_fullscreen) {
+        _exitFullscreen();
+      } else if (widget.onBack != null) {
+        _returnToExplorer();
+      }
       return KeyEventResult.handled;
     }
 
@@ -1171,7 +1276,7 @@ class _PlayerPageState extends State<PlayerPage>
 
     return Focus(
       focusNode: _keyboardFocus,
-      autofocus: true,
+      autofocus: widget.initialPath != null,
       onKeyEvent: _onKey,
       child: Scaffold(
         body: MouseRegion(
@@ -1197,6 +1302,16 @@ class _PlayerPageState extends State<PlayerPage>
                 const ColoredBox(color: Colors.black),
                 _buildViewport(media),
                 _buildTopBar(media),
+                if (media == null && widget.onBack != null)
+                  Positioned(
+                    top: 12,
+                    left: 12,
+                    child: IconButton.filledTonal(
+                      tooltip: 'Back to MLT Explorer',
+                      onPressed: _returnToExplorer,
+                      icon: const Icon(Icons.arrow_back),
+                    ),
+                  ),
                 _buildBottomOverlay(media),
                 _buildTracksInspector(media),
               ],
@@ -1271,6 +1386,15 @@ class _PlayerPageState extends State<PlayerPage>
           ),
           child: Row(
             children: [
+              if (widget.onBack != null) ...[
+                IconButton(
+                  tooltip: 'Back to MLT Explorer',
+                  visualDensity: VisualDensity.compact,
+                  onPressed: _returnToExplorer,
+                  icon: const Icon(Icons.arrow_back, size: 20),
+                ),
+                const SizedBox(width: 4),
+              ],
               Expanded(
                 child: Text(
                   media.name,
