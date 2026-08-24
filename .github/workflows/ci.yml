@@ -67,6 +67,9 @@ jobs:
           flutter config --enable-linux-desktop
           flutter precache --linux
           flutter pub get
+          # A real Linux build is required on a clean runner to generate
+          # linux/flutter/ephemeral, which tools/smoke.sh links against.
+          flutter build linux --debug --no-pub
 
       - name: Analyze Dart
         run: flutter analyze
