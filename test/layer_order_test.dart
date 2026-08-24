@@ -181,6 +181,45 @@ void main() {
       );
     });
 
+    test('Layer 3 requests role promotion only when adjacent to Layer 1', () async {
+      expect(
+        engine.moveCrossesBaseTertiaryBoundaryForTesting(2, -1),
+        isFalse,
+      );
+
+      // In test mode this first move is visual-only: Layer 3 crosses Layer 2
+      // and becomes adjacent to the base without exchanging identities.
+      expect(await engine.moveLayerDown(2), isTrue);
+      expect(engine.visualOrder, <int>[0, 2, 1]);
+
+      expect(
+        engine.moveCrossesBaseTertiaryBoundaryForTesting(2, -1),
+        isTrue,
+      );
+      expect(
+        engine.moveCrossesBaseTertiaryBoundaryForTesting(0, 1),
+        isTrue,
+      );
+      expect(
+        engine.moveCrossesBaseSecondaryBoundaryForTesting(2, -1),
+        isFalse,
+      );
+
+      // Walk the base visually across Layer 3 and prove the reverse adjacency
+      // is recognized too. Production mode dispatches this crossing to the
+      // true Layer 1 <-> Layer 3 role exchange.
+      expect(await engine.moveLayerUp(0), isTrue);
+      expect(engine.visualOrder, <int>[2, 0, 1]);
+      expect(
+        engine.moveCrossesBaseTertiaryBoundaryForTesting(2, 1),
+        isTrue,
+      );
+      expect(
+        engine.moveCrossesBaseTertiaryBoundaryForTesting(0, -1),
+        isTrue,
+      );
+    });
+
     test('overlay reorder changes Z-order without exchanging logical state', () async {
       final baseBefore = _values(engine.layerState(0));
       final layer2Before = _values(engine.layerState(1));
