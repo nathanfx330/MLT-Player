@@ -32,9 +32,9 @@ typedef struct _MltCompositionLayerDerivedState {
 } MltCompositionLayerDerivedState;
 
 /*
- * POC 11 adds layers[3] as the canonical indexed diagnostic view. The
- * legacy Layer-2 scalar fields stay for this transition slice so the mature
- * parity assertions remain readable while indexed assertions are added.
+ * Canonical preview/export diagnostic state. Layer slots are index-aligned
+ * with native composition slots: 0 = base, 1 = Layer 2, 2 = Layer 3.
+ * Presence and every per-layer derived value live only in layers[].
  */
 typedef struct _MltCompositionDerivedState {
     int valid;
@@ -49,26 +49,6 @@ typedef struct _MltCompositionDerivedState {
     int64_t range_out_frame;
 
     MltCompositionLayerDerivedState layers[MLT_COMPOSITION_MAX_LAYERS];
-
-    /* Transitional compatibility view for the existing parity harness. */
-    int64_t layer2_start_frame;
-    int64_t layer2_timeline_length;
-    int layer2_is_still;
-    int layer2_alpha_mode;
-
-    double layer2_base_width;
-    double layer2_base_height;
-
-    double layer2_x;
-    double layer2_y;
-    double layer2_width;
-    double layer2_height;
-    double layer2_opacity;
-
-    int base_has_audio;
-    int layer2_has_audio;
-    double base_audio_gain;
-    double layer2_audio_gain;
 } MltCompositionDerivedState;
 
 int mlt_bridge_debug_composition_parity(

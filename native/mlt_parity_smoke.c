@@ -41,10 +41,7 @@ static void print_state(
     const MltCompositionDerivedState *state)
 {
     printf(
-        "  %s: %dx%d %.6f fps, length %lld, range %lld..%lld, "
-        "L2 start %lld, L2 timeline %lld, base %.3fx%.3f, "
-        "rect %.3f/%.3f %.3fx%.3f @ %.3f, gains %.3f/%.3f, "
-        "still %d, alpha %d\n",
+        "  %s: %dx%d %.6f fps, length %lld, range %lld..%lld, layers %d\n",
         label,
         state->profile_width,
         state->profile_height,
@@ -52,39 +49,33 @@ static void print_state(
         (long long)state->composition_length,
         (long long)state->range_in_frame,
         (long long)state->range_out_frame,
-        (long long)state->layer2_start_frame,
-        (long long)state->layer2_timeline_length,
-        state->layer2_base_width,
-        state->layer2_base_height,
-        state->layer2_x,
-        state->layer2_y,
-        state->layer2_width,
-        state->layer2_height,
-        state->layer2_opacity,
-        state->base_audio_gain,
-        state->layer2_audio_gain,
-        state->layer2_is_still,
-        state->layer2_alpha_mode
+        state->layer_count
     );
 
-    if (state->layer_count >= 3) {
-        const MltCompositionLayerDerivedState *layer3 =
-            &state->layers[MLT_COMPOSITION_SECOND_OVERLAY];
+    for (int index = 0; index < MLT_COMPOSITION_MAX_LAYERS; index++) {
+        const MltCompositionLayerDerivedState *layer = &state->layers[index];
+        if (!layer->present) {
+            continue;
+        }
+
         printf(
-            "      L3 start %lld, timeline %lld, base %.3fx%.3f, "
-            "rect %.3f/%.3f %.3fx%.3f @ %.3f, gain %.3f, still %d, alpha %d\n",
-            (long long)layer3->start_frame,
-            (long long)layer3->timeline_length,
-            layer3->base_width,
-            layer3->base_height,
-            layer3->x,
-            layer3->y,
-            layer3->width,
-            layer3->height,
-            layer3->opacity,
-            layer3->audio_gain,
-            layer3->is_still,
-            layer3->alpha_mode
+            "      L%d start %lld, timeline %lld, base %.3fx%.3f, "
+            "rect %.3f/%.3f %.3fx%.3f @ %.3f, audio %d @ %.3f, "
+            "still %d, alpha %d\n",
+            index + 1,
+            (long long)layer->start_frame,
+            (long long)layer->timeline_length,
+            layer->base_width,
+            layer->base_height,
+            layer->x,
+            layer->y,
+            layer->width,
+            layer->height,
+            layer->opacity,
+            layer->has_audio,
+            layer->audio_gain,
+            layer->is_still,
+            layer->alpha_mode
         );
     }
 }
@@ -152,33 +143,36 @@ static void compare_indexed_layers(
                 nearly_equal(a->audio_gain, b->audio_gain, 0.000001),
             label
         );
+
+        if (index > MLT_COMPOSITION_BASE_LAYER &&
+            (a->is_still || b->is_still)) {
+            snprintf(
+                label,
+                sizeof(label),
+                "held Layer %d reaches the composition final frame",
+                index + 1
+            );
+            check(
+                a->timeline_length == preview->composition_length &&
+                    b->timeline_length == exported->composition_length,
+                label
+            );
+        }
     }
 
     if (preview->layer_count >= 3 || exported->layer_count >= 3) {
         check(
-            preview->layers[2].present && exported->layers[2].present,
+            preview->layers[MLT_COMPOSITION_SECOND_OVERLAY].present &&
+                exported->layers[MLT_COMPOSITION_SECOND_OVERLAY].present,
             "Layer 3 is present in both preview and export"
         );
     } else {
         check(
-            !preview->layers[2].present && !exported->layers[2].present,
+            !preview->layers[MLT_COMPOSITION_SECOND_OVERLAY].present &&
+                !exported->layers[MLT_COMPOSITION_SECOND_OVERLAY].present,
             "unused Layer 3 slot stays empty"
         );
     }
-
-    check(
-        preview->layers[1].start_frame == preview->layer2_start_frame &&
-            exported->layers[1].start_frame == exported->layer2_start_frame &&
-            nearly_equal(
-                preview->layers[1].opacity,
-                preview->layer2_opacity,
-                0.000001) &&
-            nearly_equal(
-                exported->layers[1].opacity,
-                exported->layer2_opacity,
-                0.000001),
-        "indexed Layer 2 view matches the compatibility diagnostics"
-    );
 }
 
 static void compare_states(
@@ -218,67 +212,6 @@ static void compare_states(
             preview->range_out_frame == exported->range_out_frame,
         "normalized export range matches"
     );
-
-    check(
-        preview->layer2_start_frame == exported->layer2_start_frame,
-        "normalized Layer 2 start matches"
-    );
-
-    check(
-        preview->layer2_timeline_length == exported->layer2_timeline_length,
-        "Layer 2 playlist length matches"
-    );
-
-    check(
-        preview->layer2_is_still == exported->layer2_is_still,
-        "Layer 2 timed/still classification matches"
-    );
-
-    check(
-        preview->layer2_alpha_mode == exported->layer2_alpha_mode,
-        "Layer 2 alpha mode matches"
-    );
-
-    check(
-        nearly_equal(
-            preview->layer2_base_width,
-            exported->layer2_base_width,
-            0.000001) &&
-        nearly_equal(
-            preview->layer2_base_height,
-            exported->layer2_base_height,
-            0.000001),
-        "Layer 2 base presentation size matches"
-    );
-
-    check(
-        nearly_equal(preview->layer2_x, exported->layer2_x, 0.000001) &&
-            nearly_equal(preview->layer2_y, exported->layer2_y, 0.000001) &&
-            nearly_equal(preview->layer2_width, exported->layer2_width, 0.000001) &&
-            nearly_equal(preview->layer2_height, exported->layer2_height, 0.000001) &&
-            nearly_equal(preview->layer2_opacity, exported->layer2_opacity, 0.000001),
-        "Layer 2 composite rectangle and opacity match"
-    );
-
-    check(
-        preview->base_has_audio == exported->base_has_audio &&
-            preview->layer2_has_audio == exported->layer2_has_audio,
-        "track audio presence matches"
-    );
-
-    check(
-        nearly_equal(preview->base_audio_gain, exported->base_audio_gain, 0.000001) &&
-            nearly_equal(preview->layer2_audio_gain, exported->layer2_audio_gain, 0.000001),
-        "effective track gains match"
-    );
-
-    if (preview->layer2_is_still || exported->layer2_is_still) {
-        check(
-            preview->layer2_timeline_length == preview->composition_length &&
-                exported->layer2_timeline_length == exported->composition_length,
-            "held still reaches the composition final frame"
-        );
-    }
 }
 
 static int run_parity_check(
@@ -558,24 +491,7 @@ static void run_three_layer_still_case(
         "Layer 3 alpha mode round trips"
     );
 
-    if (run_parity_check(0, length - 1)) {
-        MltCompositionDerivedState preview = {0};
-        MltCompositionDerivedState exported = {0};
-        char error[512] = "";
-        if (mlt_bridge_debug_composition_parity(
-                0,
-                length - 1,
-                &preview,
-                &exported,
-                error,
-                (int)sizeof(error))) {
-            check(
-                preview.layers[2].timeline_length == preview.composition_length &&
-                    exported.layers[2].timeline_length == exported.composition_length,
-                "held Layer 3 reaches the composition final frame"
-            );
-        }
-    }
+    run_parity_check(0, length - 1);
 }
 
 int main(

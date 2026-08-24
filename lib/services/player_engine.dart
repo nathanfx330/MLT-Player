@@ -13,91 +13,215 @@ enum PlaybackRepeatMode { off, loop }
 
 enum ExportRangeMode { wholeMovie, inOut }
 
+const int _baseLayerIndex = 0;
+const int _secondaryLayerIndex = 1;
+const int _tertiaryLayerIndex = 2;
+const int _layerSlotCount = 3;
+
+@immutable
+class CompositionLayerState {
+  const CompositionLayerState({
+    required this.index,
+    required this.present,
+    required this.path,
+    required this.startFrame,
+    required this.opacity,
+    required this.x,
+    required this.y,
+    required this.scale,
+    required this.visible,
+    required this.isStill,
+    required this.hasAlpha,
+    required this.alphaMode,
+    required this.hasAudio,
+    required this.audioGain,
+  });
+
+  final int index;
+  final bool present;
+  final String? path;
+  final int? startFrame;
+  final double opacity;
+  final double x;
+  final double y;
+  final double scale;
+  final bool visible;
+  final bool isStill;
+  final bool hasAlpha;
+  final int alphaMode;
+  final bool hasAudio;
+  final double audioGain;
+}
+
+/// Immutable per-layer snapshot used by clip/composition Undo and Redo.
+///
+/// Dart intentionally uses the same 0/1/2 slot numbering as native:
+/// Layer 1/base, Layer 2, Layer 3. Keeping slot identity aligned across the
+/// FFI boundary avoids hidden +1/-1 translations.
+class _LayerEditState {
+  const _LayerEditState({
+    required this.present,
+    required this.path,
+    required this.startFrame,
+    required this.opacity,
+    required this.x,
+    required this.y,
+    required this.scale,
+    required this.visible,
+    required this.isStill,
+    required this.hasAlpha,
+    required this.alphaMode,
+    required this.hasAudio,
+    required this.audioGain,
+  });
+
+  final bool present;
+  final String? path;
+  final int? startFrame;
+  final double opacity;
+  final double x;
+  final double y;
+  final double scale;
+  final bool visible;
+  final bool isStill;
+  final bool hasAlpha;
+  final int alphaMode;
+  final bool hasAudio;
+  final double audioGain;
+
+  static bool _near(double a, double b) => (a - b).abs() < 0.000001;
+
+  bool sameAs(_LayerEditState other) =>
+      present == other.present &&
+      path == other.path &&
+      startFrame == other.startFrame &&
+      _near(opacity, other.opacity) &&
+      _near(x, other.x) &&
+      _near(y, other.y) &&
+      _near(scale, other.scale) &&
+      visible == other.visible &&
+      isStill == other.isStill &&
+      hasAlpha == other.hasAlpha &&
+      alphaMode == other.alphaMode &&
+      hasAudio == other.hasAudio &&
+      _near(audioGain, other.audioGain);
+}
+
+/// Mutable runtime state for one fixed composition slot.
+class _LayerRuntimeState {
+  bool present = false;
+
+  String? _path;
+  String? get path => _path;
+  set path(String? value) {
+    _path = value;
+    present = value != null;
+  }
+
+  int? startFrame;
+  double opacity = 1.0;
+  double x = 0.0;
+  double y = 0.0;
+  double scale = 1.0;
+  bool visible = true;
+  bool isStill = false;
+  bool hasAlpha = false;
+  int alphaMode = 0;
+  bool hasAudio = false;
+  double audioGain = 1.0;
+
+  void reset() {
+    present = false;
+    _path = null;
+    startFrame = null;
+    opacity = 1.0;
+    x = 0.0;
+    y = 0.0;
+    scale = 1.0;
+    visible = true;
+    isStill = false;
+    hasAlpha = false;
+    alphaMode = 0;
+    hasAudio = false;
+    audioGain = 1.0;
+  }
+
+  _LayerEditState snapshot() {
+    return _LayerEditState(
+      present: present,
+      path: path,
+      startFrame: startFrame,
+      opacity: opacity,
+      x: x,
+      y: y,
+      scale: scale,
+      visible: visible,
+      isStill: isStill,
+      hasAlpha: hasAlpha,
+      alphaMode: alphaMode,
+      hasAudio: hasAudio,
+      audioGain: audioGain,
+    );
+  }
+
+  void assign(_LayerEditState state) {
+    _path = state.path;
+    present = state.present;
+    startFrame = state.startFrame;
+    opacity = state.opacity;
+    x = state.x;
+    y = state.y;
+    scale = state.scale;
+    visible = state.visible;
+    isStill = state.isStill;
+    hasAlpha = state.hasAlpha;
+    alphaMode = state.alphaMode;
+    hasAudio = state.hasAudio;
+    audioGain = state.audioGain;
+  }
+}
+
 /// Immutable snapshot of the editable clip and composition state.
 ///
-/// POC 10 hardening extends the original trim/selection history so Undo/Redo
-/// also owns Layer 2 topology and the live composition controls. Source/media
-/// metadata that can be re-derived after a rebuild is deliberately excluded.
+/// The layer model is fixed-slot and index-aligned with native. Source/media
+/// metadata that can be re-derived after a rebuild is still captured here so
+/// a state round-trip can prove that no layer property silently disappears
+/// during Undo/Redo or future model refactors.
 class _ClipEditState {
-  const _ClipEditState({
+  _ClipEditState({
     required this.trimInFrame,
     required this.trimOutFrame,
     required this.inFrame,
     required this.outFrame,
-    required this.secondaryTrackPath,
-    required this.secondaryTrackStartFrame,
-    required this.secondaryTrackOpacity,
-    required this.secondaryTrackX,
-    required this.secondaryTrackY,
-    required this.secondaryTrackScale,
-    required this.secondaryTrackVisible,
-    required this.secondaryTrackAlphaMode,
-    required this.tertiaryTrackPath,
-    required this.tertiaryTrackStartFrame,
-    required this.tertiaryTrackOpacity,
-    required this.tertiaryTrackX,
-    required this.tertiaryTrackY,
-    required this.tertiaryTrackScale,
-    required this.tertiaryTrackVisible,
-    required this.tertiaryTrackAlphaMode,
-    required this.primaryTrackAudioGain,
-    required this.secondaryTrackAudioGain,
-    required this.tertiaryTrackAudioGain,
-  });
+    required List<_LayerEditState> layers,
+  })  : assert(layers.length == _layerSlotCount),
+        layers = List<_LayerEditState>.unmodifiable(layers);
 
   final int trimInFrame;
   final int trimOutFrame;
   final int? inFrame;
   final int? outFrame;
+  final List<_LayerEditState> layers;
 
-  final String? secondaryTrackPath;
-  final int? secondaryTrackStartFrame;
-  final double secondaryTrackOpacity;
-  final double secondaryTrackX;
-  final double secondaryTrackY;
-  final double secondaryTrackScale;
-  final bool secondaryTrackVisible;
-  final int secondaryTrackAlphaMode;
+  static bool _near(double a, double b) => _LayerEditState._near(a, b);
 
-  final String? tertiaryTrackPath;
-  final int? tertiaryTrackStartFrame;
-  final double tertiaryTrackOpacity;
-  final double tertiaryTrackX;
-  final double tertiaryTrackY;
-  final double tertiaryTrackScale;
-  final bool tertiaryTrackVisible;
-  final int tertiaryTrackAlphaMode;
+  bool sameAs(_ClipEditState other) {
+    if (trimInFrame != other.trimInFrame ||
+        trimOutFrame != other.trimOutFrame ||
+        inFrame != other.inFrame ||
+        outFrame != other.outFrame ||
+        layers.length != other.layers.length) {
+      return false;
+    }
 
-  final double primaryTrackAudioGain;
-  final double secondaryTrackAudioGain;
-  final double tertiaryTrackAudioGain;
+    for (var index = 0; index < layers.length; index++) {
+      if (!layers[index].sameAs(other.layers[index])) {
+        return false;
+      }
+    }
 
-  static bool _near(double a, double b) => (a - b).abs() < 0.000001;
-
-  bool sameAs(_ClipEditState other) =>
-      trimInFrame == other.trimInFrame &&
-      trimOutFrame == other.trimOutFrame &&
-      inFrame == other.inFrame &&
-      outFrame == other.outFrame &&
-      secondaryTrackPath == other.secondaryTrackPath &&
-      secondaryTrackStartFrame == other.secondaryTrackStartFrame &&
-      _near(secondaryTrackOpacity, other.secondaryTrackOpacity) &&
-      _near(secondaryTrackX, other.secondaryTrackX) &&
-      _near(secondaryTrackY, other.secondaryTrackY) &&
-      _near(secondaryTrackScale, other.secondaryTrackScale) &&
-      secondaryTrackVisible == other.secondaryTrackVisible &&
-      secondaryTrackAlphaMode == other.secondaryTrackAlphaMode &&
-      tertiaryTrackPath == other.tertiaryTrackPath &&
-      tertiaryTrackStartFrame == other.tertiaryTrackStartFrame &&
-      _near(tertiaryTrackOpacity, other.tertiaryTrackOpacity) &&
-      _near(tertiaryTrackX, other.tertiaryTrackX) &&
-      _near(tertiaryTrackY, other.tertiaryTrackY) &&
-      _near(tertiaryTrackScale, other.tertiaryTrackScale) &&
-      tertiaryTrackVisible == other.tertiaryTrackVisible &&
-      tertiaryTrackAlphaMode == other.tertiaryTrackAlphaMode &&
-      _near(primaryTrackAudioGain, other.primaryTrackAudioGain) &&
-      _near(secondaryTrackAudioGain, other.secondaryTrackAudioGain) &&
-      _near(tertiaryTrackAudioGain, other.tertiaryTrackAudioGain);
+    return true;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -106,19 +230,26 @@ class _ClipEditState {
 
 /// Owns the native player and the polling loop, and nothing about layout.
 class PlayerEngine extends ChangeNotifier {
-  PlayerEngine(this.bridge, {required this.initialized}) {
+  PlayerEngine(this.bridge, {required this.initialized})
+      : _editStateTestMode = false {
     _volume = initialized ? bridge.volume : 1.0;
     _playAllFrames = initialized ? bridge.playAllFrames : false;
     _poll = Timer.periodic(const Duration(milliseconds: 100), (_) => _tick());
   }
+
+  @visibleForTesting
+  PlayerEngine.forEditStateTesting()
+      : initialized = false,
+        _editStateTestMode = true;
 
   static const String _invalidInOutExportIssue =
       'In/Out export requires both an In point and an Out point.';
   static const String _invalidExportRangeIssue =
       'The requested export range is invalid.';
 
-  final MltBridge bridge;
+  late final MltBridge bridge;
   final bool initialized;
+  final bool _editStateTestMode;
 
   Timer? _poll;
 
@@ -127,32 +258,11 @@ class PlayerEngine extends ChangeNotifier {
 
   bool _opening = false;
   bool _addingTrack = false;
-  String? _secondaryTrackPath;
-  int? _secondaryTrackStartFrame;
-  double _secondaryTrackOpacity = 1.0;
-  double _secondaryTrackX = 0.0;
-  double _secondaryTrackY = 0.0;
-  double _secondaryTrackScale = 1.0;
-  bool _secondaryTrackVisible = true;
-  bool _secondaryTrackIsStill = false;
-  bool _secondaryTrackHasAlpha = false;
-  int _secondaryTrackAlphaMode = 0;
-  double _primaryTrackAudioGain = 1.0;
-  double _secondaryTrackAudioGain = 1.0;
-  bool _secondaryTrackHasAudio = false;
-
-  String? _tertiaryTrackPath;
-  int? _tertiaryTrackStartFrame;
-  double _tertiaryTrackOpacity = 1.0;
-  double _tertiaryTrackX = 0.0;
-  double _tertiaryTrackY = 0.0;
-  double _tertiaryTrackScale = 1.0;
-  bool _tertiaryTrackVisible = true;
-  bool _tertiaryTrackIsStill = false;
-  bool _tertiaryTrackHasAlpha = false;
-  int _tertiaryTrackAlphaMode = 0;
-  double _tertiaryTrackAudioGain = 1.0;
-  bool _tertiaryTrackHasAudio = false;
+  final List<_LayerRuntimeState> _layers = List<_LayerRuntimeState>.generate(
+    _layerSlotCount,
+    (_) => _LayerRuntimeState(),
+    growable: false,
+  );
 
   bool _playing = false;
   bool _playingSelection = false;
@@ -203,44 +313,62 @@ class PlayerEngine extends ChangeNotifier {
   String? get error => _error;
   bool get opening => _opening;
   bool get addingTrack => _addingTrack;
-  String? get secondaryTrackPath => _secondaryTrackPath;
-  int? get secondaryTrackStartFrame => _secondaryTrackStartFrame;
-  double get secondaryTrackOpacity => _secondaryTrackOpacity;
-  double get secondaryTrackX => _secondaryTrackX;
-  double get secondaryTrackY => _secondaryTrackY;
-  double get secondaryTrackScale => _secondaryTrackScale;
-  bool get secondaryTrackVisible => _secondaryTrackVisible;
-  bool get secondaryTrackIsStill => _secondaryTrackIsStill;
-  bool get secondaryTrackHasAlpha => _secondaryTrackHasAlpha;
-  int get secondaryTrackAlphaMode => _secondaryTrackAlphaMode;
-  double get primaryTrackAudioGain => _primaryTrackAudioGain;
-  double get secondaryTrackAudioGain => _secondaryTrackAudioGain;
-  bool get secondaryTrackHasAudio => _secondaryTrackHasAudio;
-  bool get hasSecondaryTrack => _secondaryTrackPath != null;
 
-  String? get tertiaryTrackPath => _tertiaryTrackPath;
-  int? get tertiaryTrackStartFrame => _tertiaryTrackStartFrame;
-  double get tertiaryTrackOpacity => _tertiaryTrackOpacity;
-  double get tertiaryTrackX => _tertiaryTrackX;
-  double get tertiaryTrackY => _tertiaryTrackY;
-  double get tertiaryTrackScale => _tertiaryTrackScale;
-  bool get tertiaryTrackVisible => _tertiaryTrackVisible;
-  bool get tertiaryTrackIsStill => _tertiaryTrackIsStill;
-  bool get tertiaryTrackHasAlpha => _tertiaryTrackHasAlpha;
-  int get tertiaryTrackAlphaMode => _tertiaryTrackAlphaMode;
-  double get tertiaryTrackAudioGain => _tertiaryTrackAudioGain;
-  bool get tertiaryTrackHasAudio => _tertiaryTrackHasAudio;
-  bool get hasTertiaryTrack => _tertiaryTrackPath != null;
+  /// Fixed composition slots aligned with the native layer ABI.
+  ///
+  /// Slot 0 = Layer 1/base, slot 1 = Layer 2, slot 2 = Layer 3.
+  /// The returned list always contains all three slots; absent overlays keep
+  /// their slot identity with `present == false`.
+  List<CompositionLayerState> get layerStates =>
+      List<CompositionLayerState>.unmodifiable(
+        List<CompositionLayerState>.generate(
+          _layerSlotCount,
+          layerState,
+          growable: false,
+        ),
+      );
 
-  int get trackCount => _media == null
-      ? 0
-      : (hasTertiaryTrack ? 3 : (hasSecondaryTrack ? 2 : 1));
+  CompositionLayerState layerState(int layerIndex) {
+    if (layerIndex < 0 || layerIndex >= _layerSlotCount) {
+      throw RangeError.range(
+        layerIndex,
+        0,
+        _layerSlotCount - 1,
+        'layerIndex',
+      );
+    }
+
+    final layer = _layers[layerIndex];
+    return CompositionLayerState(
+      index: layerIndex,
+      present: layer.present,
+      path: layer.path,
+      startFrame: layer.startFrame,
+      opacity: layer.opacity,
+      x: layer.x,
+      y: layer.y,
+      scale: layer.scale,
+      visible: layer.visible,
+      isStill: layer.isStill,
+      hasAlpha: layer.hasAlpha,
+      alphaMode: layer.alphaMode,
+      hasAudio: layer.hasAudio,
+      audioGain: layer.audioGain,
+    );
+  }
+
+  bool hasLayer(int layerIndex) =>
+      layerIndex >= 0 &&
+      layerIndex < _layerSlotCount &&
+      _layers[layerIndex].present;
+
+  int get trackCount =>
+      _layers.where((_LayerRuntimeState layer) => layer.present).length;
   bool get exportsAvailable =>
       _media != null && !_media!.isStill && _media!.frames > 0;
-  bool get exportHasAudio =>
-      (_media?.hasAudio ?? false) ||
-      (hasSecondaryTrack && _secondaryTrackHasAudio) ||
-      (hasTertiaryTrack && _tertiaryTrackHasAudio);
+  bool get exportHasAudio => _layers.any(
+        (_LayerRuntimeState layer) => layer.present && layer.hasAudio,
+      );
 
   bool get playing => _playing;
   bool get playingSelection => _playingSelection;
@@ -369,27 +497,184 @@ class PlayerEngine extends ChangeNotifier {
       trimOutFrame: _trimOutFrame,
       inFrame: _inFrame,
       outFrame: _outFrame,
-      secondaryTrackPath: _secondaryTrackPath,
-      secondaryTrackStartFrame: _secondaryTrackStartFrame,
-      secondaryTrackOpacity: _secondaryTrackOpacity,
-      secondaryTrackX: _secondaryTrackX,
-      secondaryTrackY: _secondaryTrackY,
-      secondaryTrackScale: _secondaryTrackScale,
-      secondaryTrackVisible: _secondaryTrackVisible,
-      secondaryTrackAlphaMode: _secondaryTrackAlphaMode,
-      tertiaryTrackPath: _tertiaryTrackPath,
-      tertiaryTrackStartFrame: _tertiaryTrackStartFrame,
-      tertiaryTrackOpacity: _tertiaryTrackOpacity,
-      tertiaryTrackX: _tertiaryTrackX,
-      tertiaryTrackY: _tertiaryTrackY,
-      tertiaryTrackScale: _tertiaryTrackScale,
-      tertiaryTrackVisible: _tertiaryTrackVisible,
-      tertiaryTrackAlphaMode: _tertiaryTrackAlphaMode,
-      primaryTrackAudioGain: _primaryTrackAudioGain,
-      secondaryTrackAudioGain: _secondaryTrackAudioGain,
-      tertiaryTrackAudioGain: _tertiaryTrackAudioGain,
+      layers: _layers
+          .map((_LayerRuntimeState layer) => layer.snapshot())
+          .toList(growable: false),
     );
   }
+
+  void _assignEditStateFields(_ClipEditState state) {
+    _trimInFrame = state.trimInFrame;
+    _trimOutFrame = state.trimOutFrame;
+    _inFrame = state.inFrame;
+    _outFrame = state.outFrame;
+
+    if (_editStateTestMode) {
+      for (var index = 0; index < _layerSlotCount; index++) {
+        _layers[index].assign(state.layers[index]);
+      }
+      return;
+    }
+
+    // Base source identity and media metadata belong to the currently-open
+    // MediaInfo/native producer, not to clip edit history. Only its
+    // composition-owned audio gain is restored from slot 0. Overlay slots are
+    // fully edit-owned and can be assigned from history.
+    _layers[_baseLayerIndex].audioGain =
+        state.layers[_baseLayerIndex].audioGain;
+    for (var index = _secondaryLayerIndex; index < _layerSlotCount; index++) {
+      _layers[index].assign(state.layers[index]);
+    }
+  }
+
+  void _resetLayerStates() {
+    for (final layer in _layers) {
+      layer.reset();
+    }
+  }
+
+  void _syncBaseLayerFromMedia(String path) {
+    final media = _media;
+    if (media == null) {
+      _layers[_baseLayerIndex].reset();
+      return;
+    }
+
+    final base = _layers[_baseLayerIndex];
+    base.path = path;
+    base.startFrame = 0;
+    base.opacity = 1.0;
+    base.x = 0.0;
+    base.y = 0.0;
+    base.scale = 1.0;
+    base.visible = true;
+    base.isStill = media.isStill;
+    base.hasAlpha = false;
+    base.alphaMode = 0;
+    base.hasAudio = media.hasAudio;
+    base.audioGain =
+        bridge.trackAudioGain(_baseLayerIndex).clamp(0.0, 1.0).toDouble();
+  }
+
+  @visibleForTesting
+  static Object editStateForTesting({
+    required int trimInFrame,
+    required int trimOutFrame,
+    required int? inFrame,
+    required int? outFrame,
+    required List<CompositionLayerState> layers,
+  }) {
+    if (layers.length != _layerSlotCount) {
+      throw ArgumentError.value(
+        layers.length,
+        'layers.length',
+        'Edit-state tests require exactly $_layerSlotCount indexed slots.',
+      );
+    }
+
+    for (var index = 0; index < _layerSlotCount; index++) {
+      if (layers[index].index != index) {
+        throw ArgumentError(
+          'Layer slot $index contains state for index ${layers[index].index}.',
+        );
+      }
+    }
+
+    return _ClipEditState(
+      trimInFrame: trimInFrame,
+      trimOutFrame: trimOutFrame,
+      inFrame: inFrame,
+      outFrame: outFrame,
+      layers: layers
+          .map(
+            (CompositionLayerState layer) => _LayerEditState(
+              present: layer.present,
+              path: layer.path,
+              startFrame: layer.startFrame,
+              opacity: layer.opacity,
+              x: layer.x,
+              y: layer.y,
+              scale: layer.scale,
+              visible: layer.visible,
+              isStill: layer.isStill,
+              hasAlpha: layer.hasAlpha,
+              alphaMode: layer.alphaMode,
+              hasAudio: layer.hasAudio,
+              audioGain: layer.audioGain,
+            ),
+          )
+          .toList(growable: false),
+    );
+  }
+
+  @visibleForTesting
+  static Map<String, Object?> editStateValuesForTesting(Object value) {
+    final state = value as _ClipEditState;
+    return <String, Object?>{
+      'trimInFrame': state.trimInFrame,
+      'trimOutFrame': state.trimOutFrame,
+      'inFrame': state.inFrame,
+      'outFrame': state.outFrame,
+      'layers': state.layers
+          .map(
+            (_LayerEditState layer) => <String, Object?>{
+              'present': layer.present,
+              'path': layer.path,
+              'startFrame': layer.startFrame,
+              'opacity': layer.opacity,
+              'x': layer.x,
+              'y': layer.y,
+              'scale': layer.scale,
+              'visible': layer.visible,
+              'isStill': layer.isStill,
+              'hasAlpha': layer.hasAlpha,
+              'alphaMode': layer.alphaMode,
+              'hasAudio': layer.hasAudio,
+              'audioGain': layer.audioGain,
+            },
+          )
+          .toList(growable: false),
+    };
+  }
+
+  @visibleForTesting
+  Object captureEditStateForTesting() => _captureEditState();
+
+  @visibleForTesting
+  Future<void> applyEditStateForTesting(Object value) async {
+    if (!_editStateTestMode) {
+      throw StateError('applyEditStateForTesting requires the test constructor.');
+    }
+
+    final restored = await _applyEditState(
+      value as _ClipEditState,
+      basePath: '',
+      playheadFrame: 0,
+    );
+
+    if (!restored) {
+      throw StateError(_error ?? 'Test edit state could not be restored.');
+    }
+  }
+
+  @visibleForTesting
+  void recordCurrentEditStateForTesting() {
+    if (!_editStateTestMode) {
+      throw StateError(
+        'recordCurrentEditStateForTesting requires the test constructor.',
+      );
+    }
+
+    _recordEditBeforeChange(_captureEditState());
+  }
+
+  @visibleForTesting
+  Future<void> undoEditStateForTesting() =>
+      _moveEditHistory(undoing: true);
+
+  @visibleForTesting
+  Future<void> redoEditStateForTesting() =>
+      _moveEditHistory(undoing: false);
 
   void _finishContinuousEditGroup() {
     _continuousEditTimer?.cancel();
@@ -481,54 +766,159 @@ class PlayerEngine extends ChangeNotifier {
     }
   }
 
+  bool _canRestoreOnlyTertiary(_ClipEditState state) {
+    return _layers[_tertiaryLayerIndex].path == null &&
+        state.layers[_tertiaryLayerIndex].path != null &&
+        hasLayer(_secondaryLayerIndex) &&
+        state.layers[_secondaryLayerIndex].path == _layers[_secondaryLayerIndex].path &&
+        state.layers[_secondaryLayerIndex].startFrame == _layers[_secondaryLayerIndex].startFrame &&
+        _ClipEditState._near(
+          state.layers[_baseLayerIndex].audioGain,
+          _layers[_baseLayerIndex].audioGain,
+        ) &&
+        _ClipEditState._near(
+          state.layers[_secondaryLayerIndex].audioGain,
+          _layers[_secondaryLayerIndex].audioGain,
+        ) &&
+        _ClipEditState._near(
+          state.layers[_secondaryLayerIndex].opacity,
+          _layers[_secondaryLayerIndex].opacity,
+        ) &&
+        _ClipEditState._near(state.layers[_secondaryLayerIndex].x, _layers[_secondaryLayerIndex].x) &&
+        _ClipEditState._near(state.layers[_secondaryLayerIndex].y, _layers[_secondaryLayerIndex].y) &&
+        _ClipEditState._near(
+          state.layers[_secondaryLayerIndex].scale,
+          _layers[_secondaryLayerIndex].scale,
+        ) &&
+        state.layers[_secondaryLayerIndex].visible == _layers[_secondaryLayerIndex].visible &&
+        state.layers[_secondaryLayerIndex].alphaMode == _layers[_secondaryLayerIndex].alphaMode;
+  }
+
+  Future<bool> _restoreOnlyTertiary(_ClipEditState state) async {
+    final path = state.layers[_tertiaryLayerIndex].path;
+    if (path == null) {
+      return false;
+    }
+
+    final effectiveOpacity =
+        state.layers[_tertiaryLayerIndex].visible ? state.layers[_tertiaryLayerIndex].opacity : 0.0;
+
+    bool added;
+    try {
+      added = await addLayerWithStateOnHelperIsolate(
+        bridge.engineAddress,
+        2,
+        path,
+        startFrame: state.layers[_tertiaryLayerIndex].startFrame ?? 0,
+        x: state.layers[_tertiaryLayerIndex].x,
+        y: state.layers[_tertiaryLayerIndex].y,
+        scale: state.layers[_tertiaryLayerIndex].scale,
+        opacity: effectiveOpacity,
+        alphaMode: state.layers[_tertiaryLayerIndex].alphaMode,
+        audioGain: state.layers[_tertiaryLayerIndex].audioGain,
+      );
+    } catch (error) {
+      _error = error.toString();
+      return false;
+    }
+
+    if (!added) {
+      _error = bridge.lastError.isEmpty
+          ? 'MLT could not restore Layer 3.'
+          : bridge.lastError;
+      return false;
+    }
+
+    _layers[_tertiaryLayerIndex].path = path;
+    final nativeStart = bridge.layerStartFrame(2);
+    _layers[_tertiaryLayerIndex].startFrame =
+        nativeStart >= 0 ? nativeStart : state.layers[_tertiaryLayerIndex].startFrame;
+    _layers[_tertiaryLayerIndex].opacity = state.layers[_tertiaryLayerIndex].opacity;
+    _layers[_tertiaryLayerIndex].visible = state.layers[_tertiaryLayerIndex].visible;
+    _layers[_tertiaryLayerIndex].x = bridge.layerX(2);
+    _layers[_tertiaryLayerIndex].y = bridge.layerY(2);
+    _layers[_tertiaryLayerIndex].scale = bridge.layerScale(2).clamp(0.10, 3.0).toDouble();
+    _layers[_tertiaryLayerIndex].isStill = bridge.layerIsStill(2);
+    _layers[_tertiaryLayerIndex].hasAlpha = bridge.layerHasAlpha(2);
+    _layers[_tertiaryLayerIndex].alphaMode = bridge.layerAlphaMode(2).clamp(0, 2).toInt();
+    _layers[_tertiaryLayerIndex].hasAudio = bridge.trackHasAudio(2);
+    _layers[_tertiaryLayerIndex].audioGain = _layers[_tertiaryLayerIndex].hasAudio
+        ? bridge.trackAudioGain(2).clamp(0.0, 1.0).toDouble()
+        : state.layers[_tertiaryLayerIndex].audioGain;
+
+    _restoreClipFields(state);
+    _error = null;
+    return true;
+  }
+
   Future<bool> _applyEditState(
     _ClipEditState state, {
     required String basePath,
     required int playheadFrame,
   }) async {
+    if (_editStateTestMode) {
+      _assignEditStateFields(state);
+      _error = null;
+      return true;
+    }
+
     final topologyChanged =
-        state.secondaryTrackPath != _secondaryTrackPath ||
-        state.tertiaryTrackPath != _tertiaryTrackPath ||
-        (state.secondaryTrackPath != null &&
-            state.secondaryTrackStartFrame != _secondaryTrackStartFrame) ||
-        (state.tertiaryTrackPath != null &&
-            state.tertiaryTrackStartFrame != _tertiaryTrackStartFrame);
+        state.layers[_secondaryLayerIndex].path != _layers[_secondaryLayerIndex].path ||
+        state.layers[_tertiaryLayerIndex].path != _layers[_tertiaryLayerIndex].path ||
+        (state.layers[_secondaryLayerIndex].path != null &&
+            state.layers[_secondaryLayerIndex].startFrame != _layers[_secondaryLayerIndex].startFrame) ||
+        (state.layers[_tertiaryLayerIndex].path != null &&
+            state.layers[_tertiaryLayerIndex].startFrame != _layers[_tertiaryLayerIndex].startFrame);
+
+    if (topologyChanged && _canRestoreOnlyTertiary(state)) {
+      final restored = await _runWithFrozenPreview(
+        () => _restoreOnlyTertiary(state),
+      );
+      if (restored) {
+        _assignEditStateFields(state);
+      }
+      return restored;
+    }
 
     if (topologyChanged) {
-      return _runWithFrozenPreview(
+      final restored = await _runWithFrozenPreview(
         () => _rebuildLayerStack(
           primaryPath: basePath,
-          secondaryPath: state.secondaryTrackPath,
-          secondaryStartFrame: state.secondaryTrackStartFrame,
-          tertiaryPath: state.tertiaryTrackPath,
-          tertiaryStartFrame: state.tertiaryTrackStartFrame,
+          secondaryPath: state.layers[_secondaryLayerIndex].path,
+          secondaryStartFrame: state.layers[_secondaryLayerIndex].startFrame,
+          tertiaryPath: state.layers[_tertiaryLayerIndex].path,
+          tertiaryStartFrame: state.layers[_tertiaryLayerIndex].startFrame,
           playheadFrame: playheadFrame,
-          primaryGain: state.primaryTrackAudioGain,
-          secondaryGain: state.secondaryTrackAudioGain,
-          tertiaryGain: state.tertiaryTrackAudioGain,
-          secondaryOpacity: state.secondaryTrackOpacity,
-          secondaryX: state.secondaryTrackX,
-          secondaryY: state.secondaryTrackY,
-          secondaryScale: state.secondaryTrackScale,
-          secondaryVisible: state.secondaryTrackVisible,
-          secondaryAlphaMode: state.secondaryTrackAlphaMode,
-          tertiaryOpacity: state.tertiaryTrackOpacity,
-          tertiaryX: state.tertiaryTrackX,
-          tertiaryY: state.tertiaryTrackY,
-          tertiaryScale: state.tertiaryTrackScale,
-          tertiaryVisible: state.tertiaryTrackVisible,
-          tertiaryAlphaMode: state.tertiaryTrackAlphaMode,
+          primaryGain: state.layers[_baseLayerIndex].audioGain,
+          secondaryGain: state.layers[_secondaryLayerIndex].audioGain,
+          tertiaryGain: state.layers[_tertiaryLayerIndex].audioGain,
+          secondaryOpacity: state.layers[_secondaryLayerIndex].opacity,
+          secondaryX: state.layers[_secondaryLayerIndex].x,
+          secondaryY: state.layers[_secondaryLayerIndex].y,
+          secondaryScale: state.layers[_secondaryLayerIndex].scale,
+          secondaryVisible: state.layers[_secondaryLayerIndex].visible,
+          secondaryAlphaMode: state.layers[_secondaryLayerIndex].alphaMode,
+          tertiaryOpacity: state.layers[_tertiaryLayerIndex].opacity,
+          tertiaryX: state.layers[_tertiaryLayerIndex].x,
+          tertiaryY: state.layers[_tertiaryLayerIndex].y,
+          tertiaryScale: state.layers[_tertiaryLayerIndex].scale,
+          tertiaryVisible: state.layers[_tertiaryLayerIndex].visible,
+          tertiaryAlphaMode: state.layers[_tertiaryLayerIndex].alphaMode,
           editState: state,
           undoState: const <_ClipEditState>[],
           redoState: const <_ClipEditState>[],
         ),
       );
+      if (restored) {
+        _assignEditStateFields(state);
+      }
+      return restored;
     }
 
     _restoreClipFields(state);
 
     if (trackHasAudio(0)) {
-      if (!bridge.setTrackAudioGain(0, state.primaryTrackAudioGain)) {
+      if (!bridge.setTrackAudioGain(0, state.layers[_baseLayerIndex].audioGain)) {
         _error = bridge.lastError.isEmpty
             ? 'MLT could not restore Layer 1 audio level.'
             : bridge.lastError;
@@ -537,11 +927,11 @@ class PlayerEngine extends ChangeNotifier {
       _syncTrackAudioGain(0);
     }
 
-    if (state.secondaryTrackPath != null && hasSecondaryTrack) {
+    if (state.layers[_secondaryLayerIndex].path != null && hasLayer(_secondaryLayerIndex)) {
       if (!bridge.setSecondaryGeometry(
-        state.secondaryTrackX,
-        state.secondaryTrackY,
-        state.secondaryTrackScale,
+        state.layers[_secondaryLayerIndex].x,
+        state.layers[_secondaryLayerIndex].y,
+        state.layers[_secondaryLayerIndex].scale,
       )) {
         _error = bridge.lastError.isEmpty
             ? 'MLT could not restore Layer 2 geometry.'
@@ -550,8 +940,8 @@ class PlayerEngine extends ChangeNotifier {
       }
       _syncSecondaryGeometry();
 
-      final effectiveOpacity = state.secondaryTrackVisible
-          ? state.secondaryTrackOpacity
+      final effectiveOpacity = state.layers[_secondaryLayerIndex].visible
+          ? state.layers[_secondaryLayerIndex].opacity
           : 0.0;
       if (!bridge.setSecondaryOpacity(effectiveOpacity)) {
         _error = bridge.lastError.isEmpty
@@ -559,20 +949,20 @@ class PlayerEngine extends ChangeNotifier {
             : bridge.lastError;
         return false;
       }
-      _secondaryTrackOpacity = state.secondaryTrackOpacity;
-      _secondaryTrackVisible = state.secondaryTrackVisible;
+      _layers[_secondaryLayerIndex].opacity = state.layers[_secondaryLayerIndex].opacity;
+      _layers[_secondaryLayerIndex].visible = state.layers[_secondaryLayerIndex].visible;
 
-      if (!bridge.setSecondaryAlphaMode(state.secondaryTrackAlphaMode)) {
+      if (!bridge.setSecondaryAlphaMode(state.layers[_secondaryLayerIndex].alphaMode)) {
         _error = bridge.lastError.isEmpty
             ? 'MLT could not restore Layer 2 alpha interpretation.'
             : bridge.lastError;
         return false;
       }
-      _secondaryTrackAlphaMode =
+      _layers[_secondaryLayerIndex].alphaMode =
           bridge.secondaryAlphaMode.clamp(0, 2).toInt();
 
       if (trackHasAudio(1)) {
-        if (!bridge.setTrackAudioGain(1, state.secondaryTrackAudioGain)) {
+        if (!bridge.setTrackAudioGain(1, state.layers[_secondaryLayerIndex].audioGain)) {
           _error = bridge.lastError.isEmpty
               ? 'MLT could not restore Layer 2 audio level.'
               : bridge.lastError;
@@ -582,12 +972,12 @@ class PlayerEngine extends ChangeNotifier {
       }
     }
 
-    if (state.tertiaryTrackPath != null && hasTertiaryTrack) {
+    if (state.layers[_tertiaryLayerIndex].path != null && hasLayer(_tertiaryLayerIndex)) {
       if (!bridge.setLayerGeometry(
         2,
-        state.tertiaryTrackX,
-        state.tertiaryTrackY,
-        state.tertiaryTrackScale,
+        state.layers[_tertiaryLayerIndex].x,
+        state.layers[_tertiaryLayerIndex].y,
+        state.layers[_tertiaryLayerIndex].scale,
       )) {
         _error = bridge.lastError.isEmpty
             ? 'MLT could not restore Layer 3 geometry.'
@@ -596,8 +986,8 @@ class PlayerEngine extends ChangeNotifier {
       }
       _syncTertiaryGeometry();
 
-      final effectiveOpacity = state.tertiaryTrackVisible
-          ? state.tertiaryTrackOpacity
+      final effectiveOpacity = state.layers[_tertiaryLayerIndex].visible
+          ? state.layers[_tertiaryLayerIndex].opacity
           : 0.0;
       if (!bridge.setLayerOpacity(2, effectiveOpacity)) {
         _error = bridge.lastError.isEmpty
@@ -605,19 +995,19 @@ class PlayerEngine extends ChangeNotifier {
             : bridge.lastError;
         return false;
       }
-      _tertiaryTrackOpacity = state.tertiaryTrackOpacity;
-      _tertiaryTrackVisible = state.tertiaryTrackVisible;
+      _layers[_tertiaryLayerIndex].opacity = state.layers[_tertiaryLayerIndex].opacity;
+      _layers[_tertiaryLayerIndex].visible = state.layers[_tertiaryLayerIndex].visible;
 
-      if (!bridge.setLayerAlphaMode(2, state.tertiaryTrackAlphaMode)) {
+      if (!bridge.setLayerAlphaMode(2, state.layers[_tertiaryLayerIndex].alphaMode)) {
         _error = bridge.lastError.isEmpty
             ? 'MLT could not restore Layer 3 alpha interpretation.'
             : bridge.lastError;
         return false;
       }
-      _tertiaryTrackAlphaMode = bridge.layerAlphaMode(2).clamp(0, 2).toInt();
+      _layers[_tertiaryLayerIndex].alphaMode = bridge.layerAlphaMode(2).clamp(0, 2).toInt();
 
       if (trackHasAudio(2)) {
-        if (!bridge.setTrackAudioGain(2, state.tertiaryTrackAudioGain)) {
+        if (!bridge.setTrackAudioGain(2, state.layers[_tertiaryLayerIndex].audioGain)) {
           _error = bridge.lastError.isEmpty
               ? 'MLT could not restore Layer 3 audio level.'
               : bridge.lastError;
@@ -627,6 +1017,7 @@ class PlayerEngine extends ChangeNotifier {
       }
     }
 
+    _assignEditStateFields(state);
     _error = null;
     return true;
   }
@@ -667,7 +1058,8 @@ class PlayerEngine extends ChangeNotifier {
   }
 
   Future<void> _moveEditHistory({required bool undoing}) async {
-    if (_restoringEditState || _media == null) {
+    if (_restoringEditState ||
+        (!_editStateTestMode && _media == null)) {
       return;
     }
 
@@ -695,8 +1087,9 @@ class PlayerEngine extends ChangeNotifier {
       desiredUndo.add(current);
     }
 
-    final basePath = _media!.path;
-    final playheadFrame = bridge.positionFrame;
+    final basePath = _editStateTestMode ? '' : _media!.path;
+    final playheadFrame =
+        _editStateTestMode ? 0 : bridge.positionFrame;
 
     _restoringEditState = true;
     notifyListeners();
@@ -1445,31 +1838,7 @@ class PlayerEngine extends ChangeNotifier {
     _finishContinuousEditGroup();
     _opening = true;
     _addingTrack = false;
-    _secondaryTrackPath = null;
-    _secondaryTrackStartFrame = null;
-    _secondaryTrackOpacity = 1.0;
-    _secondaryTrackX = 0.0;
-    _secondaryTrackY = 0.0;
-    _secondaryTrackScale = 1.0;
-    _secondaryTrackVisible = true;
-    _secondaryTrackIsStill = false;
-    _secondaryTrackHasAlpha = false;
-    _secondaryTrackAlphaMode = 0;
-    _primaryTrackAudioGain = 1.0;
-    _secondaryTrackAudioGain = 1.0;
-    _secondaryTrackHasAudio = false;
-    _tertiaryTrackPath = null;
-    _tertiaryTrackStartFrame = null;
-    _tertiaryTrackOpacity = 1.0;
-    _tertiaryTrackX = 0.0;
-    _tertiaryTrackY = 0.0;
-    _tertiaryTrackScale = 1.0;
-    _tertiaryTrackVisible = true;
-    _tertiaryTrackIsStill = false;
-    _tertiaryTrackHasAlpha = false;
-    _tertiaryTrackAlphaMode = 0;
-    _tertiaryTrackAudioGain = 1.0;
-    _tertiaryTrackHasAudio = false;
+    _resetLayerStates();
     _playingSelection = false;
     _exportRangeMode = ExportRangeMode.wholeMovie;
     _exportRangeModeExplicit = false;
@@ -1591,8 +1960,7 @@ class PlayerEngine extends ChangeNotifier {
     _volume = bridge.volume;
     _muted = _volume <= 0.0;
 
-    _primaryTrackAudioGain =
-        bridge.trackAudioGain(0).clamp(0.0, 1.0).toDouble();
+    _syncBaseLayerFromMedia(path);
 
     notifyListeners();
     return true;
@@ -1653,7 +2021,7 @@ class PlayerEngine extends ChangeNotifier {
       return false;
     }
 
-    final targetLayerIndex = hasSecondaryTrack ? 2 : 1;
+    final targetLayerIndex = hasLayer(_secondaryLayerIndex) ? 2 : 1;
 
     var clampedStart = startFrame;
     if (clampedStart < 0) {
@@ -1692,46 +2060,46 @@ class PlayerEngine extends ChangeNotifier {
     }
 
     if (targetLayerIndex == 1) {
-      _secondaryTrackPath = path;
+      _layers[_secondaryLayerIndex].path = path;
       final nativeStartFrame = bridge.layerStartFrame(1);
-      _secondaryTrackStartFrame =
+      _layers[_secondaryLayerIndex].startFrame =
           nativeStartFrame >= 0 ? nativeStartFrame : clampedStart;
-      _secondaryTrackOpacity =
+      _layers[_secondaryLayerIndex].opacity =
           bridge.layerOpacity(1).clamp(0.0, 1.0).toDouble();
-      _secondaryTrackX = bridge.layerX(1);
-      _secondaryTrackY = bridge.layerY(1);
-      _secondaryTrackScale = bridge.layerScale(1).clamp(0.10, 3.0).toDouble();
-      _secondaryTrackVisible = true;
-      _secondaryTrackIsStill = bridge.layerIsStill(1);
-      _secondaryTrackHasAlpha = bridge.layerHasAlpha(1);
-      _secondaryTrackAlphaMode = bridge.layerAlphaMode(1).clamp(0, 2).toInt();
-      _secondaryTrackHasAudio = bridge.trackHasAudio(1);
-      _secondaryTrackAudioGain =
+      _layers[_secondaryLayerIndex].x = bridge.layerX(1);
+      _layers[_secondaryLayerIndex].y = bridge.layerY(1);
+      _layers[_secondaryLayerIndex].scale = bridge.layerScale(1).clamp(0.10, 3.0).toDouble();
+      _layers[_secondaryLayerIndex].visible = true;
+      _layers[_secondaryLayerIndex].isStill = bridge.layerIsStill(1);
+      _layers[_secondaryLayerIndex].hasAlpha = bridge.layerHasAlpha(1);
+      _layers[_secondaryLayerIndex].alphaMode = bridge.layerAlphaMode(1).clamp(0, 2).toInt();
+      _layers[_secondaryLayerIndex].hasAudio = bridge.trackHasAudio(1);
+      _layers[_secondaryLayerIndex].audioGain =
           bridge.trackAudioGain(1).clamp(0.0, 1.0).toDouble();
     } else {
-      _tertiaryTrackPath = path;
+      _layers[_tertiaryLayerIndex].path = path;
       final nativeStartFrame = bridge.layerStartFrame(2);
-      _tertiaryTrackStartFrame =
+      _layers[_tertiaryLayerIndex].startFrame =
           nativeStartFrame >= 0 ? nativeStartFrame : clampedStart;
-      _tertiaryTrackOpacity =
+      _layers[_tertiaryLayerIndex].opacity =
           bridge.layerOpacity(2).clamp(0.0, 1.0).toDouble();
-      _tertiaryTrackX = bridge.layerX(2);
-      _tertiaryTrackY = bridge.layerY(2);
-      _tertiaryTrackScale = bridge.layerScale(2).clamp(0.10, 3.0).toDouble();
-      _tertiaryTrackVisible = true;
-      _tertiaryTrackIsStill = bridge.layerIsStill(2);
-      _tertiaryTrackHasAlpha = bridge.layerHasAlpha(2);
-      _tertiaryTrackAlphaMode = bridge.layerAlphaMode(2).clamp(0, 2).toInt();
-      _tertiaryTrackHasAudio = bridge.trackHasAudio(2);
-      _tertiaryTrackAudioGain =
+      _layers[_tertiaryLayerIndex].x = bridge.layerX(2);
+      _layers[_tertiaryLayerIndex].y = bridge.layerY(2);
+      _layers[_tertiaryLayerIndex].scale = bridge.layerScale(2).clamp(0.10, 3.0).toDouble();
+      _layers[_tertiaryLayerIndex].visible = true;
+      _layers[_tertiaryLayerIndex].isStill = bridge.layerIsStill(2);
+      _layers[_tertiaryLayerIndex].hasAlpha = bridge.layerHasAlpha(2);
+      _layers[_tertiaryLayerIndex].alphaMode = bridge.layerAlphaMode(2).clamp(0, 2).toInt();
+      _layers[_tertiaryLayerIndex].hasAudio = bridge.trackHasAudio(2);
+      _layers[_tertiaryLayerIndex].audioGain =
           bridge.trackAudioGain(2).clamp(0.0, 1.0).toDouble();
     }
 
-    _primaryTrackAudioGain =
+    _layers[_baseLayerIndex].audioGain =
         bridge.trackAudioGain(0).clamp(0.0, 1.0).toDouble();
-    if (hasSecondaryTrack) {
-      _secondaryTrackHasAudio = bridge.trackHasAudio(1);
-      _secondaryTrackAudioGain =
+    if (hasLayer(_secondaryLayerIndex)) {
+      _layers[_secondaryLayerIndex].hasAudio = bridge.trackHasAudio(1);
+      _layers[_secondaryLayerIndex].audioGain =
           bridge.trackAudioGain(1).clamp(0.0, 1.0).toDouble();
     }
 
@@ -1754,15 +2122,38 @@ class PlayerEngine extends ChangeNotifier {
   /// Remove Layer 2 while preserving the base movie and clip edit state.
   /// The operation is a normal Undo/Redo edit; Undo reconstructs the removed
   /// layer from the captured path, placement, geometry, alpha, and gain state.
-  Future<bool> removeSecondaryLayer() async {
+  Future<bool> removeLayer(int layerIndex) async {
+    if (layerIndex == _secondaryLayerIndex) {
+      return _removeSecondaryLayer();
+    }
+    if (layerIndex == _tertiaryLayerIndex) {
+      return _removeTertiaryLayer();
+    }
+    return false;
+  }
+
+  Future<bool> replaceLayerSource(int layerIndex, String path) async {
+    switch (layerIndex) {
+      case _baseLayerIndex:
+        return _replacePrimaryLayerSource(path);
+      case _secondaryLayerIndex:
+        return _replaceSecondaryLayerSource(path);
+      case _tertiaryLayerIndex:
+        return _replaceTertiaryLayerSource(path);
+      default:
+        return false;
+    }
+  }
+
+  Future<bool> _removeSecondaryLayer() async {
     final media = _media;
 
     if (!initialized ||
         media == null ||
         media.isStill ||
         !media.hasVideo ||
-        !hasSecondaryTrack ||
-        hasTertiaryTrack ||
+        !hasLayer(_secondaryLayerIndex) ||
+        hasLayer(_tertiaryLayerIndex) ||
         _opening ||
         _addingTrack ||
         _exporting ||
@@ -1786,7 +2177,7 @@ class PlayerEngine extends ChangeNotifier {
       tertiaryPath: null,
       tertiaryStartFrame: null,
       playheadFrame: playheadFrame,
-      primaryGain: before.primaryTrackAudioGain,
+      primaryGain: before.layers[_baseLayerIndex].audioGain,
       secondaryGain: 1.0,
       secondaryOpacity: 1.0,
       secondaryX: 0.0,
@@ -1822,15 +2213,15 @@ class PlayerEngine extends ChangeNotifier {
 
   /// Remove only the top Layer 3. Layer 2 remains in place and Undo restores
   /// Layer 3 with its exact source, start, geometry, opacity, alpha, and gain.
-  Future<bool> removeTertiaryLayer() async {
+  Future<bool> _removeTertiaryLayer() async {
     final media = _media;
 
     if (!initialized ||
         media == null ||
         media.isStill ||
         !media.hasVideo ||
-        !hasSecondaryTrack ||
-        !hasTertiaryTrack ||
+        !hasLayer(_secondaryLayerIndex) ||
+        !hasLayer(_tertiaryLayerIndex) ||
         _opening ||
         _addingTrack ||
         _exporting ||
@@ -1850,20 +2241,20 @@ class PlayerEngine extends ChangeNotifier {
     final removed = await _runWithFrozenPreview(
       () => _rebuildLayerStack(
         primaryPath: media.path,
-        secondaryPath: before.secondaryTrackPath,
-        secondaryStartFrame: before.secondaryTrackStartFrame,
+        secondaryPath: before.layers[_secondaryLayerIndex].path,
+        secondaryStartFrame: before.layers[_secondaryLayerIndex].startFrame,
         tertiaryPath: null,
         tertiaryStartFrame: null,
         playheadFrame: playheadFrame,
-        primaryGain: before.primaryTrackAudioGain,
-        secondaryGain: before.secondaryTrackAudioGain,
+        primaryGain: before.layers[_baseLayerIndex].audioGain,
+        secondaryGain: before.layers[_secondaryLayerIndex].audioGain,
         tertiaryGain: 1.0,
-        secondaryOpacity: before.secondaryTrackOpacity,
-        secondaryX: before.secondaryTrackX,
-        secondaryY: before.secondaryTrackY,
-        secondaryScale: before.secondaryTrackScale,
-        secondaryVisible: before.secondaryTrackVisible,
-        secondaryAlphaMode: before.secondaryTrackAlphaMode,
+        secondaryOpacity: before.layers[_secondaryLayerIndex].opacity,
+        secondaryX: before.layers[_secondaryLayerIndex].x,
+        secondaryY: before.layers[_secondaryLayerIndex].y,
+        secondaryScale: before.layers[_secondaryLayerIndex].scale,
+        secondaryVisible: before.layers[_secondaryLayerIndex].visible,
+        secondaryAlphaMode: before.layers[_secondaryLayerIndex].alphaMode,
         tertiaryOpacity: 1.0,
         tertiaryX: 0.0,
         tertiaryY: 0.0,
@@ -1915,9 +2306,9 @@ class PlayerEngine extends ChangeNotifier {
   /// POC 10.6.1: replace Layer 2's media while preserving the layer's
   /// placement and inspector controls. The graph is rebuilt from the same
   /// base movie so this remains a layer-source swap, not a timeline edit.
-  Future<bool> replaceSecondaryLayerSource(String path) async {
+  Future<bool> _replaceSecondaryLayerSource(String path) async {
     final media = _media;
-    final oldSecondaryPath = _secondaryTrackPath;
+    final oldSecondaryPath = _layers[_secondaryLayerIndex].path;
 
     if (!initialized ||
         media == null ||
@@ -1945,25 +2336,25 @@ class PlayerEngine extends ChangeNotifier {
       return _rebuildLayerStack(
         primaryPath: basePath,
         secondaryPath: secondaryPath,
-        secondaryStartFrame: editState.secondaryTrackStartFrame,
-        tertiaryPath: editState.tertiaryTrackPath,
-        tertiaryStartFrame: editState.tertiaryTrackStartFrame,
+        secondaryStartFrame: editState.layers[_secondaryLayerIndex].startFrame,
+        tertiaryPath: editState.layers[_tertiaryLayerIndex].path,
+        tertiaryStartFrame: editState.layers[_tertiaryLayerIndex].startFrame,
         playheadFrame: currentFrame,
-        primaryGain: editState.primaryTrackAudioGain,
-        secondaryGain: editState.secondaryTrackAudioGain,
-        tertiaryGain: editState.tertiaryTrackAudioGain,
-        secondaryOpacity: editState.secondaryTrackOpacity,
-        secondaryX: editState.secondaryTrackX,
-        secondaryY: editState.secondaryTrackY,
-        secondaryScale: editState.secondaryTrackScale,
-        secondaryVisible: editState.secondaryTrackVisible,
+        primaryGain: editState.layers[_baseLayerIndex].audioGain,
+        secondaryGain: editState.layers[_secondaryLayerIndex].audioGain,
+        tertiaryGain: editState.layers[_tertiaryLayerIndex].audioGain,
+        secondaryOpacity: editState.layers[_secondaryLayerIndex].opacity,
+        secondaryX: editState.layers[_secondaryLayerIndex].x,
+        secondaryY: editState.layers[_secondaryLayerIndex].y,
+        secondaryScale: editState.layers[_secondaryLayerIndex].scale,
+        secondaryVisible: editState.layers[_secondaryLayerIndex].visible,
         secondaryAlphaMode: secondaryAlphaMode,
-        tertiaryOpacity: editState.tertiaryTrackOpacity,
-        tertiaryX: editState.tertiaryTrackX,
-        tertiaryY: editState.tertiaryTrackY,
-        tertiaryScale: editState.tertiaryTrackScale,
-        tertiaryVisible: editState.tertiaryTrackVisible,
-        tertiaryAlphaMode: editState.tertiaryTrackAlphaMode,
+        tertiaryOpacity: editState.layers[_tertiaryLayerIndex].opacity,
+        tertiaryX: editState.layers[_tertiaryLayerIndex].x,
+        tertiaryY: editState.layers[_tertiaryLayerIndex].y,
+        tertiaryScale: editState.layers[_tertiaryLayerIndex].scale,
+        tertiaryVisible: editState.layers[_tertiaryLayerIndex].visible,
+        tertiaryAlphaMode: editState.layers[_tertiaryLayerIndex].alphaMode,
         editState: editState,
         undoState: undoState,
         redoState: redoState,
@@ -1982,7 +2373,7 @@ class PlayerEngine extends ChangeNotifier {
     final replaceError = _error;
     final rolledBack = await rebuildWith(
       oldSecondaryPath,
-      editState.secondaryTrackAlphaMode,
+      editState.layers[_secondaryLayerIndex].alphaMode,
     );
 
     _error = rolledBack
@@ -1995,16 +2386,16 @@ class PlayerEngine extends ChangeNotifier {
   /// Replace Layer 3 while preserving its placement and controls. Layer 2 is
   /// rebuilt unchanged underneath it; the replacement asset starts in Auto
   /// alpha mode just like a Layer 2 source replacement.
-  Future<bool> replaceTertiaryLayerSource(String path) async {
+  Future<bool> _replaceTertiaryLayerSource(String path) async {
     final media = _media;
-    final oldTertiaryPath = _tertiaryTrackPath;
+    final oldTertiaryPath = _layers[_tertiaryLayerIndex].path;
 
     if (!initialized ||
         media == null ||
         media.isStill ||
         !media.hasVideo ||
         oldTertiaryPath == null ||
-        !hasSecondaryTrack ||
+        !hasLayer(_secondaryLayerIndex) ||
         _opening ||
         _addingTrack ||
         _exporting ||
@@ -2025,25 +2416,25 @@ class PlayerEngine extends ChangeNotifier {
     Future<bool> rebuildWith(String tertiaryPath, int tertiaryAlphaMode) {
       return _rebuildLayerStack(
         primaryPath: basePath,
-        secondaryPath: editState.secondaryTrackPath,
-        secondaryStartFrame: editState.secondaryTrackStartFrame,
+        secondaryPath: editState.layers[_secondaryLayerIndex].path,
+        secondaryStartFrame: editState.layers[_secondaryLayerIndex].startFrame,
         tertiaryPath: tertiaryPath,
-        tertiaryStartFrame: editState.tertiaryTrackStartFrame,
+        tertiaryStartFrame: editState.layers[_tertiaryLayerIndex].startFrame,
         playheadFrame: currentFrame,
-        primaryGain: editState.primaryTrackAudioGain,
-        secondaryGain: editState.secondaryTrackAudioGain,
-        tertiaryGain: editState.tertiaryTrackAudioGain,
-        secondaryOpacity: editState.secondaryTrackOpacity,
-        secondaryX: editState.secondaryTrackX,
-        secondaryY: editState.secondaryTrackY,
-        secondaryScale: editState.secondaryTrackScale,
-        secondaryVisible: editState.secondaryTrackVisible,
-        secondaryAlphaMode: editState.secondaryTrackAlphaMode,
-        tertiaryOpacity: editState.tertiaryTrackOpacity,
-        tertiaryX: editState.tertiaryTrackX,
-        tertiaryY: editState.tertiaryTrackY,
-        tertiaryScale: editState.tertiaryTrackScale,
-        tertiaryVisible: editState.tertiaryTrackVisible,
+        primaryGain: editState.layers[_baseLayerIndex].audioGain,
+        secondaryGain: editState.layers[_secondaryLayerIndex].audioGain,
+        tertiaryGain: editState.layers[_tertiaryLayerIndex].audioGain,
+        secondaryOpacity: editState.layers[_secondaryLayerIndex].opacity,
+        secondaryX: editState.layers[_secondaryLayerIndex].x,
+        secondaryY: editState.layers[_secondaryLayerIndex].y,
+        secondaryScale: editState.layers[_secondaryLayerIndex].scale,
+        secondaryVisible: editState.layers[_secondaryLayerIndex].visible,
+        secondaryAlphaMode: editState.layers[_secondaryLayerIndex].alphaMode,
+        tertiaryOpacity: editState.layers[_tertiaryLayerIndex].opacity,
+        tertiaryX: editState.layers[_tertiaryLayerIndex].x,
+        tertiaryY: editState.layers[_tertiaryLayerIndex].y,
+        tertiaryScale: editState.layers[_tertiaryLayerIndex].scale,
+        tertiaryVisible: editState.layers[_tertiaryLayerIndex].visible,
         tertiaryAlphaMode: tertiaryAlphaMode,
         editState: editState,
         undoState: undoState,
@@ -2063,7 +2454,7 @@ class PlayerEngine extends ChangeNotifier {
     final replaceError = _error;
     final rolledBack = await rebuildWith(
       oldTertiaryPath,
-      editState.tertiaryTrackAlphaMode,
+      editState.layers[_tertiaryLayerIndex].alphaMode,
     );
 
     _error = rolledBack
@@ -2076,7 +2467,7 @@ class PlayerEngine extends ChangeNotifier {
   /// Replace the base layer with another timed video source. The caller keeps
   /// still images out of this chooser; a defensive runtime check below also
   /// rolls back if MLT classifies the replacement as a still or audio-only.
-  Future<bool> replacePrimaryLayerSource(String path) async {
+  Future<bool> _replacePrimaryLayerSource(String path) async {
     final oldMedia = _media;
     if (!initialized ||
         oldMedia == null ||
@@ -2100,15 +2491,15 @@ class PlayerEngine extends ChangeNotifier {
     final oldPlayheadSeconds = oldMedia.fps > 0
         ? oldPlayheadFrame / oldMedia.fps
         : 0.0;
-    final secondaryStartSeconds = oldEditState.secondaryTrackPath != null &&
-            oldEditState.secondaryTrackStartFrame != null &&
+    final secondaryStartSeconds = oldEditState.layers[_secondaryLayerIndex].path != null &&
+            oldEditState.layers[_secondaryLayerIndex].startFrame != null &&
             oldMedia.fps > 0
-        ? oldEditState.secondaryTrackStartFrame! / oldMedia.fps
+        ? oldEditState.layers[_secondaryLayerIndex].startFrame! / oldMedia.fps
         : 0.0;
-    final tertiaryStartSeconds = oldEditState.tertiaryTrackPath != null &&
-            oldEditState.tertiaryTrackStartFrame != null &&
+    final tertiaryStartSeconds = oldEditState.layers[_tertiaryLayerIndex].path != null &&
+            oldEditState.layers[_tertiaryLayerIndex].startFrame != null &&
             oldMedia.fps > 0
-        ? oldEditState.tertiaryTrackStartFrame! / oldMedia.fps
+        ? oldEditState.layers[_tertiaryLayerIndex].startFrame! / oldMedia.fps
         : 0.0;
 
     final opened = await open(path);
@@ -2124,26 +2515,26 @@ class PlayerEngine extends ChangeNotifier {
 
       await _rebuildLayerStack(
         primaryPath: oldBasePath,
-        secondaryPath: oldEditState.secondaryTrackPath,
-        secondaryStartFrame: oldEditState.secondaryTrackStartFrame,
-        tertiaryPath: oldEditState.tertiaryTrackPath,
-        tertiaryStartFrame: oldEditState.tertiaryTrackStartFrame,
+        secondaryPath: oldEditState.layers[_secondaryLayerIndex].path,
+        secondaryStartFrame: oldEditState.layers[_secondaryLayerIndex].startFrame,
+        tertiaryPath: oldEditState.layers[_tertiaryLayerIndex].path,
+        tertiaryStartFrame: oldEditState.layers[_tertiaryLayerIndex].startFrame,
         playheadFrame: oldPlayheadFrame,
-        primaryGain: oldEditState.primaryTrackAudioGain,
-        secondaryGain: oldEditState.secondaryTrackAudioGain,
-        tertiaryGain: oldEditState.tertiaryTrackAudioGain,
-        secondaryOpacity: oldEditState.secondaryTrackOpacity,
-        secondaryX: oldEditState.secondaryTrackX,
-        secondaryY: oldEditState.secondaryTrackY,
-        secondaryScale: oldEditState.secondaryTrackScale,
-        secondaryVisible: oldEditState.secondaryTrackVisible,
-        secondaryAlphaMode: oldEditState.secondaryTrackAlphaMode,
-        tertiaryOpacity: oldEditState.tertiaryTrackOpacity,
-        tertiaryX: oldEditState.tertiaryTrackX,
-        tertiaryY: oldEditState.tertiaryTrackY,
-        tertiaryScale: oldEditState.tertiaryTrackScale,
-        tertiaryVisible: oldEditState.tertiaryTrackVisible,
-        tertiaryAlphaMode: oldEditState.tertiaryTrackAlphaMode,
+        primaryGain: oldEditState.layers[_baseLayerIndex].audioGain,
+        secondaryGain: oldEditState.layers[_secondaryLayerIndex].audioGain,
+        tertiaryGain: oldEditState.layers[_tertiaryLayerIndex].audioGain,
+        secondaryOpacity: oldEditState.layers[_secondaryLayerIndex].opacity,
+        secondaryX: oldEditState.layers[_secondaryLayerIndex].x,
+        secondaryY: oldEditState.layers[_secondaryLayerIndex].y,
+        secondaryScale: oldEditState.layers[_secondaryLayerIndex].scale,
+        secondaryVisible: oldEditState.layers[_secondaryLayerIndex].visible,
+        secondaryAlphaMode: oldEditState.layers[_secondaryLayerIndex].alphaMode,
+        tertiaryOpacity: oldEditState.layers[_tertiaryLayerIndex].opacity,
+        tertiaryX: oldEditState.layers[_tertiaryLayerIndex].x,
+        tertiaryY: oldEditState.layers[_tertiaryLayerIndex].y,
+        tertiaryScale: oldEditState.layers[_tertiaryLayerIndex].scale,
+        tertiaryVisible: oldEditState.layers[_tertiaryLayerIndex].visible,
+        tertiaryAlphaMode: oldEditState.layers[_tertiaryLayerIndex].alphaMode,
         editState: oldEditState,
         undoState: oldUndoState,
         redoState: oldRedoState,
@@ -2159,62 +2550,62 @@ class PlayerEngine extends ChangeNotifier {
     final newPlayheadFrame = newFps > 0
         ? (oldPlayheadSeconds * newFps).round()
         : 0;
-    final newSecondaryStart = oldEditState.secondaryTrackPath != null && newFps > 0
+    final newSecondaryStart = oldEditState.layers[_secondaryLayerIndex].path != null && newFps > 0
         ? (secondaryStartSeconds * newFps).round()
         : null;
-    final newTertiaryStart = oldEditState.tertiaryTrackPath != null && newFps > 0
+    final newTertiaryStart = oldEditState.layers[_tertiaryLayerIndex].path != null && newFps > 0
         ? (tertiaryStartSeconds * newFps).round()
         : null;
 
-    if (oldEditState.secondaryTrackPath != null) {
+    if (oldEditState.layers[_secondaryLayerIndex].path != null) {
       final rebuilt = await _rebuildLayerStack(
         primaryPath: path,
-        secondaryPath: oldEditState.secondaryTrackPath,
+        secondaryPath: oldEditState.layers[_secondaryLayerIndex].path,
         secondaryStartFrame: newSecondaryStart,
-        tertiaryPath: oldEditState.tertiaryTrackPath,
+        tertiaryPath: oldEditState.layers[_tertiaryLayerIndex].path,
         tertiaryStartFrame: newTertiaryStart,
         playheadFrame: newPlayheadFrame,
-        primaryGain: oldEditState.primaryTrackAudioGain,
-        secondaryGain: oldEditState.secondaryTrackAudioGain,
-        tertiaryGain: oldEditState.tertiaryTrackAudioGain,
-        secondaryOpacity: oldEditState.secondaryTrackOpacity,
-        secondaryX: oldEditState.secondaryTrackX,
-        secondaryY: oldEditState.secondaryTrackY,
-        secondaryScale: oldEditState.secondaryTrackScale,
-        secondaryVisible: oldEditState.secondaryTrackVisible,
-        secondaryAlphaMode: oldEditState.secondaryTrackAlphaMode,
-        tertiaryOpacity: oldEditState.tertiaryTrackOpacity,
-        tertiaryX: oldEditState.tertiaryTrackX,
-        tertiaryY: oldEditState.tertiaryTrackY,
-        tertiaryScale: oldEditState.tertiaryTrackScale,
-        tertiaryVisible: oldEditState.tertiaryTrackVisible,
-        tertiaryAlphaMode: oldEditState.tertiaryTrackAlphaMode,
+        primaryGain: oldEditState.layers[_baseLayerIndex].audioGain,
+        secondaryGain: oldEditState.layers[_secondaryLayerIndex].audioGain,
+        tertiaryGain: oldEditState.layers[_tertiaryLayerIndex].audioGain,
+        secondaryOpacity: oldEditState.layers[_secondaryLayerIndex].opacity,
+        secondaryX: oldEditState.layers[_secondaryLayerIndex].x,
+        secondaryY: oldEditState.layers[_secondaryLayerIndex].y,
+        secondaryScale: oldEditState.layers[_secondaryLayerIndex].scale,
+        secondaryVisible: oldEditState.layers[_secondaryLayerIndex].visible,
+        secondaryAlphaMode: oldEditState.layers[_secondaryLayerIndex].alphaMode,
+        tertiaryOpacity: oldEditState.layers[_tertiaryLayerIndex].opacity,
+        tertiaryX: oldEditState.layers[_tertiaryLayerIndex].x,
+        tertiaryY: oldEditState.layers[_tertiaryLayerIndex].y,
+        tertiaryScale: oldEditState.layers[_tertiaryLayerIndex].scale,
+        tertiaryVisible: oldEditState.layers[_tertiaryLayerIndex].visible,
+        tertiaryAlphaMode: oldEditState.layers[_tertiaryLayerIndex].alphaMode,
       );
 
       if (!rebuilt) {
         final replaceError = _error;
         await _rebuildLayerStack(
           primaryPath: oldBasePath,
-          secondaryPath: oldEditState.secondaryTrackPath,
-          secondaryStartFrame: oldEditState.secondaryTrackStartFrame,
-          tertiaryPath: oldEditState.tertiaryTrackPath,
-          tertiaryStartFrame: oldEditState.tertiaryTrackStartFrame,
+          secondaryPath: oldEditState.layers[_secondaryLayerIndex].path,
+          secondaryStartFrame: oldEditState.layers[_secondaryLayerIndex].startFrame,
+          tertiaryPath: oldEditState.layers[_tertiaryLayerIndex].path,
+          tertiaryStartFrame: oldEditState.layers[_tertiaryLayerIndex].startFrame,
           playheadFrame: oldPlayheadFrame,
-          primaryGain: oldEditState.primaryTrackAudioGain,
-          secondaryGain: oldEditState.secondaryTrackAudioGain,
-          tertiaryGain: oldEditState.tertiaryTrackAudioGain,
-          secondaryOpacity: oldEditState.secondaryTrackOpacity,
-          secondaryX: oldEditState.secondaryTrackX,
-          secondaryY: oldEditState.secondaryTrackY,
-          secondaryScale: oldEditState.secondaryTrackScale,
-          secondaryVisible: oldEditState.secondaryTrackVisible,
-          secondaryAlphaMode: oldEditState.secondaryTrackAlphaMode,
-          tertiaryOpacity: oldEditState.tertiaryTrackOpacity,
-          tertiaryX: oldEditState.tertiaryTrackX,
-          tertiaryY: oldEditState.tertiaryTrackY,
-          tertiaryScale: oldEditState.tertiaryTrackScale,
-          tertiaryVisible: oldEditState.tertiaryTrackVisible,
-          tertiaryAlphaMode: oldEditState.tertiaryTrackAlphaMode,
+          primaryGain: oldEditState.layers[_baseLayerIndex].audioGain,
+          secondaryGain: oldEditState.layers[_secondaryLayerIndex].audioGain,
+          tertiaryGain: oldEditState.layers[_tertiaryLayerIndex].audioGain,
+          secondaryOpacity: oldEditState.layers[_secondaryLayerIndex].opacity,
+          secondaryX: oldEditState.layers[_secondaryLayerIndex].x,
+          secondaryY: oldEditState.layers[_secondaryLayerIndex].y,
+          secondaryScale: oldEditState.layers[_secondaryLayerIndex].scale,
+          secondaryVisible: oldEditState.layers[_secondaryLayerIndex].visible,
+          secondaryAlphaMode: oldEditState.layers[_secondaryLayerIndex].alphaMode,
+          tertiaryOpacity: oldEditState.layers[_tertiaryLayerIndex].opacity,
+          tertiaryX: oldEditState.layers[_tertiaryLayerIndex].x,
+          tertiaryY: oldEditState.layers[_tertiaryLayerIndex].y,
+          tertiaryScale: oldEditState.layers[_tertiaryLayerIndex].scale,
+          tertiaryVisible: oldEditState.layers[_tertiaryLayerIndex].visible,
+          tertiaryAlphaMode: oldEditState.layers[_tertiaryLayerIndex].alphaMode,
           editState: oldEditState,
           undoState: oldUndoState,
           redoState: oldRedoState,
@@ -2227,7 +2618,7 @@ class PlayerEngine extends ChangeNotifier {
     } else {
       _seekSourceFrameClamped(newPlayheadFrame);
       if (trackHasAudio(0)) {
-        setTrackAudioGain(0, oldEditState.primaryTrackAudioGain, recordEdit: false);
+        setTrackAudioGain(0, oldEditState.layers[_baseLayerIndex].audioGain, recordEdit: false);
       }
     }
 
@@ -2244,19 +2635,19 @@ class PlayerEngine extends ChangeNotifier {
   /// A still image cannot be swapped into Layer 1.
   Future<bool> swapLayerOrder() async {
     final oldMedia = _media;
-    final oldSecondaryPath = _secondaryTrackPath;
+    final oldSecondaryPath = _layers[_secondaryLayerIndex].path;
 
     if (!initialized ||
         oldMedia == null ||
         oldMedia.isStill ||
         !oldMedia.hasVideo ||
         oldSecondaryPath == null ||
-        hasTertiaryTrack ||
-        _secondaryTrackIsStill ||
+        hasLayer(_tertiaryLayerIndex) ||
+        _layers[_secondaryLayerIndex].isStill ||
         _opening ||
         _addingTrack ||
         _exporting) {
-      if (_secondaryTrackIsStill) {
+      if (_layers[_secondaryLayerIndex].isStill) {
         _error = 'A still image cannot become the base layer.';
         notifyListeners();
       }
@@ -2268,7 +2659,7 @@ class PlayerEngine extends ChangeNotifier {
     }
 
     final oldBasePath = oldMedia.path;
-    final oldStartFrame = _secondaryTrackStartFrame ?? 0;
+    final oldStartFrame = _layers[_secondaryLayerIndex].startFrame ?? 0;
     final oldStartSeconds = oldMedia.fps > 0
         ? oldStartFrame / oldMedia.fps
         : 0.0;
@@ -2281,14 +2672,14 @@ class PlayerEngine extends ChangeNotifier {
     final oldUndoState = List<_ClipEditState>.from(_undoStack);
     final oldRedoState = List<_ClipEditState>.from(_redoStack);
 
-    final opacity = _secondaryTrackOpacity;
-    final secondaryX = _secondaryTrackX;
-    final secondaryY = _secondaryTrackY;
-    final secondaryScale = _secondaryTrackScale;
-    final visible = _secondaryTrackVisible;
-    final oldAlphaMode = _secondaryTrackAlphaMode;
-    final primaryGain = _primaryTrackAudioGain;
-    final secondaryGain = _secondaryTrackAudioGain;
+    final opacity = _layers[_secondaryLayerIndex].opacity;
+    final secondaryX = _layers[_secondaryLayerIndex].x;
+    final secondaryY = _layers[_secondaryLayerIndex].y;
+    final secondaryScale = _layers[_secondaryLayerIndex].scale;
+    final visible = _layers[_secondaryLayerIndex].visible;
+    final oldAlphaMode = _layers[_secondaryLayerIndex].alphaMode;
+    final primaryGain = _layers[_baseLayerIndex].audioGain;
+    final secondaryGain = _layers[_secondaryLayerIndex].audioGain;
 
     // Probe the would-be base through the normal open path. This gives us its
     // authoritative frame rate and defensively rejects anything that MLT does
@@ -2458,35 +2849,35 @@ class PlayerEngine extends ChangeNotifier {
       setTrackAudioGain(0, primaryGain, recordEdit: false);
     }
 
-    if (secondaryPath != null && hasSecondaryTrack) {
-      setSecondaryTrackGeometry(
+    if (secondaryPath != null && hasLayer(_secondaryLayerIndex)) {
+      _setSecondaryLayerGeometry(
         x: secondaryX,
         y: secondaryY,
         scale: secondaryScale,
         recordEdit: false,
       );
-      setSecondaryTrackOpacity(secondaryOpacity, recordEdit: false);
+      _setSecondaryLayerOpacity(secondaryOpacity, recordEdit: false);
       if (!secondaryVisible) {
-        setSecondaryTrackVisible(false, recordEdit: false);
+        _setSecondaryLayerVisible(false, recordEdit: false);
       }
-      setSecondaryTrackAlphaMode(secondaryAlphaMode, recordEdit: false);
+      _setSecondaryLayerAlphaMode(secondaryAlphaMode, recordEdit: false);
       if (trackHasAudio(1)) {
         setTrackAudioGain(1, secondaryGain, recordEdit: false);
       }
     }
 
-    if (tertiaryPath != null && hasTertiaryTrack) {
-      setTertiaryTrackGeometry(
+    if (tertiaryPath != null && hasLayer(_tertiaryLayerIndex)) {
+      _setTertiaryLayerGeometry(
         x: tertiaryX,
         y: tertiaryY,
         scale: tertiaryScale,
         recordEdit: false,
       );
-      setTertiaryTrackOpacity(tertiaryOpacity, recordEdit: false);
+      _setTertiaryLayerOpacity(tertiaryOpacity, recordEdit: false);
       if (!tertiaryVisible) {
-        setTertiaryTrackVisible(false, recordEdit: false);
+        _setTertiaryLayerVisible(false, recordEdit: false);
       }
-      setTertiaryTrackAlphaMode(tertiaryAlphaMode, recordEdit: false);
+      _setTertiaryLayerAlphaMode(tertiaryAlphaMode, recordEdit: false);
       if (trackHasAudio(2)) {
         setTrackAudioGain(2, tertiaryGain, recordEdit: false);
       }
@@ -2544,19 +2935,145 @@ class PlayerEngine extends ChangeNotifier {
   /// POC 10.7 keeps visibility independent from opacity. While the layer is
   /// hidden, slider changes are remembered locally and applied the next time
   /// the eye control makes the layer visible.
-  void setSecondaryTrackOpacity(
+  void setLayerOpacity(
+    int layerIndex,
     double value, {
     bool recordEdit = true,
   }) {
-    if (!hasSecondaryTrack || (recordEdit && _restoringEditState)) {
+    switch (layerIndex) {
+      case _secondaryLayerIndex:
+        _setSecondaryLayerOpacity(value, recordEdit: recordEdit);
+        return;
+      case _tertiaryLayerIndex:
+        _setTertiaryLayerOpacity(value, recordEdit: recordEdit);
+        return;
+    }
+  }
+
+  void setLayerVisible(
+    int layerIndex,
+    bool visible, {
+    bool recordEdit = true,
+  }) {
+    switch (layerIndex) {
+      case _secondaryLayerIndex:
+        _setSecondaryLayerVisible(visible, recordEdit: recordEdit);
+        return;
+      case _tertiaryLayerIndex:
+        _setTertiaryLayerVisible(visible, recordEdit: recordEdit);
+        return;
+    }
+  }
+
+  void toggleLayerVisible(int layerIndex) {
+    if (!hasLayer(layerIndex) || layerIndex == _baseLayerIndex) {
+      return;
+    }
+    setLayerVisible(layerIndex, !_layers[layerIndex].visible);
+  }
+
+  void setLayerGeometry({
+    required int layerIndex,
+    required double x,
+    required double y,
+    required double scale,
+    bool recordEdit = true,
+  }) {
+    switch (layerIndex) {
+      case _secondaryLayerIndex:
+        _setSecondaryLayerGeometry(
+          x: x,
+          y: y,
+          scale: scale,
+          recordEdit: recordEdit,
+        );
+        return;
+      case _tertiaryLayerIndex:
+        _setTertiaryLayerGeometry(
+          x: x,
+          y: y,
+          scale: scale,
+          recordEdit: recordEdit,
+        );
+        return;
+    }
+  }
+
+  void setLayerX(int layerIndex, double value) {
+    if (!hasLayer(layerIndex) || layerIndex == _baseLayerIndex) {
+      return;
+    }
+    setLayerGeometry(
+      layerIndex: layerIndex,
+      x: value,
+      y: _layers[layerIndex].y,
+      scale: _layers[layerIndex].scale,
+    );
+  }
+
+  void setLayerY(int layerIndex, double value) {
+    if (!hasLayer(layerIndex) || layerIndex == _baseLayerIndex) {
+      return;
+    }
+    setLayerGeometry(
+      layerIndex: layerIndex,
+      x: _layers[layerIndex].x,
+      y: value,
+      scale: _layers[layerIndex].scale,
+    );
+  }
+
+  void setLayerScale(int layerIndex, double value) {
+    if (!hasLayer(layerIndex) || layerIndex == _baseLayerIndex) {
+      return;
+    }
+    setLayerGeometry(
+      layerIndex: layerIndex,
+      x: _layers[layerIndex].x,
+      y: _layers[layerIndex].y,
+      scale: value,
+    );
+  }
+
+  void setLayerAnchor(int layerIndex, int anchor) {
+    switch (layerIndex) {
+      case _secondaryLayerIndex:
+        _setSecondaryLayerAnchor(anchor);
+        return;
+      case _tertiaryLayerIndex:
+        _setTertiaryLayerAnchor(anchor);
+        return;
+    }
+  }
+
+  void setLayerAlphaMode(
+    int layerIndex,
+    int mode, {
+    bool recordEdit = true,
+  }) {
+    switch (layerIndex) {
+      case _secondaryLayerIndex:
+        _setSecondaryLayerAlphaMode(mode, recordEdit: recordEdit);
+        return;
+      case _tertiaryLayerIndex:
+        _setTertiaryLayerAlphaMode(mode, recordEdit: recordEdit);
+        return;
+    }
+  }
+
+  void _setSecondaryLayerOpacity(
+    double value, {
+    bool recordEdit = true,
+  }) {
+    if (!hasLayer(_secondaryLayerIndex) || (recordEdit && _restoringEditState)) {
       return;
     }
 
     final requested = value.clamp(0.0, 1.0).toDouble();
     final before = recordEdit ? _captureEditState() : null;
 
-    if (!_secondaryTrackVisible) {
-      _secondaryTrackOpacity = requested;
+    if (!_layers[_secondaryLayerIndex].visible) {
+      _layers[_secondaryLayerIndex].opacity = requested;
       _error = null;
 
       if (before != null && !before.sameAs(_captureEditState())) {
@@ -2574,13 +3091,13 @@ class PlayerEngine extends ChangeNotifier {
       _error = bridge.lastError.isEmpty
           ? 'MLT could not change Layer 2 opacity.'
           : bridge.lastError;
-      _secondaryTrackOpacity =
+      _layers[_secondaryLayerIndex].opacity =
           bridge.secondaryOpacity.clamp(0.0, 1.0).toDouble();
       notifyListeners();
       return;
     }
 
-    _secondaryTrackOpacity =
+    _layers[_secondaryLayerIndex].opacity =
         bridge.secondaryOpacity.clamp(0.0, 1.0).toDouble();
     _error = null;
 
@@ -2596,19 +3113,19 @@ class PlayerEngine extends ChangeNotifier {
 
   /// POC 10.7: show or hide Layer 2 without destroying its opacity setting.
   /// Native opacity zero is used only as the render switch; the inspector's
-  /// requested opacity remains stored in _secondaryTrackOpacity.
-  void setSecondaryTrackVisible(
+  /// requested opacity remains stored in _layers[_secondaryLayerIndex].opacity.
+  void _setSecondaryLayerVisible(
     bool visible, {
     bool recordEdit = true,
   }) {
-    if (!hasSecondaryTrack ||
-        visible == _secondaryTrackVisible ||
+    if (!hasLayer(_secondaryLayerIndex) ||
+        visible == _layers[_secondaryLayerIndex].visible ||
         (recordEdit && _restoringEditState)) {
       return;
     }
 
     final before = recordEdit ? _captureEditState() : null;
-    final effectiveOpacity = visible ? _secondaryTrackOpacity : 0.0;
+    final effectiveOpacity = visible ? _layers[_secondaryLayerIndex].opacity : 0.0;
 
     if (!bridge.setSecondaryOpacity(effectiveOpacity)) {
       _error = bridge.lastError.isEmpty
@@ -2618,7 +3135,7 @@ class PlayerEngine extends ChangeNotifier {
       return;
     }
 
-    _secondaryTrackVisible = visible;
+    _layers[_secondaryLayerIndex].visible = visible;
     _error = null;
 
     if (before != null && !before.sameAs(_captureEditState())) {
@@ -2628,19 +3145,15 @@ class PlayerEngine extends ChangeNotifier {
     notifyListeners();
   }
 
-  void toggleSecondaryTrackVisible() {
-    setSecondaryTrackVisible(!_secondaryTrackVisible);
-  }
-
   /// POC 10.8: move and uniformly scale Layer 2 without rebuilding the tractor.
   /// Coordinates are base-frame pixels measured from the top-left corner.
-  void setSecondaryTrackGeometry({
+  void _setSecondaryLayerGeometry({
     required double x,
     required double y,
     required double scale,
     bool recordEdit = true,
   }) {
-    if (!hasSecondaryTrack || (recordEdit && _restoringEditState)) {
+    if (!hasLayer(_secondaryLayerIndex) || (recordEdit && _restoringEditState)) {
       return;
     }
 
@@ -2669,33 +3182,9 @@ class PlayerEngine extends ChangeNotifier {
     notifyListeners();
   }
 
-  void setSecondaryTrackX(double value) {
-    setSecondaryTrackGeometry(
-      x: value,
-      y: _secondaryTrackY,
-      scale: _secondaryTrackScale,
-    );
-  }
-
-  void setSecondaryTrackY(double value) {
-    setSecondaryTrackGeometry(
-      x: _secondaryTrackX,
-      y: value,
-      scale: _secondaryTrackScale,
-    );
-  }
-
-  void setSecondaryTrackScale(double value) {
-    setSecondaryTrackGeometry(
-      x: _secondaryTrackX,
-      y: _secondaryTrackY,
-      scale: value,
-    );
-  }
-
   /// Anchor indices are row-major: 0 top-left through 8 bottom-right.
-  void setSecondaryTrackAnchor(int anchor) {
-    if (!hasSecondaryTrack || _restoringEditState) {
+  void _setSecondaryLayerAnchor(int anchor) {
+    if (!hasLayer(_secondaryLayerIndex) || _restoringEditState) {
       return;
     }
 
@@ -2722,9 +3211,9 @@ class PlayerEngine extends ChangeNotifier {
   }
 
   void _syncSecondaryGeometry() {
-    _secondaryTrackX = bridge.secondaryX;
-    _secondaryTrackY = bridge.secondaryY;
-    _secondaryTrackScale =
+    _layers[_secondaryLayerIndex].x = bridge.secondaryX;
+    _layers[_secondaryLayerIndex].y = bridge.secondaryY;
+    _layers[_secondaryLayerIndex].scale =
         bridge.secondaryScale.clamp(0.10, 3.0).toDouble();
   }
 
@@ -2732,11 +3221,11 @@ class PlayerEngine extends ChangeNotifier {
   ///
   /// 0 = Auto/native decode, 1 = Straight/native decode,
   /// 2 = Premultiplied (native bridge unpremultiplies RGB before composite).
-  void setSecondaryTrackAlphaMode(
+  void _setSecondaryLayerAlphaMode(
     int mode, {
     bool recordEdit = true,
   }) {
-    if (!hasSecondaryTrack || (recordEdit && _restoringEditState)) {
+    if (!hasLayer(_secondaryLayerIndex) || (recordEdit && _restoringEditState)) {
       return;
     }
 
@@ -2747,13 +3236,13 @@ class PlayerEngine extends ChangeNotifier {
       _error = bridge.lastError.isEmpty
           ? 'MLT could not change layer 2 alpha interpretation.'
           : bridge.lastError;
-      _secondaryTrackAlphaMode =
+      _layers[_secondaryLayerIndex].alphaMode =
           bridge.secondaryAlphaMode.clamp(0, 2).toInt();
       notifyListeners();
       return;
     }
 
-    _secondaryTrackAlphaMode =
+    _layers[_secondaryLayerIndex].alphaMode =
         bridge.secondaryAlphaMode.clamp(0, 2).toInt();
     _error = null;
 
@@ -2764,19 +3253,19 @@ class PlayerEngine extends ChangeNotifier {
     notifyListeners();
   }
 
-  void setTertiaryTrackOpacity(
+  void _setTertiaryLayerOpacity(
     double value, {
     bool recordEdit = true,
   }) {
-    if (!hasTertiaryTrack || (recordEdit && _restoringEditState)) {
+    if (!hasLayer(_tertiaryLayerIndex) || (recordEdit && _restoringEditState)) {
       return;
     }
 
     final requested = value.clamp(0.0, 1.0).toDouble();
     final before = recordEdit ? _captureEditState() : null;
 
-    if (!_tertiaryTrackVisible) {
-      _tertiaryTrackOpacity = requested;
+    if (!_layers[_tertiaryLayerIndex].visible) {
+      _layers[_tertiaryLayerIndex].opacity = requested;
       _error = null;
       if (before != null && !before.sameAs(_captureEditState())) {
         _recordEditBeforeChange(before, continuousKey: 'tertiary-opacity');
@@ -2789,13 +3278,13 @@ class PlayerEngine extends ChangeNotifier {
       _error = bridge.lastError.isEmpty
           ? 'MLT could not change Layer 3 opacity.'
           : bridge.lastError;
-      _tertiaryTrackOpacity =
+      _layers[_tertiaryLayerIndex].opacity =
           bridge.layerOpacity(2).clamp(0.0, 1.0).toDouble();
       notifyListeners();
       return;
     }
 
-    _tertiaryTrackOpacity =
+    _layers[_tertiaryLayerIndex].opacity =
         bridge.layerOpacity(2).clamp(0.0, 1.0).toDouble();
     _error = null;
     if (before != null && !before.sameAs(_captureEditState())) {
@@ -2804,18 +3293,18 @@ class PlayerEngine extends ChangeNotifier {
     notifyListeners();
   }
 
-  void setTertiaryTrackVisible(
+  void _setTertiaryLayerVisible(
     bool visible, {
     bool recordEdit = true,
   }) {
-    if (!hasTertiaryTrack ||
-        visible == _tertiaryTrackVisible ||
+    if (!hasLayer(_tertiaryLayerIndex) ||
+        visible == _layers[_tertiaryLayerIndex].visible ||
         (recordEdit && _restoringEditState)) {
       return;
     }
 
     final before = recordEdit ? _captureEditState() : null;
-    final effectiveOpacity = visible ? _tertiaryTrackOpacity : 0.0;
+    final effectiveOpacity = visible ? _layers[_tertiaryLayerIndex].opacity : 0.0;
     if (!bridge.setLayerOpacity(2, effectiveOpacity)) {
       _error = bridge.lastError.isEmpty
           ? 'MLT could not change Layer 3 visibility.'
@@ -2824,7 +3313,7 @@ class PlayerEngine extends ChangeNotifier {
       return;
     }
 
-    _tertiaryTrackVisible = visible;
+    _layers[_tertiaryLayerIndex].visible = visible;
     _error = null;
     if (before != null && !before.sameAs(_captureEditState())) {
       _recordEditBeforeChange(before);
@@ -2832,17 +3321,13 @@ class PlayerEngine extends ChangeNotifier {
     notifyListeners();
   }
 
-  void toggleTertiaryTrackVisible() {
-    setTertiaryTrackVisible(!_tertiaryTrackVisible);
-  }
-
-  void setTertiaryTrackGeometry({
+  void _setTertiaryLayerGeometry({
     required double x,
     required double y,
     required double scale,
     bool recordEdit = true,
   }) {
-    if (!hasTertiaryTrack || (recordEdit && _restoringEditState)) {
+    if (!hasLayer(_tertiaryLayerIndex) || (recordEdit && _restoringEditState)) {
       return;
     }
 
@@ -2865,32 +3350,8 @@ class PlayerEngine extends ChangeNotifier {
     notifyListeners();
   }
 
-  void setTertiaryTrackX(double value) {
-    setTertiaryTrackGeometry(
-      x: value,
-      y: _tertiaryTrackY,
-      scale: _tertiaryTrackScale,
-    );
-  }
-
-  void setTertiaryTrackY(double value) {
-    setTertiaryTrackGeometry(
-      x: _tertiaryTrackX,
-      y: value,
-      scale: _tertiaryTrackScale,
-    );
-  }
-
-  void setTertiaryTrackScale(double value) {
-    setTertiaryTrackGeometry(
-      x: _tertiaryTrackX,
-      y: _tertiaryTrackY,
-      scale: value,
-    );
-  }
-
-  void setTertiaryTrackAnchor(int anchor) {
-    if (!hasTertiaryTrack || _restoringEditState) {
+  void _setTertiaryLayerAnchor(int anchor) {
+    if (!hasLayer(_tertiaryLayerIndex) || _restoringEditState) {
       return;
     }
 
@@ -2914,16 +3375,16 @@ class PlayerEngine extends ChangeNotifier {
   }
 
   void _syncTertiaryGeometry() {
-    _tertiaryTrackX = bridge.layerX(2);
-    _tertiaryTrackY = bridge.layerY(2);
-    _tertiaryTrackScale = bridge.layerScale(2).clamp(0.10, 3.0).toDouble();
+    _layers[_tertiaryLayerIndex].x = bridge.layerX(2);
+    _layers[_tertiaryLayerIndex].y = bridge.layerY(2);
+    _layers[_tertiaryLayerIndex].scale = bridge.layerScale(2).clamp(0.10, 3.0).toDouble();
   }
 
-  void setTertiaryTrackAlphaMode(
+  void _setTertiaryLayerAlphaMode(
     int mode, {
     bool recordEdit = true,
   }) {
-    if (!hasTertiaryTrack || (recordEdit && _restoringEditState)) {
+    if (!hasLayer(_tertiaryLayerIndex) || (recordEdit && _restoringEditState)) {
       return;
     }
 
@@ -2933,12 +3394,12 @@ class PlayerEngine extends ChangeNotifier {
       _error = bridge.lastError.isEmpty
           ? 'MLT could not change Layer 3 alpha interpretation.'
           : bridge.lastError;
-      _tertiaryTrackAlphaMode = bridge.layerAlphaMode(2).clamp(0, 2).toInt();
+      _layers[_tertiaryLayerIndex].alphaMode = bridge.layerAlphaMode(2).clamp(0, 2).toInt();
       notifyListeners();
       return;
     }
 
-    _tertiaryTrackAlphaMode = bridge.layerAlphaMode(2).clamp(0, 2).toInt();
+    _layers[_tertiaryLayerIndex].alphaMode = bridge.layerAlphaMode(2).clamp(0, 2).toInt();
     _error = null;
     if (before != null && !before.sameAs(_captureEditState())) {
       _recordEditBeforeChange(before);
@@ -2989,42 +3450,27 @@ class PlayerEngine extends ChangeNotifier {
   }
 
   bool trackHasAudio(int trackIndex) {
-    if (trackIndex == 0) {
-      return _media?.hasAudio ?? false;
+    if (trackIndex < 0 || trackIndex >= _layerSlotCount) {
+      return false;
     }
-    if (trackIndex == 1) {
-      return hasSecondaryTrack && _secondaryTrackHasAudio;
-    }
-    if (trackIndex == 2) {
-      return hasTertiaryTrack && _tertiaryTrackHasAudio;
-    }
-    return false;
+    final layer = _layers[trackIndex];
+    return layer.present && layer.hasAudio;
   }
 
   double trackAudioGain(int trackIndex) {
-    if (trackIndex == 0) {
-      return _primaryTrackAudioGain;
+    if (trackIndex < 0 || trackIndex >= _layerSlotCount) {
+      return 1.0;
     }
-    if (trackIndex == 1) {
-      return _secondaryTrackAudioGain;
-    }
-    if (trackIndex == 2) {
-      return _tertiaryTrackAudioGain;
-    }
-    return 1.0;
+    return _layers[trackIndex].audioGain;
   }
 
   void _syncTrackAudioGain(int trackIndex) {
-    final applied =
-        bridge.trackAudioGain(trackIndex).clamp(0.0, 1.0).toDouble();
-
-    if (trackIndex == 0) {
-      _primaryTrackAudioGain = applied;
-    } else if (trackIndex == 1) {
-      _secondaryTrackAudioGain = applied;
-    } else if (trackIndex == 2) {
-      _tertiaryTrackAudioGain = applied;
+    if (trackIndex < 0 || trackIndex >= _layerSlotCount) {
+      return;
     }
+
+    _layers[trackIndex].audioGain =
+        bridge.trackAudioGain(trackIndex).clamp(0.0, 1.0).toDouble();
   }
 
   void togglePlayback() {
@@ -3515,7 +3961,9 @@ class PlayerEngine extends ChangeNotifier {
     _finishContinuousEditGroup();
     _poll?.cancel();
     _poll = null;
-    bridge.shutdown();
+    if (!_editStateTestMode) {
+      bridge.shutdown();
+    }
     super.dispose();
   }
 }

@@ -81,67 +81,6 @@ typedef struct _ExportGraph {
 } ExportGraph;
 
 
-static void export_sync_indexed_derived_state(
-    MltCompositionDerivedState *state)
-{
-    if (state == NULL) {
-        return;
-    }
-
-    MltCompositionLayerDerivedState layer3 = {0};
-    if (state->layer_count >= 3) {
-        layer3 = state->layers[MLT_COMPOSITION_SECOND_OVERLAY];
-    }
-
-    memset(state->layers, 0, sizeof(state->layers));
-
-    if (state->layer_count < 1) {
-        return;
-    }
-
-    MltCompositionLayerDerivedState *base =
-        &state->layers[MLT_COMPOSITION_BASE_LAYER];
-
-    base->present = 1;
-    base->start_frame = 0;
-    base->timeline_length = state->composition_length;
-    base->base_width = state->profile_width;
-    base->base_height = state->profile_height;
-    base->x = 0.0;
-    base->y = 0.0;
-    base->width = state->profile_width;
-    base->height = state->profile_height;
-    base->opacity = 1.0;
-    base->has_audio = state->base_has_audio;
-    base->audio_gain = state->base_audio_gain;
-
-    if (state->layer_count < 2) {
-        return;
-    }
-
-    MltCompositionLayerDerivedState *layer2 =
-        &state->layers[MLT_COMPOSITION_FIRST_OVERLAY];
-
-    layer2->present = 1;
-    layer2->start_frame = state->layer2_start_frame;
-    layer2->timeline_length = state->layer2_timeline_length;
-    layer2->is_still = state->layer2_is_still;
-    layer2->alpha_mode = state->layer2_alpha_mode;
-    layer2->base_width = state->layer2_base_width;
-    layer2->base_height = state->layer2_base_height;
-    layer2->x = state->layer2_x;
-    layer2->y = state->layer2_y;
-    layer2->width = state->layer2_width;
-    layer2->height = state->layer2_height;
-    layer2->opacity = state->layer2_opacity;
-    layer2->has_audio = state->layer2_has_audio;
-    layer2->audio_gain = state->layer2_audio_gain;
-
-    if (state->layer_count >= 3) {
-        state->layers[MLT_COMPOSITION_SECOND_OVERLAY] = layer3;
-    }
-}
-
 typedef struct _ExportTelemetry {
     gint64 worker_started_us;
     gint64 graph_ready_us;
@@ -1091,7 +1030,11 @@ static int export_prepare_source_graph(
     }
 
     memset(graph, 0, sizeof(*graph));
-    graph->derived.layer2_start_frame = -1;
+    for (int index = MLT_COMPOSITION_FIRST_OVERLAY;
+         index < MLT_COMPOSITION_MAX_LAYERS;
+         index++) {
+        graph->derived.layers[index].start_frame = -1;
+    }
 
     graph->export_profile = mlt_profile_init(NULL);
 
@@ -1165,19 +1108,39 @@ static int export_prepare_source_graph(
         goto fail;
     }
 
-    graph->derived.layer_count = job->export_has_tertiary ? 3 : (job->export_has_secondary ? 2 : 1);
+    graph->derived.layer_count =
+        job->export_has_tertiary ? 3 : (job->export_has_secondary ? 2 : 1);
     graph->derived.profile_width = graph->export_profile->width;
     graph->derived.profile_height = graph->export_profile->height;
     graph->derived.profile_fps = mlt_profile_fps(graph->export_profile);
     graph->derived.composition_length = source_length;
     graph->derived.range_in_frame = in_frame;
     graph->derived.range_out_frame = out_frame;
-    graph->derived.base_has_audio = job->export_primary_has_audio ? 1 : 0;
-    graph->derived.base_audio_gain = job->export_primary_audio_gain;
-    graph->derived.layer2_has_audio = job->export_secondary_has_audio ? 1 : 0;
-    graph->derived.layer2_audio_gain = job->export_secondary_audio_gain;
-    graph->derived.layer2_is_still = job->export_secondary_is_still ? 1 : 0;
-    graph->derived.layer2_alpha_mode = job->export_secondary_alpha_mode;
+
+    MltCompositionLayerDerivedState *base =
+        &graph->derived.layers[MLT_COMPOSITION_BASE_LAYER];
+    base->present = 1;
+    base->start_frame = 0;
+    base->timeline_length = source_length;
+    base->base_width = graph->derived.profile_width;
+    base->base_height = graph->derived.profile_height;
+    base->x = 0.0;
+    base->y = 0.0;
+    base->width = graph->derived.profile_width;
+    base->height = graph->derived.profile_height;
+    base->opacity = 1.0;
+    base->has_audio = job->export_primary_has_audio ? 1 : 0;
+    base->audio_gain = job->export_primary_audio_gain;
+
+    MltCompositionLayerDerivedState *layer2 = NULL;
+    if (job->export_has_secondary) {
+        layer2 = &graph->derived.layers[MLT_COMPOSITION_FIRST_OVERLAY];
+        layer2->present = 1;
+        layer2->is_still = job->export_secondary_is_still ? 1 : 0;
+        layer2->alpha_mode = job->export_secondary_alpha_mode;
+        layer2->has_audio = job->export_secondary_has_audio ? 1 : 0;
+        layer2->audio_gain = job->export_secondary_audio_gain;
+    }
 
     if (job->export_snapshot_valid &&
         job->export_primary_has_audio &&
@@ -1209,7 +1172,6 @@ static int export_prepare_source_graph(
         }
 
         graph->export_top = graph->export_primary;
-        export_sync_indexed_derived_state(&graph->derived);
         graph->derived.valid = 1;
         *in_frame_out = in_frame;
         *out_frame_out = out_frame;
@@ -1336,9 +1298,8 @@ static int export_prepare_source_graph(
         goto fail;
     }
 
-    graph->derived.layer2_start_frame =
-        (int64_t)normalized_secondary_start;
-    graph->derived.layer2_timeline_length =
+    layer2->start_frame = (int64_t)normalized_secondary_start;
+    layer2->timeline_length =
         (int64_t)mlt_producer_get_length(
             mlt_playlist_producer(graph->export_secondary_playlist)
         );
@@ -1532,8 +1493,8 @@ static int export_prepare_source_graph(
         goto fail;
     }
 
-    graph->derived.layer2_base_width = base_width;
-    graph->derived.layer2_base_height = base_height;
+    layer2->base_width = base_width;
+    layer2->base_height = base_height;
 
     const double scale =
         isfinite(job->export_secondary_scale)
@@ -1557,11 +1518,11 @@ static int export_prepare_source_graph(
             opacity) ||
         !mlt_composition_get_geometry(
             graph->export_composite,
-            &graph->derived.layer2_x,
-            &graph->derived.layer2_y,
-            &graph->derived.layer2_width,
-            &graph->derived.layer2_height,
-            &graph->derived.layer2_opacity)) {
+            &layer2->x,
+            &layer2->y,
+            &layer2->width,
+            &layer2->height,
+            &layer2->opacity)) {
         export_set_failure(
             failure,
             failure_size,
@@ -1748,7 +1709,6 @@ static int export_prepare_source_graph(
         goto fail;
     }
 
-    export_sync_indexed_derived_state(&graph->derived);
     graph->derived.valid = 1;
     *in_frame_out = in_frame;
     *out_frame_out = out_frame;
@@ -2980,7 +2940,6 @@ int mlt_export_derive_composition(
 {
     if (state_out != NULL) {
         memset(state_out, 0, sizeof(*state_out));
-        state_out->layer2_start_frame = -1;
     }
 
     if (error_buffer != NULL && error_capacity > 0) {

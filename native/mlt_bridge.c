@@ -2379,58 +2379,6 @@ static double preview_track_gain_locked(int track_index)
 }
 
 
-static void preview_sync_indexed_derived_state(
-    MltCompositionDerivedState *state)
-{
-    if (state == NULL) {
-        return;
-    }
-
-    memset(state->layers, 0, sizeof(state->layers));
-
-    if (state->layer_count < 1) {
-        return;
-    }
-
-    MltCompositionLayerDerivedState *base =
-        &state->layers[MLT_COMPOSITION_BASE_LAYER];
-
-    base->present = 1;
-    base->start_frame = 0;
-    base->timeline_length = state->composition_length;
-    base->base_width = state->profile_width;
-    base->base_height = state->profile_height;
-    base->x = 0.0;
-    base->y = 0.0;
-    base->width = state->profile_width;
-    base->height = state->profile_height;
-    base->opacity = 1.0;
-    base->has_audio = state->base_has_audio;
-    base->audio_gain = state->base_audio_gain;
-
-    if (state->layer_count < 2) {
-        return;
-    }
-
-    MltCompositionLayerDerivedState *layer2 =
-        &state->layers[MLT_COMPOSITION_FIRST_OVERLAY];
-
-    layer2->present = 1;
-    layer2->start_frame = state->layer2_start_frame;
-    layer2->timeline_length = state->layer2_timeline_length;
-    layer2->is_still = state->layer2_is_still;
-    layer2->alpha_mode = state->layer2_alpha_mode;
-    layer2->base_width = state->layer2_base_width;
-    layer2->base_height = state->layer2_base_height;
-    layer2->x = state->layer2_x;
-    layer2->y = state->layer2_y;
-    layer2->width = state->layer2_width;
-    layer2->height = state->layer2_height;
-    layer2->opacity = state->layer2_opacity;
-    layer2->has_audio = state->layer2_has_audio;
-    layer2->audio_gain = state->layer2_audio_gain;
-}
-
 static int snapshot_export_composition_locked(
     MltExportCompositionSnapshot *snapshot,
     char *failure,
@@ -2584,7 +2532,11 @@ static int derive_preview_composition_locked(
     }
 
     memset(state, 0, sizeof(*state));
-    state->layer2_start_frame = -1;
+    for (int index = MLT_COMPOSITION_FIRST_OVERLAY;
+         index < MLT_COMPOSITION_MAX_LAYERS;
+         index++) {
+        state->layers[index].start_frame = -1;
+    }
 
     const int64_t composition_length =
         (int64_t)mlt_producer_get_length(current_engine()->e_primary_producer);
@@ -2606,18 +2558,33 @@ static int derive_preview_composition_locked(
         return 0;
     }
 
-    state->layer_count = current_engine()->e_track_count >= 3 ? 3 : (current_engine()->e_track_count >= 2 ? 2 : 1);
+    state->layer_count =
+        current_engine()->e_track_count >= 3
+            ? 3
+            : (current_engine()->e_track_count >= 2 ? 2 : 1);
     state->profile_width = current_engine()->e_profile->width;
     state->profile_height = current_engine()->e_profile->height;
     state->profile_fps = mlt_profile_fps(current_engine()->e_profile);
     state->composition_length = composition_length;
     state->range_in_frame = normalized_in;
     state->range_out_frame = normalized_out;
-    state->base_has_audio = current_engine()->e_track_has_audio[0] ? 1 : 0;
-    state->base_audio_gain = preview_track_gain_locked(0);
+
+    MltCompositionLayerDerivedState *base =
+        &state->layers[MLT_COMPOSITION_BASE_LAYER];
+    base->present = 1;
+    base->start_frame = 0;
+    base->timeline_length = composition_length;
+    base->base_width = state->profile_width;
+    base->base_height = state->profile_height;
+    base->x = 0.0;
+    base->y = 0.0;
+    base->width = state->profile_width;
+    base->height = state->profile_height;
+    base->opacity = 1.0;
+    base->has_audio = current_engine()->e_track_has_audio[0] ? 1 : 0;
+    base->audio_gain = preview_track_gain_locked(0);
 
     if (state->layer_count == 1) {
-        preview_sync_indexed_derived_state(state);
         state->valid = 1;
         return 1;
     }
@@ -2631,18 +2598,21 @@ static int derive_preview_composition_locked(
         return 0;
     }
 
-    state->layer2_start_frame = current_engine()->e_secondary_start_frame;
-    state->layer2_timeline_length =
+    MltCompositionLayerDerivedState *layer2 =
+        &state->layers[MLT_COMPOSITION_FIRST_OVERLAY];
+    layer2->present = 1;
+    layer2->start_frame = current_engine()->e_secondary_start_frame;
+    layer2->timeline_length =
         (int64_t)mlt_producer_get_length(
             mlt_playlist_producer(current_engine()->e_secondary_playlist)
         );
-    state->layer2_is_still = current_engine()->e_secondary_is_still ? 1 : 0;
-    state->layer2_alpha_mode = current_engine()->e_secondary_alpha_mode;
-    state->layer2_has_audio = current_engine()->e_track_has_audio[1] ? 1 : 0;
-    state->layer2_audio_gain = preview_track_gain_locked(1);
+    layer2->is_still = current_engine()->e_secondary_is_still ? 1 : 0;
+    layer2->alpha_mode = current_engine()->e_secondary_alpha_mode;
+    layer2->has_audio = current_engine()->e_track_has_audio[1] ? 1 : 0;
+    layer2->audio_gain = preview_track_gain_locked(1);
 
     if (current_engine()->e_secondary_alpha_filter != NULL) {
-        state->layer2_alpha_mode =
+        layer2->alpha_mode =
             mlt_properties_get_int(
                 MLT_FILTER_PROPERTIES(current_engine()->e_secondary_alpha_filter),
                 "mlt_player_alpha_mode"
@@ -2652,23 +2622,21 @@ static int derive_preview_composition_locked(
     if (!mlt_composition_secondary_base_size(
             current_engine()->e_profile,
             current_engine()->e_secondary_producer,
-            state->layer2_is_still,
-            &state->layer2_base_width,
-            &state->layer2_base_height) ||
+            layer2->is_still,
+            &layer2->base_width,
+            &layer2->base_height) ||
         !mlt_composition_get_geometry(
             current_engine()->e_video_composite,
-            &state->layer2_x,
-            &state->layer2_y,
-            &state->layer2_width,
-            &state->layer2_height,
-            &state->layer2_opacity)) {
+            &layer2->x,
+            &layer2->y,
+            &layer2->width,
+            &layer2->height,
+            &layer2->opacity)) {
         if (failure != NULL && failure_size > 0) {
             snprintf(failure, failure_size, "%s", "Could not derive the preview Layer 2 geometry.");
         }
         return 0;
     }
-
-    preview_sync_indexed_derived_state(state);
 
     if (state->layer_count >= 3) {
         if (current_engine()->e_tertiary_producer == NULL ||
@@ -2790,11 +2758,9 @@ int mlt_bridge_debug_composition_parity(
 
     if (preview_state != NULL) {
         memset(preview_state, 0, sizeof(*preview_state));
-        preview_state->layer2_start_frame = -1;
     }
     if (export_state != NULL) {
         memset(export_state, 0, sizeof(*export_state));
-        export_state->layer2_start_frame = -1;
     }
     if (error_buffer != NULL && error_capacity > 0) {
         error_buffer[0] = '\0';

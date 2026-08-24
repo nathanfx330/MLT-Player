@@ -4,134 +4,136 @@ import 'dart:ui' as ui show FontFeature;
 
 import 'package:flutter/material.dart';
 
+import '../../services/player_engine.dart';
+
+typedef LayerDoubleChanged = void Function(int layerIndex, double value);
+typedef LayerIntChanged = void Function(int layerIndex, int value);
+typedef LayerAction = void Function(int layerIndex);
+
 class LayersInspector extends StatelessWidget {
   const LayersInspector({
     super.key,
-    required this.layerCount,
-    required this.primaryName,
-    required this.secondaryName,
-    required this.secondaryStart,
-    required this.tertiaryName,
-    required this.tertiaryStart,
-    required this.primaryHasAudio,
-    required this.secondaryHasAudio,
-    required this.tertiaryHasAudio,
-    required this.secondaryIsStill,
-    required this.tertiaryIsStill,
-    required this.secondaryHasAlpha,
-    required this.tertiaryHasAlpha,
-    required this.secondaryAlphaMode,
-    required this.tertiaryAlphaMode,
-    required this.primaryAudioGain,
-    required this.secondaryAudioGain,
-    required this.tertiaryAudioGain,
-    required this.secondaryOpacity,
-    required this.tertiaryOpacity,
-    required this.secondaryVisible,
-    required this.tertiaryVisible,
-    required this.secondaryX,
-    required this.secondaryY,
-    required this.secondaryScale,
-    required this.tertiaryX,
-    required this.tertiaryY,
-    required this.tertiaryScale,
+    required this.layers,
+    required this.formatFrame,
     required this.baseWidth,
     required this.baseHeight,
     required this.canAddLayer,
     required this.canSwapLayers,
-    required this.onPrimaryAudioChanged,
-    required this.onSecondaryAudioChanged,
-    required this.onTertiaryAudioChanged,
-    required this.onSecondaryOpacityChanged,
-    required this.onTertiaryOpacityChanged,
-    required this.onSecondaryAlphaModeChanged,
-    required this.onTertiaryAlphaModeChanged,
-    required this.onSecondaryXChanged,
-    required this.onSecondaryYChanged,
-    required this.onSecondaryScaleChanged,
-    required this.onSecondaryAnchorChanged,
-    required this.onTertiaryXChanged,
-    required this.onTertiaryYChanged,
-    required this.onTertiaryScaleChanged,
-    required this.onTertiaryAnchorChanged,
-    required this.onReplacePrimarySource,
-    required this.onReplaceSecondarySource,
-    required this.onReplaceTertiarySource,
-    required this.onToggleSecondaryVisible,
-    required this.onToggleTertiaryVisible,
+    required this.onAudioChanged,
+    required this.onOpacityChanged,
+    required this.onAlphaModeChanged,
+    required this.onXChanged,
+    required this.onYChanged,
+    required this.onScaleChanged,
+    required this.onAnchorChanged,
+    required this.onReplaceSource,
+    required this.onToggleVisible,
     required this.onAddLayer,
     required this.onRemoveTopLayer,
     required this.onSwapLayers,
     required this.onClose,
   });
 
-  final int layerCount;
-  final String primaryName;
-  final String secondaryName;
-  final String secondaryStart;
-  final String? tertiaryName;
-  final String? tertiaryStart;
-
-  final bool primaryHasAudio;
-  final bool secondaryHasAudio;
-  final bool tertiaryHasAudio;
-  final bool secondaryIsStill;
-  final bool tertiaryIsStill;
-  final bool secondaryHasAlpha;
-  final bool tertiaryHasAlpha;
-  final int secondaryAlphaMode;
-  final int tertiaryAlphaMode;
-
-  final double primaryAudioGain;
-  final double secondaryAudioGain;
-  final double tertiaryAudioGain;
-  final double secondaryOpacity;
-  final double tertiaryOpacity;
-  final bool secondaryVisible;
-  final bool tertiaryVisible;
-  final double secondaryX;
-  final double secondaryY;
-  final double secondaryScale;
-  final double tertiaryX;
-  final double tertiaryY;
-  final double tertiaryScale;
+  final List<CompositionLayerState> layers;
+  final String Function(int frame) formatFrame;
   final int baseWidth;
   final int baseHeight;
 
   final bool canAddLayer;
   final bool canSwapLayers;
 
-  final ValueChanged<double> onPrimaryAudioChanged;
-  final ValueChanged<double> onSecondaryAudioChanged;
-  final ValueChanged<double> onTertiaryAudioChanged;
-  final ValueChanged<double> onSecondaryOpacityChanged;
-  final ValueChanged<double> onTertiaryOpacityChanged;
-  final ValueChanged<int> onSecondaryAlphaModeChanged;
-  final ValueChanged<int> onTertiaryAlphaModeChanged;
-  final ValueChanged<double> onSecondaryXChanged;
-  final ValueChanged<double> onSecondaryYChanged;
-  final ValueChanged<double> onSecondaryScaleChanged;
-  final ValueChanged<int> onSecondaryAnchorChanged;
-  final ValueChanged<double> onTertiaryXChanged;
-  final ValueChanged<double> onTertiaryYChanged;
-  final ValueChanged<double> onTertiaryScaleChanged;
-  final ValueChanged<int> onTertiaryAnchorChanged;
-  final VoidCallback onReplacePrimarySource;
-  final VoidCallback onReplaceSecondarySource;
-  final VoidCallback onReplaceTertiarySource;
-  final VoidCallback onToggleSecondaryVisible;
-  final VoidCallback onToggleTertiaryVisible;
+  final LayerDoubleChanged onAudioChanged;
+  final LayerDoubleChanged onOpacityChanged;
+  final LayerIntChanged onAlphaModeChanged;
+  final LayerDoubleChanged onXChanged;
+  final LayerDoubleChanged onYChanged;
+  final LayerDoubleChanged onScaleChanged;
+  final LayerIntChanged onAnchorChanged;
+  final LayerAction onReplaceSource;
+  final LayerAction onToggleVisible;
   final VoidCallback onAddLayer;
   final VoidCallback onRemoveTopLayer;
   final VoidCallback onSwapLayers;
   final VoidCallback onClose;
 
+  String _displayName(CompositionLayerState layer) {
+    final path = layer.path;
+    if (path == null || path.isEmpty) {
+      return 'Layer ${layer.index + 1}';
+    }
+
+    final normalized = path.replaceAll('\\', '/');
+    final parts = normalized.split('/');
+    return parts.isEmpty || parts.last.isEmpty ? path : parts.last;
+  }
+
   @override
   Widget build(BuildContext context) {
+    final visibleLayers = layers
+        .where((CompositionLayerState layer) => layer.present)
+        .toList(growable: false);
+    final layerCount = visibleLayers.length;
+
     final availableBodyHeight =
         (MediaQuery.sizeOf(context).height - 120)
             .clamp(280.0, 720.0)
             .toDouble();
+
+    final sections = <Widget>[];
+    for (final layer in visibleLayers) {
+      if (sections.isNotEmpty) {
+        sections.add(const Divider(height: 1, color: Colors.white30));
+      }
+
+      if (layer.index == 0) {
+        sections.add(
+          _LayerSection(
+            number: 1,
+            name: _displayName(layer),
+            badge: 'BASE VIDEO',
+            start: '00:00:00:00',
+            videoLabel: 'BASE LAYER',
+            audioEnabled: layer.hasAudio,
+            audioGain: layer.audioGain,
+            onAudioChanged: (value) => onAudioChanged(layer.index, value),
+            onReplaceSource: () => onReplaceSource(layer.index),
+          ),
+        );
+        continue;
+      }
+
+      sections.add(
+        _LayerSection(
+          number: layer.index + 1,
+          name: _displayName(layer),
+          badge: layer.isStill ? 'STILL' : 'VIDEO',
+          start: formatFrame(layer.startFrame ?? 0),
+          videoOpacity: layer.opacity,
+          videoVisible: layer.visible,
+          sizeLabel: layer.isStill
+              ? '100% = NATIVE • FIT IF LARGER'
+              : '100% = FIT TO BASE FRAME',
+          positionX: layer.x,
+          positionY: layer.y,
+          scale: layer.scale,
+          baseWidth: baseWidth,
+          baseHeight: baseHeight,
+          audioEnabled: layer.hasAudio,
+          audioGain: layer.audioGain,
+          alphaMode: layer.alphaMode,
+          hasAlpha: layer.hasAlpha,
+          onVideoOpacityChanged: (value) => onOpacityChanged(layer.index, value),
+          onPositionXChanged: (value) => onXChanged(layer.index, value),
+          onPositionYChanged: (value) => onYChanged(layer.index, value),
+          onScaleChanged: (value) => onScaleChanged(layer.index, value),
+          onAnchorChanged: (anchor) => onAnchorChanged(layer.index, anchor),
+          onAudioChanged: (value) => onAudioChanged(layer.index, value),
+          onAlphaModeChanged: (mode) => onAlphaModeChanged(layer.index, mode),
+          onReplaceSource: () => onReplaceSource(layer.index),
+          onToggleVideoVisible: () => onToggleVisible(layer.index),
+        ),
+      );
+    }
 
     return Material(
       color: const Color(0xF2191919),
@@ -148,88 +150,14 @@ class LayersInspector extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            _buildHeader(),
+            _buildHeader(layerCount),
             const Divider(height: 1, color: Colors.white24),
             ConstrainedBox(
               constraints: BoxConstraints(maxHeight: availableBodyHeight),
               child: SingleChildScrollView(
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
-                  children: [
-                    _LayerSection(
-                      number: 1,
-                      name: primaryName,
-                      badge: 'BASE VIDEO',
-                      start: '00:00:00:00',
-                      videoLabel: 'BASE LAYER',
-                      audioEnabled: primaryHasAudio,
-                      audioGain: primaryAudioGain,
-                      onAudioChanged: onPrimaryAudioChanged,
-                      onReplaceSource: onReplacePrimarySource,
-                    ),
-                    const Divider(height: 1, color: Colors.white30),
-                    _LayerSection(
-                      number: 2,
-                      name: secondaryName,
-                      badge: secondaryIsStill ? 'STILL' : 'VIDEO',
-                      start: secondaryStart,
-                      videoOpacity: secondaryOpacity,
-                      videoVisible: secondaryVisible,
-                      sizeLabel: secondaryIsStill
-                          ? '100% = NATIVE • FIT IF LARGER'
-                          : '100% = FIT TO BASE FRAME',
-                      positionX: secondaryX,
-                      positionY: secondaryY,
-                      scale: secondaryScale,
-                      baseWidth: baseWidth,
-                      baseHeight: baseHeight,
-                      audioEnabled: secondaryHasAudio,
-                      audioGain: secondaryAudioGain,
-                      alphaMode: secondaryAlphaMode,
-                      hasAlpha: secondaryHasAlpha,
-                      onVideoOpacityChanged: onSecondaryOpacityChanged,
-                      onPositionXChanged: onSecondaryXChanged,
-                      onPositionYChanged: onSecondaryYChanged,
-                      onScaleChanged: onSecondaryScaleChanged,
-                      onAnchorChanged: onSecondaryAnchorChanged,
-                      onAudioChanged: onSecondaryAudioChanged,
-                      onAlphaModeChanged: onSecondaryAlphaModeChanged,
-                      onReplaceSource: onReplaceSecondarySource,
-                      onToggleVideoVisible: onToggleSecondaryVisible,
-                    ),
-                    if (layerCount >= 3 && tertiaryName != null) ...[
-                      const Divider(height: 1, color: Colors.white30),
-                      _LayerSection(
-                        number: 3,
-                        name: tertiaryName!,
-                        badge: tertiaryIsStill ? 'STILL' : 'VIDEO',
-                        start: tertiaryStart ?? '00:00:00:00',
-                        videoOpacity: tertiaryOpacity,
-                        videoVisible: tertiaryVisible,
-                        sizeLabel: tertiaryIsStill
-                            ? '100% = NATIVE • FIT IF LARGER'
-                            : '100% = FIT TO BASE FRAME',
-                        positionX: tertiaryX,
-                        positionY: tertiaryY,
-                        scale: tertiaryScale,
-                        baseWidth: baseWidth,
-                        baseHeight: baseHeight,
-                        audioEnabled: tertiaryHasAudio,
-                        audioGain: tertiaryAudioGain,
-                        alphaMode: tertiaryAlphaMode,
-                        hasAlpha: tertiaryHasAlpha,
-                        onVideoOpacityChanged: onTertiaryOpacityChanged,
-                        onPositionXChanged: onTertiaryXChanged,
-                        onPositionYChanged: onTertiaryYChanged,
-                        onScaleChanged: onTertiaryScaleChanged,
-                        onAnchorChanged: onTertiaryAnchorChanged,
-                        onAudioChanged: onTertiaryAudioChanged,
-                        onAlphaModeChanged: onTertiaryAlphaModeChanged,
-                        onReplaceSource: onReplaceTertiarySource,
-                        onToggleVideoVisible: onToggleTertiaryVisible,
-                      ),
-                    ],
-                  ],
+                  children: sections,
                 ),
               ),
             ),
@@ -239,7 +167,7 @@ class LayersInspector extends StatelessWidget {
     );
   }
 
-  Widget _buildHeader() {
+  Widget _buildHeader(int layerCount) {
     return SizedBox(
       height: 38,
       child: Padding(
@@ -274,7 +202,7 @@ class LayersInspector extends StatelessWidget {
             IconButton(
               tooltip: canAddLayer
                   ? 'Add Layer ${layerCount + 1}'
-                  : 'Maximum of 3 layers',
+                  : 'Maximum of ${layers.length} layers',
               visualDensity: VisualDensity.compact,
               iconSize: 17,
               onPressed: canAddLayer ? onAddLayer : null,

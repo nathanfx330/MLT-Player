@@ -50,14 +50,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          expected='7.22.0'
+          expected_series='7.22'
           actual="$(pkg-config --modversion mlt-framework-7)"
 
-          echo "Expected MLT: $expected"
+          echo "Expected MLT series: ${expected_series}.x"
           echo "Installed MLT: $actual"
 
-          if [[ "$actual" != "$expected" ]]; then
-            echo "::error::CI requires MLT $expected, but the runner provides $actual."
+          if [[ "$actual" != "${expected_series}."* ]]; then
+            echo "::error::CI is validated against MLT ${expected_series}.x, but the runner provides $actual."
+            echo "::error::Before raising the baseline, run tools/pts_diag.sh on the candidate MLT version and reconsider promoting its audio-flush check to a zero-warning regression gate."
             exit 1
           fi
 
@@ -69,6 +70,9 @@ jobs:
 
       - name: Analyze Dart
         run: flutter analyze
+
+      - name: Run Dart regression tests
+        run: flutter test
 
       - name: Run native smoke and preview/export parity
         shell: bash
