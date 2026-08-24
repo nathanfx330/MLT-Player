@@ -53,6 +53,17 @@ void main() {
       expect(items[5].kind, ExplorerItemKind.image);
     });
 
+    test('scan captures lightweight stat data for sorting', () async {
+      final items = await service.scanDirectory(root.path);
+      final clip = items.firstWhere((item) => item.name == 'clip.MP4');
+      final folder = items.firstWhere((item) => item.name == 'a folder');
+
+      expect(clip.sizeBytes, 5);
+      expect(clip.modified, isNotNull);
+      expect(folder.sizeBytes, isNull);
+      expect(folder.modified, isNotNull);
+    });
+
     test('extension matching is case insensitive', () {
       expect(service.kindForPath('/tmp/A.MOV'), ExplorerItemKind.video);
       expect(service.kindForPath('/tmp/A.FLAC'), ExplorerItemKind.audio);

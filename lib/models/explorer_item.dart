@@ -15,11 +15,15 @@ class ExplorerItem {
     required this.path,
     required this.name,
     required this.kind,
+    this.sizeBytes,
+    this.modified,
   });
 
   final String path;
   final String name;
   final ExplorerItemKind kind;
+  final int? sizeBytes;
+  final DateTime? modified;
 
   bool get isDirectory => kind == ExplorerItemKind.directory;
 
@@ -37,19 +41,29 @@ class ExplorerItem {
     return slash == -1 ? normalized : normalized.substring(slash + 1);
   }
 
-  static ExplorerItem directory(Directory directory) {
+  static ExplorerItem directory(
+    Directory directory, {
+    FileStat? stat,
+  }) {
     return ExplorerItem(
       path: directory.path,
       name: basename(directory.path),
       kind: ExplorerItemKind.directory,
+      modified: stat?.modified,
     );
   }
 
-  static ExplorerItem media(File file, ExplorerItemKind kind) {
+  static ExplorerItem media(
+    File file,
+    ExplorerItemKind kind, {
+    FileStat? stat,
+  }) {
     return ExplorerItem(
       path: file.path,
       name: basename(file.path),
       kind: kind,
+      sizeBytes: stat?.size,
+      modified: stat?.modified,
     );
   }
 }

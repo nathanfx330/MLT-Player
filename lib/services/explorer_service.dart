@@ -34,34 +34,48 @@ class ExplorerService {
       throw FileSystemException('Directory does not exist.', path);
     }
 
-    final items = <ExplorerItem>[];
+    final entities = await directory.list(followLinks: false).toList();
+    final items = await Future.wait(entities.map(_itemForEntity));
 
-    await for (final entity in directory.list(followLinks: false)) {
-      if (entity is Directory) {
-        items.add(ExplorerItem.directory(entity));
-        continue;
-      }
-
-      if (entity is! File) {
-        continue;
-      }
-
-      final kind = kindForPath(entity.path);
-      if (kind == null) {
-        continue;
-      }
-
-      items.add(ExplorerItem.media(entity, kind));
-    }
-
-    items.sort((a, b) {
+    final supported = items.whereType<ExplorerItem>().toList();
+    supported.sort((a, b) {
       if (a.isDirectory != b.isDirectory) {
         return a.isDirectory ? -1 : 1;
       }
       return a.name.toLowerCase().compareTo(b.name.toLowerCase());
     });
 
-    return items;
+    return supported;
+  }
+
+  Future<ExplorerItem?> _itemForEntity(FileSystemEntity entity) async {
+    if (entity is Directory) {
+      FileStat? stat;
+      try {
+        stat = await entity.stat();
+      } on FileSystemException {
+        // The directory can still be browsed even if metadata raced away.
+      }
+      return ExplorerItem.directory(entity, stat: stat);
+    }
+
+    if (entity is! File) {
+      return null;
+    }
+
+    final kind = kindForPath(entity.path);
+    if (kind == null) {
+      return null;
+    }
+
+    FileStat? stat;
+    try {
+      stat = await entity.stat();
+    } on FileSystemException {
+      // Keep the media visible; metadata-backed sorts safely fall back.
+    }
+
+    return ExplorerItem.media(entity, kind, stat: stat);
   }
 
   ExplorerItemKind? kindForPath(String path) {
