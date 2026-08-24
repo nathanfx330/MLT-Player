@@ -1,73 +1,85 @@
 <!-- docs/poc-10-layer-ordering-and-atomic-role-swaps.md -->
 
-# POC 10 continuation: Layer Ordering, Role Swaps, and Atomic Presentation
+# POC 10 continuation: Layer Ordering, Role Promotion, and Atomic Presentation
 
 ## Field notes from making layer order behave like a finished application
 
-The first POC 10 document ends at a hardened three-layer composition with stable indexed slots, preview/export parity, timing/source trims, and atomic Layer 3 Remove/Undo restoration.
+The first POC 10 document ends with a hardened three-layer tractor, stable
+indexed slots, timing/source trims, composition history, preview/export parity,
+and seamless Layer 3 Remove/Undo restoration.
 
-The next problem looked smaller than it was:
+The next problem initially looked like a UI detail:
 
 ```text
 Move Up / Move Down
 ```
 
-In practice it forced MLT Player to separate three concepts that had previously been allowed to overlap:
+It forced the project to separate three concepts that cannot safely be treated
+as synonyms:
 
 ```text
-logical layer identity
+media identity
 visual Z-order
 base-movie authority
 ```
 
-It also exposed a second class of problem. A composition can be logically correct and still look broken if the user sees the graph being rebuilt one property at a time.
+It also exposed a second class of correctness problem: the final graph can be
+right while the application still looks broken if the user watches that graph
+being rebuilt one property at a time.
 
-This note records the ordering model, the two-layer base-role swap, cross-aspect fitting, and the presentation pipeline that made the swap visually atomic.
+This note records the final ordering model, true base-role promotion through all
+three current slots, cross-frame-rate/cross-aspect handling, and the atomic
+presentation pipeline that made those operations feel finished.
 
-The implementation described here was developed and tested against **MLT 7.22.0 on Linux**.
+The implementation described here was developed and tested against **MLT
+7.22.0 on Linux**.
 
 ---
 
-# 1. Visual order is not the same thing as logical identity
+# 1. Visual order is explicit state
 
-The indexed composition model remains:
+The fixed logical composition remains:
 
 ```text
-slot 0 = Layer 1
+slot 0 = Layer 1 / base
 slot 1 = Layer 2
 slot 2 = Layer 3
 ```
 
-Those slots are still the stable ABI and history/export identity of the layers.
+Those indices are the ABI, history, and export identities.
 
-Generalized visual ordering adds a separate permutation describing how the present layers are stacked. Moving a layer therefore does not need to swap every property between two state objects.
+Visual Z-order is a separate permutation.
 
-A reorder preserves the layer's own:
+That means a normal visual reorder can change where a layer is drawn without
+moving all of its state into another object.
+
+A reordered media asset keeps its own:
 
 - source path
 - timeline START / END
 - timed-video SOURCE IN / SOURCE OUT
-- source length metadata
+- source-length metadata
 - position / scale / anchors
 - opacity / visibility
 - alpha interpretation
 - audio presence / gain
 
-The same order permutation is carried through preview/export parity, so offline output reproduces the stack shown by the player.
+Preview and export carry the same visual permutation.
 
-The Layers inspector is also sorted by the actual visual stack rather than assuming slot number always equals screen order.
+The Layers inspector is sorted by actual visual position rather than assuming
+slot number equals screen order.
 
 ---
 
-# 2. Overlay-only reordering was the first safe proof
+# 2. Overlay-only ordering proved the model first
 
-The first generalized slice only exchanged the visual positions of Layer 2 and Layer 3.
+The safest first proof was Layer 2 ↔ Layer 3.
 
-Layer 1 stayed the base authority, so the proof could concentrate on one question:
+Both remained overlays, so base profile, frame zero, and movie duration stayed
+unchanged.
 
-> Can two overlays exchange visual order without losing any of their independent state?
-
-The regression fixture deliberately gave the two overlays different timing, source trims, geometry, opacity, alpha/audio state, and then verified:
+The regression fixture deliberately gave the two overlays different timing,
+source trim, geometry, opacity, alpha, and audio state, then verified:
 
 ```text
 reorder
@@ -76,281 +88,371 @@ Redo
 preview/export parity
 ```
 
-That proved visual order could become explicit state without destabilizing the existing composition model.
+That proved visual order could be explicit state without destabilizing logical
+layer ownership.
 
 ---
 
-# 3. Layer 1 introduced a role question, not just a Z-order question
+# 3. Crossing Layer 1 is a role question
 
-Allowing Layer 1 to move visually exposed an important UX distinction.
+Allowing Layer 1 to participate visually exposed an important distinction.
 
-A purely visual move can put the base picture above or below another layer while keeping the same logical base authority. That is useful in a three-layer stack and is supported by the generalized Z-order model.
+A visual move can draw the current base above another layer while Layer 1 still
+owns profile, frame zero, and duration.
 
-But in the two-layer QuickTime-style workflow, users naturally expect this operation:
+But QuickTime-style movement across the base boundary has a stronger meaning.
 
-```text
-Layer 2 -> move into Layer 1
-```
+If a timed overlay is moved into the Layer-1 role, users expect it to become the
+actual base authority.
 
-to mean more than "draw Layer 2 underneath or above the old base."
-
-They expect a **role swap**:
-
-```text
-old Layer 2 -> new Layer 1 / base
-old Layer 1 -> new Layer 2 / editable overlay
-```
-
-The displaced base must therefore gain the full overlay control set rather than remaining a base-only object that merely happens to be drawn second.
-
-That semantic correction reused the earlier proven base/overlay swap path instead of inventing a second implementation.
+That is a **role promotion**, not merely a draw-order change.
 
 ---
 
-# 4. A true base-role swap changes profile authority
+# 4. True base promotion changes profile authority
 
-When a timed Layer 2 becomes Layer 1, the promoted source becomes the new base movie.
+When a timed video becomes Layer 1, it becomes authoritative for:
 
-It therefore becomes authoritative for:
-
-- movie canvas/profile
+- canvas/profile
 - frame zero
 - base frame rate
 - movie duration
 
 A still image cannot be promoted into Layer 1.
 
-Because the old and new base can have different frame rates, placement and playhead values are converted through time rather than copied as raw frame numbers.
+A base-role change establishes a new composition baseline because old history
+entries were recorded against a different frame-zero/profile authority.
 
-Conceptually:
+---
+
+# 5. Two-layer promotion established the first real role exchange
+
+The first completed role change was:
 
 ```text
-old frame / old fps -> seconds -> new frame at new fps
+old Layer 1 / base
+old Layer 2 / timed overlay
 ```
 
-Inclusive END boundaries are converted through the exclusive boundary (`END + 1`) and converted back afterward, matching the same boundary policy used by output-frame-rate conform.
+becoming:
 
-The role-swap transaction establishes a new composition baseline rather than trying to replay old history against a different base timeline.
+```text
+old Layer 2 -> new Layer 1 / base
+old Layer 1 -> new Layer 2 / overlay
+```
 
----
+The displaced former base receives the normal overlay control set.
 
-# 5. Properties belong to media assets, not to the slot they happened to occupy
-
-The first role-swap implementation reached the correct topology but exposed a subtle bug with very different source shapes.
-
-If a vertical Layer 2 was promoted over a horizontal base, the displaced horizontal video initially inherited Layer 2's old overlay transform.
-
-That was the wrong ownership rule.
-
-The correct rule is:
-
-> Presentation properties belong to the media state being edited; a displaced base should not inherit an unrelated overlay's transform merely because it now occupies that slot.
-
-The corrected swap re-adds the old base as a fresh overlay on the new canvas. MLT Player computes a sane fitted presentation for that media and canvas.
-
-This is why a horizontal former base now fits naturally inside a vertical promoted base rather than adopting the vertical clip's previous geometry.
+This was the first point where the implementation had to stop thinking of
+"Layer 1" as just the lowest visual item.
 
 ---
 
-# 6. Logical correctness was not enough: rebuilds had to become invisible
+# 6. Properties belong to media, not to the slot
 
-After the role swap was functionally correct, the viewer still exposed the rebuild sequence for a fraction of a second.
+A cross-aspect bug made the ownership rule explicit.
 
-The visible pattern was effectively:
+A vertical Layer 2 promoted over a horizontal base initially caused the
+displaced horizontal source to inherit the vertical overlay's previous X/Y/scale.
+
+That was wrong.
+
+The rule became:
+
+> Existing media-owned edits stay with their media. A former base becoming an
+> overlay is a fresh overlay presentation and must be fitted against the new
+> canvas.
+
+So the displaced base is re-added through the normal MLT overlay path and gets
+a sane fitted/centered transform for its new canvas.
+
+---
+
+# 7. Three-layer Layer 2 promotion
+
+Once Layer 3 existed, Layer 2 promotion had to preserve the third media asset.
+
+The role exchange became:
+
+```text
+before: A(base), B(L2), C(L3)
+after:  B(base), A(L2), C(L3)
+```
+
+Layer 3 stays Layer 3.
+
+Its media-owned presentation and audio state are preserved.
+
+Its timeline START/END and timed SOURCE IN/OUT are converted through time when
+the promoted base changes frame rate.
+
+The old base is re-added as a fresh Layer 2 so cross-aspect fitting remains
+correct.
+
+---
+
+# 8. Three-layer Layer 3 promotion completed the model
+
+Layer 3 promotion is intentionally adjacent-boundary driven.
+
+Layer 3 can first cross Layer 2 as a normal visual reorder.
+
+Once Layer 3 is adjacent to Layer 1, crossing the base boundary performs the
+true role exchange:
+
+```text
+before: A(base), B(L2), C(L3)
+after:  C(base), B(L2), A(L3)
+```
+
+Layer 2 remains Layer 2 and preserves its own state.
+
+The displaced old base becomes a fresh Layer 3.
+
+This completed timed-video base-role promotion across all three current slots
+without turning every visual reorder into a destructive slot rotation.
+
+---
+
+# 9. Cross-frame-rate conversion is boundary-by-time conversion
+
+Raw frame numbers cannot survive a base-rate change.
+
+The rule is:
+
+```text
+old frame / old fps
+        ↓
+     seconds
+        ↓
+new frame at new fps
+```
+
+START-like boundaries use direct time conversion.
+
+Inclusive END / SOURCE OUT values use the exclusive boundary:
+
+```text
+inclusive end N
+→ exclusive boundary N + 1
+→ convert through seconds
+→ subtract 1
+```
+
+The same semantic policy is used by explicit output-frame-rate conform.
+
+This keeps represented time ranges stable when a promoted source has a
+different frame rate.
+
+---
+
+# 10. Functional correctness was not enough
+
+Early role swaps reached the correct final graph but briefly showed the rebuild:
 
 ```text
 open promoted base
-add displaced base as overlay
-apply timing
-apply geometry
-apply opacity
-apply audio / alpha
-park final frame
+add displaced base
+restore surviving overlay
+restore geometry
+restore opacity
+restore alpha/audio
+restore visual order
+seek final playhead
 ```
 
-The final result was correct, but the user could watch some of those intermediate states flash by.
+The user could see intermediate states flash by.
 
-This was the same class of failure previously found in Layer 3 Remove/Undo, only harder because a role swap can also change the viewport aspect and GL texture dimensions.
+That made presentation atomicity part of edit correctness.
 
 ---
 
-# 7. Atomic presentation required barriers at more than one layer
+# 11. Atomic presentation uses several barriers
 
-The final presentation path uses several cooperating mechanisms.
+The final graph-changing presentation path combines several layers.
 
 ## Dart notification batching
 
-The engine holds `ChangeNotifier` publication while a graph-changing transaction is in progress. The inspector therefore does not walk through intermediate state values.
+`ChangeNotifier` publication is held while the graph is being rebuilt.
+
+The Inspector therefore does not walk through intermediate state.
 
 ## Native frame-publication freeze
 
-The last completed preview frame remains the published frame while MLT rebuilds the graph and reapplies state.
+The previous completed preview frame remains published during the destructive
+graph work.
 
 ## Final-frame readiness barrier
 
-Dart does not treat "refresh requested" as equivalent to "new frame ready." The transaction waits for the completed replacement frame to reach the native presentation path.
+Dart waits for the completed replacement frame to reach the native ready slot.
+"Refresh requested" is not treated as equivalent to "new frame rendered."
 
 ## Double-buffered OpenGL textures
 
-The texture currently displayed by Flutter is never resized or rewritten in place during a cross-aspect swap.
+The GL texture currently displayed by Flutter is not resized or overwritten in
+place during a cross-aspect swap.
 
-Instead:
+A hidden texture receives the replacement frame and any new-size allocation.
 
-```text
-front texture = currently displayed and read-only
-back texture  = hidden upload target
-```
-
-The new frame, including any new width/height allocation, is uploaded into the hidden texture. Only after that upload completes does the back texture become the next front texture.
-
-This prevents a live `glTexImage2D` reallocation from being visible to the compositor.
+Only the completed upload can become the new front texture.
 
 ## Flutter `Texture.freeze`
 
-Flutter's own `Texture` widget is frozen before the destructive part of the role swap.
+Flutter's `Texture` widget is frozen before graph mutation and released together
+with the final media/layout state.
 
-The intended transaction becomes:
+The intended presentation transaction is:
 
 ```text
-freeze already displayed Flutter texture
-wait until freeze is committed
-rebuild native composition
-prepare final frame behind the freeze
-update media/layout/inspector state
-unfreeze texture
+freeze old completed presentation
+        ↓
+rebuild MLT graph
+        ↓
+render completed replacement behind freeze
+        ↓
+publish new model/layout
+        ↓
+unfreeze
 ```
-
-The first frame Flutter is allowed to fetch for the new layout is therefore the completed replacement frame.
 
 ---
 
-# 8. The final first-swap hitch was a lazy-allocation problem
+# 12. First-swap prewarming removed the final cold-path hitch
 
-After the Flutter freeze and GL double buffering were in place, repeated swaps were visually perfect but the **first** cross-aspect swap after launch could still show a tiny intermediate blink.
+After double buffering and Flutter freeze, repeated cross-aspect swaps were
+clean but the first swap after launch could still expose a small cold-path hitch.
 
-That pattern was diagnostic:
+The remaining cost was lazy allocation of the alternate-size hidden texture.
 
-```text
-first swap  -> slightly imperfect
-second swap -> perfect
-third swap  -> perfect
-```
+The final preflight asks native code to determine the would-be promoted
+profile dimensions and allocate the inactive texture while the old composition
+is still visible.
 
-The remaining cost was one-time initialization of the alternate-size hidden texture path.
+Then the real frozen transaction begins.
 
-The final fix prewarms the would-be base profile before the first real role change.
-
-While the current composition remains visible, native code determines the dimensions Layer 2 would have as the base and preallocates the hidden GL texture to that profile.
-
-Only after the prewarm completes does the normal Flutter-freeze / rebuild / commit transaction begin.
-
-The tradeoff is intentional: the first promotion may wait briefly, but once it switches the user sees:
-
-```text
-old finished composition
-          ->
-new finished composition
-```
-
-with no visible assembly in between.
+This makes the first role promotion use the same prepared texture path as later
+promotions.
 
 ---
 
-# 9. Timing and source-trim edits use the same atomic rebuild discipline
+# 13. Timing/source-trim rebuilds use the same discipline
 
-The role-swap investigation also exposed that START / END and SOURCE IN / SOURCE OUT changes could briefly reveal their rebuild path.
+START / END and SOURCE IN / SOURCE OUT edits also rebuild playlist topology.
 
-Those graph-changing edits now use the same frozen-preview transaction rather than allowing the viewer to observe playlist reconstruction and property reapplication.
+They now share the same frozen-preview transaction rule:
 
-This keeps the model consistent:
-
-> Any edit that must rebuild the visible MLT graph should publish one completed visual state, not a sequence of implementation states.
+> Any edit that rebuilds the visible MLT graph should publish one completed
+> visual state, not a visible sequence of implementation states.
 
 ---
 
-# 10. Preview/export parity remains the correctness boundary
+# 14. Preview/export parity remains the correctness boundary
 
-Ordering is not allowed to become a preview-only concept.
+Visual ordering and layer timing cannot be preview-only concepts.
 
-The export snapshot carries the same indexed layer state plus visual-order information, and the worker rebuilds a graph that reproduces the preview stack.
+The export snapshot carries the indexed composition plus visual order and
+rebuilds it with fresh MLT objects on the worker graph.
 
-Focused native layer-order coverage verifies:
+The native safety net verifies:
 
-- two-layer visual ordering
+- two-layer ordering
 - three-layer ordering
-- complete layer-state preservation after reorder
+- complete state preservation after reorder
 - Layer 1 in bottom/middle/top visual positions
-- Layer 1 remains frame-zero/duration authority for visual-only reorders
-- preview/export order parity
-- invalid duplicate order rejection without damaging the existing graph
+- profile/frame-zero authority during visual-only reorder
+- preview/export visual-order parity
+- timing parity
+- source-trim parity
+- output-rate conform
+- invalid-order rejection
 
-The existing timing, source-trim, export-preset, and frame-rate-conform suites continue to run alongside the layer-order tests.
-
----
-
-# 11. Current ordering rules
-
-The current product deliberately distinguishes visual order from base-role promotion.
-
-### Three-layer visual ordering
-
-Layer 1, Layer 2, and Layer 3 participate in Move Up / Move Down visual ordering. Their logical indexed identities and per-layer state remain stable.
-
-### Two-layer base-role swap
-
-With exactly Layer 1 + Layer 2, crossing the Layer-1 boundary performs a true role swap when the promoted Layer 2 is timed video.
-
-The promoted source becomes the new base authority and the displaced former base becomes Layer 2 with the full overlay controls.
-
-### Current topology constraints
-
-- A still image cannot become Layer 1.
-- Layer 3 is still removed before Layer 2; removal topology remains conservative.
-- Arbitrary three-layer **role promotion** into the base slot is not yet generalized. Three-layer visual order and two-layer base-role swapping are separate, explicit behaviors.
-- A fourth layer remains rejected.
-
-These constraints are intentional. MLT Player is still optimizing for a precise QuickTime-style utility rather than silently turning into a general NLE timeline.
+Role promotion itself is orchestrated by Dart around the existing hardened
+native graph APIs and is additionally proved through interactive Player testing.
 
 ---
 
-# 12. What this milestone proves
+# 15. Final POC 10 ordering rules
 
-The completed ordering/role-swap milestone now demonstrates:
+The completed model now distinguishes two operations.
+
+## Visual reorder
+
+Any present Layer 1 / 2 / 3 can move visually.
+
+This changes the draw stack while preserving logical role.
+
+## Base-role promotion
+
+When a timed overlay crosses the actual Layer-1 role boundary, it can become the
+new base authority.
+
+Supported role outcomes include:
+
+```text
+A(base), B, C
+→ B(base), A, C
+
+A(base), B, C
+→ C(base), B, A
+```
+
+Current topology constraints remain:
+
+- still images cannot become Layer 1
+- Layer 3 is removed before Layer 2
+- a fourth layer is rejected
+- the fixed three-slot model is preserved
+
+These are intentional constraints for a precision media utility, not an
+unfinished attempt at an unlimited NLE timeline.
+
+---
+
+# 16. What this milestone proves
+
+The completed ordering/promotion milestone demonstrates:
 
 ```text
 explicit three-layer visual Z-order
-full per-layer state preservation through reorder
-Undo/Redo-safe overlay ordering
-preview/export ordering parity
-true two-layer base-role swapping
-cross-frame-rate role-swap conversion
-cross-aspect fitting of the displaced base
-atomic timing/source-trim graph rebuilds
+media-owned state preservation
+Undo/Redo-safe visual ordering
+preview/export order parity
+true Layer 2 base promotion
+true Layer 3 base promotion
+surviving-overlay preservation
+cross-frame-rate role conversion
+cross-aspect displaced-base fitting
+atomic timing/source-trim rebuilds
 Dart notification batching
-native frame freeze
+native frame-publication freeze
 final-frame readiness barrier
 double-buffered GL texture presentation
-Flutter Texture.freeze presentation boundary
-first-swap alternate-profile prewarming
+Flutter Texture.freeze commit boundary
+alternate-profile texture prewarming
 ```
 
-The result is not merely that the final frame is correct.
+The most important architectural result is:
 
-The application now treats **presentation atomicity as part of edit correctness**: the user should see the old completed movie until the new completed movie is ready.
+```text
+media identity
+≠
+logical role
+≠
+visual order
+```
+
+and all three are now explicit enough to survive real role changes.
 
 ---
 
-# 13. Next work
+# 17. Handoff to the next product phase
 
-The composition model is now strong enough for the next feature families without first solving basic layer identity again.
+With composition identity, ordering, profile authority, and atomic presentation
+proven, the project no longer needed to keep expanding the Player before
+starting its original product goal.
 
-Likely next work includes:
+The next phase became **MLT Explorer**: an Adobe Bridge-style local media
+browser whose selected asset opens in this completed precision Player.
 
-- arbitrary three-layer base-role promotion, if the product needs it
-- blend-mode exploration
-- broader alpha / color policy
-- MLT XML interchange
-
-The architectural lesson from this phase is straightforward:
-
-> A media graph can be transactionally correct and still feel broken until model state, rendered-frame publication, GPU resource replacement, and UI composition all share the same commit boundary.
+That work is documented in
+[POC 11: MLT Explorer Foundation](poc-11-mlt-explorer-foundation.md).
