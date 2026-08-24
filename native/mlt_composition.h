@@ -31,10 +31,31 @@ MltSecondaryPlacementResult mlt_composition_build_secondary_playlist(
     mlt_profile target_profile,
     mlt_producer source,
     mlt_position start_frame,
+    mlt_position end_frame,
     mlt_position base_length,
     int source_is_still,
     mlt_playlist *playlist_out,
     mlt_position *normalized_start_out
+);
+
+/*
+ * Source-trim-aware overlay placement. Source In/Out are inclusive positions
+ * in the composition profile's frame timebase. Pass -1/-1 for the full source.
+ * Stills ignore source trim and continue to use timeline hold semantics.
+ */
+MltSecondaryPlacementResult mlt_composition_build_secondary_playlist_trimmed(
+    mlt_profile target_profile,
+    mlt_producer source,
+    mlt_position start_frame,
+    mlt_position end_frame,
+    mlt_position source_in_frame,
+    mlt_position source_out_frame,
+    mlt_position base_length,
+    int source_is_still,
+    mlt_playlist *playlist_out,
+    mlt_position *normalized_start_out,
+    mlt_position *normalized_source_in_out,
+    mlt_position *normalized_source_out_out
 );
 
 int mlt_composition_set_geometry(

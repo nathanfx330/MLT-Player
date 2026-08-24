@@ -108,6 +108,9 @@ struct _MltBridgeEngine {
 
     int e_track_count;
     int64_t e_secondary_start_frame;
+    int64_t e_secondary_source_in_frame;
+    int64_t e_secondary_source_out_frame;
+    int64_t e_secondary_source_length_frames;
     double e_secondary_opacity;
 
     /* POC 10.8: Layer 2 presentation geometry in base-frame pixels. */
@@ -118,6 +121,9 @@ struct _MltBridgeEngine {
     double e_secondary_base_height;
 
     int64_t e_tertiary_start_frame;
+    int64_t e_tertiary_source_in_frame;
+    int64_t e_tertiary_source_out_frame;
+    int64_t e_tertiary_source_length_frames;
     double e_tertiary_opacity;
     double e_tertiary_x;
     double e_tertiary_y;
@@ -1319,6 +1325,9 @@ static void close_producer_locked(void)
 
     current_engine()->e_track_count = 0;
     current_engine()->e_secondary_start_frame = -1;
+    current_engine()->e_secondary_source_in_frame = -1;
+    current_engine()->e_secondary_source_out_frame = -1;
+    current_engine()->e_secondary_source_length_frames = 0;
     current_engine()->e_secondary_opacity = 1.0;
     current_engine()->e_secondary_x = 0.0;
     current_engine()->e_secondary_y = 0.0;
@@ -1329,6 +1338,9 @@ static void close_producer_locked(void)
     current_engine()->e_secondary_alpha_mode = 0;
     current_engine()->e_secondary_is_still = 0;
     current_engine()->e_tertiary_start_frame = -1;
+    current_engine()->e_tertiary_source_in_frame = -1;
+    current_engine()->e_tertiary_source_out_frame = -1;
+    current_engine()->e_tertiary_source_length_frames = 0;
     current_engine()->e_tertiary_opacity = 1.0;
     current_engine()->e_tertiary_x = 0.0;
     current_engine()->e_tertiary_y = 0.0;
@@ -2154,6 +2166,9 @@ MltBridgeEngine *mlt_bridge_engine_create(void)
     engine->e_secondary_base_width = 0.0;
     engine->e_secondary_base_height = 0.0;
     engine->e_secondary_start_frame = -1;
+    engine->e_secondary_source_in_frame = -1;
+    engine->e_secondary_source_out_frame = -1;
+    engine->e_secondary_source_length_frames = 0;
     engine->e_secondary_has_alpha = 0;
     engine->e_secondary_alpha_mode = 0;
     engine->e_secondary_is_still = 0;
@@ -2164,6 +2179,9 @@ MltBridgeEngine *mlt_bridge_engine_create(void)
     engine->e_tertiary_base_width = 0.0;
     engine->e_tertiary_base_height = 0.0;
     engine->e_tertiary_start_frame = -1;
+    engine->e_tertiary_source_in_frame = -1;
+    engine->e_tertiary_source_out_frame = -1;
+    engine->e_tertiary_source_length_frames = 0;
     engine->e_tertiary_has_alpha = 0;
     engine->e_tertiary_alpha_mode = 0;
     engine->e_tertiary_is_still = 0;
@@ -2398,6 +2416,9 @@ static int snapshot_export_composition_locked(
         snapshot->layers[index].scale = 1.0;
         snapshot->layers[index].audio_gain = 1.0;
         snapshot->layers[index].start_frame = index == 0 ? 0 : -1;
+        snapshot->layers[index].end_frame = -1;
+        snapshot->layers[index].source_in_frame = index == 0 ? 0 : -1;
+        snapshot->layers[index].source_out_frame = -1;
     }
 
     if (current_engine()->e_primary_producer == NULL ||
@@ -2431,6 +2452,10 @@ static int snapshot_export_composition_locked(
     base->path = primary_resource;
     base->present = 1;
     base->start_frame = 0;
+    base->end_frame =
+        (int64_t)mlt_producer_get_length(current_engine()->e_primary_producer) - 1;
+    base->source_in_frame = 0;
+    base->source_out_frame = base->end_frame;
     base->has_audio = current_engine()->e_track_has_audio[0] ? 1 : 0;
     base->audio_gain =
         CLAMP(current_engine()->e_track_audio_gain[0], 0.0, 1.0);
@@ -2462,6 +2487,12 @@ static int snapshot_export_composition_locked(
     layer2->path = secondary_resource;
     layer2->present = 1;
     layer2->start_frame = current_engine()->e_secondary_start_frame;
+    layer2->end_frame =
+        (int64_t)mlt_producer_get_length(
+            mlt_playlist_producer(current_engine()->e_secondary_playlist)
+        ) - 1;
+    layer2->source_in_frame = current_engine()->e_secondary_source_in_frame;
+    layer2->source_out_frame = current_engine()->e_secondary_source_out_frame;
     layer2->has_audio = current_engine()->e_track_has_audio[1] ? 1 : 0;
     layer2->is_still = current_engine()->e_secondary_is_still ? 1 : 0;
     layer2->alpha_mode = current_engine()->e_secondary_alpha_mode;
@@ -2501,6 +2532,12 @@ static int snapshot_export_composition_locked(
     layer3->path = tertiary_resource;
     layer3->present = 1;
     layer3->start_frame = current_engine()->e_tertiary_start_frame;
+    layer3->end_frame =
+        (int64_t)mlt_producer_get_length(
+            mlt_playlist_producer(current_engine()->e_tertiary_playlist)
+        ) - 1;
+    layer3->source_in_frame = current_engine()->e_tertiary_source_in_frame;
+    layer3->source_out_frame = current_engine()->e_tertiary_source_out_frame;
     layer3->has_audio = current_engine()->e_track_has_audio[2] ? 1 : 0;
     layer3->is_still = current_engine()->e_tertiary_is_still ? 1 : 0;
     layer3->alpha_mode = current_engine()->e_tertiary_alpha_mode;
@@ -2574,6 +2611,8 @@ static int derive_preview_composition_locked(
     base->present = 1;
     base->start_frame = 0;
     base->timeline_length = composition_length;
+    base->source_in_frame = 0;
+    base->source_out_frame = composition_length - 1;
     base->base_width = state->profile_width;
     base->base_height = state->profile_height;
     base->x = 0.0;
@@ -2602,6 +2641,8 @@ static int derive_preview_composition_locked(
         &state->layers[MLT_COMPOSITION_FIRST_OVERLAY];
     layer2->present = 1;
     layer2->start_frame = current_engine()->e_secondary_start_frame;
+    layer2->source_in_frame = current_engine()->e_secondary_source_in_frame;
+    layer2->source_out_frame = current_engine()->e_secondary_source_out_frame;
     layer2->timeline_length =
         (int64_t)mlt_producer_get_length(
             mlt_playlist_producer(current_engine()->e_secondary_playlist)
@@ -2652,6 +2693,8 @@ static int derive_preview_composition_locked(
             &state->layers[MLT_COMPOSITION_SECOND_OVERLAY];
         layer3->present = 1;
         layer3->start_frame = current_engine()->e_tertiary_start_frame;
+        layer3->source_in_frame = current_engine()->e_tertiary_source_in_frame;
+        layer3->source_out_frame = current_engine()->e_tertiary_source_out_frame;
         layer3->timeline_length =
             (int64_t)mlt_producer_get_length(
                 mlt_playlist_producer(current_engine()->e_tertiary_playlist)
@@ -3757,6 +3800,9 @@ int mlt_bridge_open(
 
     current_engine()->e_track_count = 1;
     current_engine()->e_secondary_start_frame = -1;
+    current_engine()->e_secondary_source_in_frame = -1;
+    current_engine()->e_secondary_source_out_frame = -1;
+    current_engine()->e_secondary_source_length_frames = 0;
     current_engine()->e_secondary_opacity = 1.0;
     current_engine()->e_secondary_x = 0.0;
     current_engine()->e_secondary_y = 0.0;
@@ -3768,6 +3814,9 @@ int mlt_bridge_open(
     current_engine()->e_secondary_is_still = 0;
     current_engine()->e_secondary_alpha_filter = NULL;
     current_engine()->e_tertiary_start_frame = -1;
+    current_engine()->e_tertiary_source_in_frame = -1;
+    current_engine()->e_tertiary_source_out_frame = -1;
+    current_engine()->e_tertiary_source_length_frames = 0;
     current_engine()->e_tertiary_opacity = 1.0;
     current_engine()->e_tertiary_x = 0.0;
     current_engine()->e_tertiary_y = 0.0;
@@ -3858,6 +3907,9 @@ typedef struct _TertiaryInitialState {
 static int add_tertiary_track_locked(
     const char *path,
     int64_t start_frame,
+    int64_t end_frame,
+    int64_t source_in_frame,
+    int64_t source_out_frame,
     const TertiaryInitialState *initial_state)
 {
     const mlt_position primary_length =
@@ -4026,16 +4078,25 @@ static int add_tertiary_track_locked(
         pending_audio_gain = CLAMP(initial_state->audio_gain, 0.0, 1.0);
     }
 
+    const mlt_position pending_source_length =
+        tertiary_still ? 0 : mlt_producer_get_length(pending_tertiary);
     mlt_position pending_start = 0;
+    mlt_position pending_source_in = -1;
+    mlt_position pending_source_out = -1;
     const MltSecondaryPlacementResult placement_result =
-        mlt_composition_build_secondary_playlist(
+        mlt_composition_build_secondary_playlist_trimmed(
             current_engine()->e_profile,
             pending_tertiary,
             (mlt_position)start_frame,
+            (mlt_position)end_frame,
+            (mlt_position)source_in_frame,
+            (mlt_position)source_out_frame,
             primary_length,
             tertiary_still,
             &pending_tertiary_playlist,
-            &pending_start
+            &pending_start,
+            &pending_source_in,
+            &pending_source_out
         );
 
     if (placement_result != MLT_SECONDARY_PLACEMENT_OK) {
@@ -4265,6 +4326,12 @@ static int add_tertiary_track_locked(
     current_engine()->e_tertiary_alpha_mode = pending_alpha_mode;
     current_engine()->e_tertiary_is_still = tertiary_still ? 1 : 0;
     current_engine()->e_tertiary_start_frame = (int64_t)pending_start;
+    current_engine()->e_tertiary_source_in_frame =
+        tertiary_still ? -1 : (int64_t)pending_source_in;
+    current_engine()->e_tertiary_source_out_frame =
+        tertiary_still ? -1 : (int64_t)pending_source_out;
+    current_engine()->e_tertiary_source_length_frames =
+        tertiary_still ? 0 : (int64_t)pending_source_length;
     current_engine()->e_tertiary_opacity = pending_opacity;
     current_engine()->e_tertiary_x = pending_x;
     current_engine()->e_tertiary_y = pending_y;
@@ -4341,10 +4408,13 @@ add_tertiary_cleanup:
 
 
 MLT_BRIDGE_EXPORT
-int mlt_bridge_add_layer_with_state(
+int mlt_bridge_add_layer_with_state_trimmed(
     int layer_index,
     const char *path,
     int64_t start_frame,
+    int64_t end_frame,
+    int64_t source_in_frame,
+    int64_t source_out_frame,
     double x,
     double y,
     double scale,
@@ -4382,6 +4452,9 @@ int mlt_bridge_add_layer_with_state(
     const int added = add_tertiary_track_locked(
         path,
         start_frame,
+        end_frame,
+        source_in_frame,
+        source_out_frame,
         &initial_state
     );
 
@@ -4391,9 +4464,40 @@ int mlt_bridge_add_layer_with_state(
 }
 
 MLT_BRIDGE_EXPORT
-int mlt_bridge_add_track(
+int mlt_bridge_add_layer_with_state(
+    int layer_index,
     const char *path,
-    int64_t start_frame)
+    int64_t start_frame,
+    int64_t end_frame,
+    double x,
+    double y,
+    double scale,
+    double opacity,
+    int alpha_mode,
+    double audio_gain)
+{
+    return mlt_bridge_add_layer_with_state_trimmed(
+        layer_index,
+        path,
+        start_frame,
+        end_frame,
+        -1,
+        -1,
+        x,
+        y,
+        scale,
+        opacity,
+        alpha_mode,
+        audio_gain
+    );
+}
+
+static int add_track_with_range(
+    const char *path,
+    int64_t start_frame,
+    int64_t end_frame,
+    int64_t source_in_frame,
+    int64_t source_out_frame)
 {
     if (require_current_engine() == NULL) {
         return 0;
@@ -4428,7 +4532,14 @@ int mlt_bridge_add_track(
     }
 
     if (current_engine()->e_track_count == 2) {
-        const int added = add_tertiary_track_locked(path, start_frame, NULL);
+        const int added = add_tertiary_track_locked(
+            path,
+            start_frame,
+            end_frame,
+            source_in_frame,
+            source_out_frame,
+            NULL
+        );
         g_mutex_unlock(&current_engine()->e_mutex);
         invalidate_frames();
         return added;
@@ -4645,17 +4756,26 @@ int mlt_bridge_add_track(
      * POC 10.3 uses the viewer playhead as the placement point. Preview and
      * export now share the exact same Layer 2 timing/playlist builder.
      */
+    const mlt_position pending_source_length =
+        secondary_still ? 0 : mlt_producer_get_length(pending_secondary);
     mlt_position pending_start = 0;
+    mlt_position pending_source_in = -1;
+    mlt_position pending_source_out = -1;
 
     const MltSecondaryPlacementResult placement_result =
-        mlt_composition_build_secondary_playlist(
+        mlt_composition_build_secondary_playlist_trimmed(
             current_engine()->e_profile,
             pending_secondary,
             (mlt_position)start_frame,
+            (mlt_position)end_frame,
+            (mlt_position)source_in_frame,
+            (mlt_position)source_out_frame,
             primary_length,
             secondary_still,
             &pending_secondary_playlist,
-            &pending_start
+            &pending_start,
+            &pending_source_in,
+            &pending_source_out
         );
 
     if (placement_result != MLT_SECONDARY_PLACEMENT_OK) {
@@ -4993,6 +5113,12 @@ int mlt_bridge_add_track(
     current_engine()->e_audio_mix = pending_mix;
     current_engine()->e_track_count = 2;
     current_engine()->e_secondary_start_frame = (int64_t)pending_start;
+    current_engine()->e_secondary_source_in_frame =
+        secondary_still ? -1 : (int64_t)pending_source_in;
+    current_engine()->e_secondary_source_out_frame =
+        secondary_still ? -1 : (int64_t)pending_source_out;
+    current_engine()->e_secondary_source_length_frames =
+        secondary_still ? 0 : (int64_t)pending_source_length;
     current_engine()->e_secondary_opacity = 1.0;
     current_engine()->e_secondary_x = pending_x;
     current_engine()->e_secondary_y = pending_y;
@@ -5105,6 +5231,40 @@ add_track_cleanup:
 }
 
 MLT_BRIDGE_EXPORT
+int mlt_bridge_add_track(
+    const char *path,
+    int64_t start_frame)
+{
+    return add_track_with_range(path, start_frame, -1, -1, -1);
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_add_track_bounded(
+    const char *path,
+    int64_t start_frame,
+    int64_t end_frame)
+{
+    return add_track_with_range(path, start_frame, end_frame, -1, -1);
+}
+
+MLT_BRIDGE_EXPORT
+int mlt_bridge_add_track_bounded_source(
+    const char *path,
+    int64_t start_frame,
+    int64_t end_frame,
+    int64_t source_in_frame,
+    int64_t source_out_frame)
+{
+    return add_track_with_range(
+        path,
+        start_frame,
+        end_frame,
+        source_in_frame,
+        source_out_frame
+    );
+}
+
+MLT_BRIDGE_EXPORT
 int mlt_bridge_track_count(void)
 {
     if (require_current_engine() == NULL) {
@@ -5136,6 +5296,140 @@ int64_t mlt_bridge_secondary_start_frame(void)
             : -1;
     g_mutex_unlock(&current_engine()->e_mutex);
 
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+int64_t mlt_bridge_layer_end_frame(int layer_index)
+{
+    if (layer_index == MLT_COMPOSITION_BASE_LAYER) {
+        if (require_current_engine() == NULL) {
+            return -1;
+        }
+        ensure_locks();
+        g_mutex_lock(&current_engine()->e_mutex);
+        const int64_t result =
+            current_engine()->e_primary_producer != NULL
+                ? (int64_t)mlt_producer_get_length(
+                      current_engine()->e_primary_producer
+                  ) - 1
+                : -1;
+        g_mutex_unlock(&current_engine()->e_mutex);
+        return result;
+    }
+
+    if (require_current_engine() == NULL) {
+        return -1;
+    }
+
+    ensure_locks();
+    g_mutex_lock(&current_engine()->e_mutex);
+
+    mlt_playlist playlist = NULL;
+    if (layer_index == MLT_COMPOSITION_FIRST_OVERLAY &&
+        current_engine()->e_track_count >= 2) {
+        playlist = current_engine()->e_secondary_playlist;
+    } else if (layer_index == MLT_COMPOSITION_SECOND_OVERLAY &&
+               current_engine()->e_track_count >= 3) {
+        playlist = current_engine()->e_tertiary_playlist;
+    }
+
+    const int64_t result =
+        playlist != NULL
+            ? (int64_t)mlt_producer_get_length(
+                  mlt_playlist_producer(playlist)
+              ) - 1
+            : -1;
+
+    g_mutex_unlock(&current_engine()->e_mutex);
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+int64_t mlt_bridge_layer_source_in_frame(int layer_index)
+{
+    if (require_current_engine() == NULL) {
+        return -1;
+    }
+
+    ensure_locks();
+    g_mutex_lock(&current_engine()->e_mutex);
+
+    int64_t result = -1;
+    if (layer_index == MLT_COMPOSITION_BASE_LAYER &&
+        current_engine()->e_primary_producer != NULL) {
+        result = 0;
+    } else if (layer_index == MLT_COMPOSITION_FIRST_OVERLAY &&
+               current_engine()->e_track_count >= 2 &&
+               !current_engine()->e_secondary_is_still) {
+        result = current_engine()->e_secondary_source_in_frame;
+    } else if (layer_index == MLT_COMPOSITION_SECOND_OVERLAY &&
+               current_engine()->e_track_count >= 3 &&
+               !current_engine()->e_tertiary_is_still) {
+        result = current_engine()->e_tertiary_source_in_frame;
+    }
+
+    g_mutex_unlock(&current_engine()->e_mutex);
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+int64_t mlt_bridge_layer_source_out_frame(int layer_index)
+{
+    if (require_current_engine() == NULL) {
+        return -1;
+    }
+
+    ensure_locks();
+    g_mutex_lock(&current_engine()->e_mutex);
+
+    int64_t result = -1;
+    if (layer_index == MLT_COMPOSITION_BASE_LAYER &&
+        current_engine()->e_primary_producer != NULL) {
+        result = (int64_t)mlt_producer_get_length(
+            current_engine()->e_primary_producer
+        ) - 1;
+    } else if (layer_index == MLT_COMPOSITION_FIRST_OVERLAY &&
+               current_engine()->e_track_count >= 2 &&
+               !current_engine()->e_secondary_is_still) {
+        result = current_engine()->e_secondary_source_out_frame;
+    } else if (layer_index == MLT_COMPOSITION_SECOND_OVERLAY &&
+               current_engine()->e_track_count >= 3 &&
+               !current_engine()->e_tertiary_is_still) {
+        result = current_engine()->e_tertiary_source_out_frame;
+    }
+
+    g_mutex_unlock(&current_engine()->e_mutex);
+    return result;
+}
+
+MLT_BRIDGE_EXPORT
+int64_t mlt_bridge_layer_source_length_frames(int layer_index)
+{
+    if (require_current_engine() == NULL) {
+        return 0;
+    }
+
+    ensure_locks();
+    g_mutex_lock(&current_engine()->e_mutex);
+
+    int64_t result = 0;
+    if (layer_index == MLT_COMPOSITION_BASE_LAYER &&
+        current_engine()->e_primary_producer != NULL) {
+        result = (int64_t)mlt_producer_get_length(
+            current_engine()->e_primary_producer
+        );
+    } else if (layer_index == MLT_COMPOSITION_FIRST_OVERLAY &&
+               current_engine()->e_track_count >= 2 &&
+               !current_engine()->e_secondary_is_still) {
+        result = current_engine()->e_secondary_source_length_frames;
+    } else if (layer_index == MLT_COMPOSITION_SECOND_OVERLAY &&
+               current_engine()->e_track_count >= 3 &&
+               !current_engine()->e_tertiary_is_still) {
+        result = current_engine()->e_tertiary_source_length_frames;
+    }
+
+    g_mutex_unlock(&current_engine()->e_mutex);
     return result;
 }
 

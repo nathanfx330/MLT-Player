@@ -22,6 +22,9 @@ typedef struct _MltExportLayerSnapshot {
     const char *path;
     int present;
     int64_t start_frame;
+    int64_t end_frame;
+    int64_t source_in_frame;
+    int64_t source_out_frame;
 
     int has_audio;
     int is_still;

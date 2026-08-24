@@ -25,6 +25,10 @@ class CompositionLayerState {
     required this.present,
     required this.path,
     required this.startFrame,
+    this.endFrame,
+    this.sourceInFrame,
+    this.sourceOutFrame,
+    this.sourceFrameCount,
     required this.opacity,
     required this.x,
     required this.y,
@@ -41,6 +45,10 @@ class CompositionLayerState {
   final bool present;
   final String? path;
   final int? startFrame;
+  final int? endFrame;
+  final int? sourceInFrame;
+  final int? sourceOutFrame;
+  final int? sourceFrameCount;
   final double opacity;
   final double x;
   final double y;
@@ -63,6 +71,10 @@ class _LayerEditState {
     required this.present,
     required this.path,
     required this.startFrame,
+    required this.endFrame,
+    required this.sourceInFrame,
+    required this.sourceOutFrame,
+    required this.sourceFrameCount,
     required this.opacity,
     required this.x,
     required this.y,
@@ -78,6 +90,10 @@ class _LayerEditState {
   final bool present;
   final String? path;
   final int? startFrame;
+  final int? endFrame;
+  final int? sourceInFrame;
+  final int? sourceOutFrame;
+  final int? sourceFrameCount;
   final double opacity;
   final double x;
   final double y;
@@ -95,6 +111,10 @@ class _LayerEditState {
       present == other.present &&
       path == other.path &&
       startFrame == other.startFrame &&
+      endFrame == other.endFrame &&
+      sourceInFrame == other.sourceInFrame &&
+      sourceOutFrame == other.sourceOutFrame &&
+      sourceFrameCount == other.sourceFrameCount &&
       _near(opacity, other.opacity) &&
       _near(x, other.x) &&
       _near(y, other.y) &&
@@ -119,6 +139,10 @@ class _LayerRuntimeState {
   }
 
   int? startFrame;
+  int? endFrame;
+  int? sourceInFrame;
+  int? sourceOutFrame;
+  int? sourceFrameCount;
   double opacity = 1.0;
   double x = 0.0;
   double y = 0.0;
@@ -134,6 +158,10 @@ class _LayerRuntimeState {
     present = false;
     _path = null;
     startFrame = null;
+    endFrame = null;
+    sourceInFrame = null;
+    sourceOutFrame = null;
+    sourceFrameCount = null;
     opacity = 1.0;
     x = 0.0;
     y = 0.0;
@@ -151,6 +179,10 @@ class _LayerRuntimeState {
       present: present,
       path: path,
       startFrame: startFrame,
+      endFrame: endFrame,
+      sourceInFrame: sourceInFrame,
+      sourceOutFrame: sourceOutFrame,
+      sourceFrameCount: sourceFrameCount,
       opacity: opacity,
       x: x,
       y: y,
@@ -168,6 +200,10 @@ class _LayerRuntimeState {
     _path = state.path;
     present = state.present;
     startFrame = state.startFrame;
+    endFrame = state.endFrame;
+    sourceInFrame = state.sourceInFrame;
+    sourceOutFrame = state.sourceOutFrame;
+    sourceFrameCount = state.sourceFrameCount;
     opacity = state.opacity;
     x = state.x;
     y = state.y;
@@ -344,6 +380,10 @@ class PlayerEngine extends ChangeNotifier {
       present: layer.present,
       path: layer.path,
       startFrame: layer.startFrame,
+      endFrame: layer.endFrame,
+      sourceInFrame: layer.sourceInFrame,
+      sourceOutFrame: layer.sourceOutFrame,
+      sourceFrameCount: layer.sourceFrameCount,
       opacity: layer.opacity,
       x: layer.x,
       y: layer.y,
@@ -543,6 +583,10 @@ class PlayerEngine extends ChangeNotifier {
     final base = _layers[_baseLayerIndex];
     base.path = path;
     base.startFrame = 0;
+    base.endFrame = media.frames > 0 ? media.frames - 1 : null;
+    base.sourceInFrame = media.frames > 0 ? 0 : null;
+    base.sourceOutFrame = media.frames > 0 ? media.frames - 1 : null;
+    base.sourceFrameCount = media.frames > 0 ? media.frames : null;
     base.opacity = 1.0;
     base.x = 0.0;
     base.y = 0.0;
@@ -554,6 +598,46 @@ class PlayerEngine extends ChangeNotifier {
     base.hasAudio = media.hasAudio;
     base.audioGain =
         bridge.trackAudioGain(_baseLayerIndex).clamp(0.0, 1.0).toDouble();
+  }
+
+  void _syncLayerTimingFromNative(int layerIndex) {
+    if (layerIndex <= _baseLayerIndex ||
+        layerIndex >= _layerSlotCount ||
+        !hasLayer(layerIndex)) {
+      return;
+    }
+
+    final nativeStart = bridge.layerStartFrame(layerIndex);
+    final nativeEnd = bridge.layerEndFrame(layerIndex);
+    if (nativeStart >= 0) {
+      _layers[layerIndex].startFrame = nativeStart;
+    }
+    if (nativeEnd >= 0) {
+      _layers[layerIndex].endFrame = nativeEnd;
+    }
+  }
+
+  void _syncLayerSourceRangeFromNative(int layerIndex) {
+    if (layerIndex <= _baseLayerIndex ||
+        layerIndex >= _layerSlotCount ||
+        !hasLayer(layerIndex)) {
+      return;
+    }
+
+    final layer = _layers[layerIndex];
+    if (layer.isStill) {
+      layer.sourceInFrame = null;
+      layer.sourceOutFrame = null;
+      layer.sourceFrameCount = null;
+      return;
+    }
+
+    final nativeIn = bridge.layerSourceInFrame(layerIndex);
+    final nativeOut = bridge.layerSourceOutFrame(layerIndex);
+    final nativeLength = bridge.layerSourceLengthFrames(layerIndex);
+    layer.sourceInFrame = nativeIn >= 0 ? nativeIn : null;
+    layer.sourceOutFrame = nativeOut >= 0 ? nativeOut : null;
+    layer.sourceFrameCount = nativeLength > 0 ? nativeLength : null;
   }
 
   @visibleForTesting
@@ -591,6 +675,10 @@ class PlayerEngine extends ChangeNotifier {
               present: layer.present,
               path: layer.path,
               startFrame: layer.startFrame,
+              endFrame: layer.endFrame,
+              sourceInFrame: layer.sourceInFrame,
+              sourceOutFrame: layer.sourceOutFrame,
+              sourceFrameCount: layer.sourceFrameCount,
               opacity: layer.opacity,
               x: layer.x,
               y: layer.y,
@@ -621,6 +709,10 @@ class PlayerEngine extends ChangeNotifier {
               'present': layer.present,
               'path': layer.path,
               'startFrame': layer.startFrame,
+              'endFrame': layer.endFrame,
+              'sourceInFrame': layer.sourceInFrame,
+              'sourceOutFrame': layer.sourceOutFrame,
+              'sourceFrameCount': layer.sourceFrameCount,
               'opacity': layer.opacity,
               'x': layer.x,
               'y': layer.y,
@@ -772,6 +864,11 @@ class PlayerEngine extends ChangeNotifier {
         hasLayer(_secondaryLayerIndex) &&
         state.layers[_secondaryLayerIndex].path == _layers[_secondaryLayerIndex].path &&
         state.layers[_secondaryLayerIndex].startFrame == _layers[_secondaryLayerIndex].startFrame &&
+        state.layers[_secondaryLayerIndex].endFrame == _layers[_secondaryLayerIndex].endFrame &&
+        state.layers[_secondaryLayerIndex].sourceInFrame ==
+            _layers[_secondaryLayerIndex].sourceInFrame &&
+        state.layers[_secondaryLayerIndex].sourceOutFrame ==
+            _layers[_secondaryLayerIndex].sourceOutFrame &&
         _ClipEditState._near(
           state.layers[_baseLayerIndex].audioGain,
           _layers[_baseLayerIndex].audioGain,
@@ -810,6 +907,9 @@ class PlayerEngine extends ChangeNotifier {
         2,
         path,
         startFrame: state.layers[_tertiaryLayerIndex].startFrame ?? 0,
+        endFrame: state.layers[_tertiaryLayerIndex].endFrame ?? -1,
+        sourceInFrame: state.layers[_tertiaryLayerIndex].sourceInFrame,
+        sourceOutFrame: state.layers[_tertiaryLayerIndex].sourceOutFrame,
         x: state.layers[_tertiaryLayerIndex].x,
         y: state.layers[_tertiaryLayerIndex].y,
         scale: state.layers[_tertiaryLayerIndex].scale,
@@ -833,6 +933,10 @@ class PlayerEngine extends ChangeNotifier {
     final nativeStart = bridge.layerStartFrame(2);
     _layers[_tertiaryLayerIndex].startFrame =
         nativeStart >= 0 ? nativeStart : state.layers[_tertiaryLayerIndex].startFrame;
+    final nativeEnd = bridge.layerEndFrame(2);
+    _layers[_tertiaryLayerIndex].endFrame =
+        nativeEnd >= 0 ? nativeEnd : state.layers[_tertiaryLayerIndex].endFrame;
+    _syncLayerSourceRangeFromNative(_tertiaryLayerIndex);
     _layers[_tertiaryLayerIndex].opacity = state.layers[_tertiaryLayerIndex].opacity;
     _layers[_tertiaryLayerIndex].visible = state.layers[_tertiaryLayerIndex].visible;
     _layers[_tertiaryLayerIndex].x = bridge.layerX(2);
@@ -866,9 +970,19 @@ class PlayerEngine extends ChangeNotifier {
         state.layers[_secondaryLayerIndex].path != _layers[_secondaryLayerIndex].path ||
         state.layers[_tertiaryLayerIndex].path != _layers[_tertiaryLayerIndex].path ||
         (state.layers[_secondaryLayerIndex].path != null &&
-            state.layers[_secondaryLayerIndex].startFrame != _layers[_secondaryLayerIndex].startFrame) ||
+            (state.layers[_secondaryLayerIndex].startFrame != _layers[_secondaryLayerIndex].startFrame ||
+             state.layers[_secondaryLayerIndex].endFrame != _layers[_secondaryLayerIndex].endFrame ||
+             state.layers[_secondaryLayerIndex].sourceInFrame !=
+                 _layers[_secondaryLayerIndex].sourceInFrame ||
+             state.layers[_secondaryLayerIndex].sourceOutFrame !=
+                 _layers[_secondaryLayerIndex].sourceOutFrame)) ||
         (state.layers[_tertiaryLayerIndex].path != null &&
-            state.layers[_tertiaryLayerIndex].startFrame != _layers[_tertiaryLayerIndex].startFrame);
+            (state.layers[_tertiaryLayerIndex].startFrame != _layers[_tertiaryLayerIndex].startFrame ||
+             state.layers[_tertiaryLayerIndex].endFrame != _layers[_tertiaryLayerIndex].endFrame ||
+             state.layers[_tertiaryLayerIndex].sourceInFrame !=
+                 _layers[_tertiaryLayerIndex].sourceInFrame ||
+             state.layers[_tertiaryLayerIndex].sourceOutFrame !=
+                 _layers[_tertiaryLayerIndex].sourceOutFrame));
 
     if (topologyChanged && _canRestoreOnlyTertiary(state)) {
       final restored = await _runWithFrozenPreview(
@@ -876,6 +990,10 @@ class PlayerEngine extends ChangeNotifier {
       );
       if (restored) {
         _assignEditStateFields(state);
+        _syncLayerTimingFromNative(_secondaryLayerIndex);
+        _syncLayerTimingFromNative(_tertiaryLayerIndex);
+        _syncLayerSourceRangeFromNative(_secondaryLayerIndex);
+        _syncLayerSourceRangeFromNative(_tertiaryLayerIndex);
       }
       return restored;
     }
@@ -886,8 +1004,14 @@ class PlayerEngine extends ChangeNotifier {
           primaryPath: basePath,
           secondaryPath: state.layers[_secondaryLayerIndex].path,
           secondaryStartFrame: state.layers[_secondaryLayerIndex].startFrame,
+          secondaryEndFrame: state.layers[_secondaryLayerIndex].endFrame,
+          secondarySourceInFrame: state.layers[_secondaryLayerIndex].sourceInFrame,
+          secondarySourceOutFrame: state.layers[_secondaryLayerIndex].sourceOutFrame,
           tertiaryPath: state.layers[_tertiaryLayerIndex].path,
           tertiaryStartFrame: state.layers[_tertiaryLayerIndex].startFrame,
+          tertiaryEndFrame: state.layers[_tertiaryLayerIndex].endFrame,
+          tertiarySourceInFrame: state.layers[_tertiaryLayerIndex].sourceInFrame,
+          tertiarySourceOutFrame: state.layers[_tertiaryLayerIndex].sourceOutFrame,
           playheadFrame: playheadFrame,
           primaryGain: state.layers[_baseLayerIndex].audioGain,
           secondaryGain: state.layers[_secondaryLayerIndex].audioGain,
@@ -911,6 +1035,10 @@ class PlayerEngine extends ChangeNotifier {
       );
       if (restored) {
         _assignEditStateFields(state);
+        _syncLayerTimingFromNative(_secondaryLayerIndex);
+        _syncLayerTimingFromNative(_tertiaryLayerIndex);
+        _syncLayerSourceRangeFromNative(_secondaryLayerIndex);
+        _syncLayerSourceRangeFromNative(_tertiaryLayerIndex);
       }
       return restored;
     }
@@ -2007,7 +2135,13 @@ class PlayerEngine extends ChangeNotifier {
     return added;
   }
 
-  Future<bool> _addTrackAtFrame(String path, int startFrame) async {
+  Future<bool> _addTrackAtFrame(
+    String path,
+    int startFrame, {
+    int? endFrame,
+    int? sourceInFrame,
+    int? sourceOutFrame,
+  }) async {
     final media = _media;
 
     if (!initialized ||
@@ -2031,17 +2165,41 @@ class PlayerEngine extends ChangeNotifier {
       clampedStart = media.frames - 1;
     }
 
+    int? clampedEnd = endFrame;
+    if (clampedEnd != null && media.frames > 0) {
+      clampedEnd = clampedEnd.clamp(clampedStart, media.frames - 1).toInt();
+    }
+
     _addingTrack = true;
     _error = null;
     notifyListeners();
 
     bool added;
     try {
-      added = await addTrackOnHelperIsolate(
-        path,
-        clampedStart,
-        bridge.engineAddress,
-      );
+      if (sourceInFrame != null && sourceOutFrame != null) {
+        final requestedEnd = clampedEnd ?? (media.frames - 1);
+        added = await addTrackBoundedSourceOnHelperIsolate(
+          bridge.engineAddress,
+          path,
+          startFrame: clampedStart,
+          endFrame: requestedEnd,
+          sourceInFrame: sourceInFrame,
+          sourceOutFrame: sourceOutFrame,
+        );
+      } else {
+        added = clampedEnd == null
+            ? await addTrackOnHelperIsolate(
+                path,
+                clampedStart,
+                bridge.engineAddress,
+              )
+            : await addTrackBoundedOnHelperIsolate(
+                bridge.engineAddress,
+                path,
+                startFrame: clampedStart,
+                endFrame: clampedEnd,
+              );
+      }
     } catch (error) {
       _addingTrack = false;
       _error = error.toString();
@@ -2064,6 +2222,9 @@ class PlayerEngine extends ChangeNotifier {
       final nativeStartFrame = bridge.layerStartFrame(1);
       _layers[_secondaryLayerIndex].startFrame =
           nativeStartFrame >= 0 ? nativeStartFrame : clampedStart;
+      final nativeEndFrame = bridge.layerEndFrame(1);
+      _layers[_secondaryLayerIndex].endFrame =
+          nativeEndFrame >= 0 ? nativeEndFrame : clampedEnd;
       _layers[_secondaryLayerIndex].opacity =
           bridge.layerOpacity(1).clamp(0.0, 1.0).toDouble();
       _layers[_secondaryLayerIndex].x = bridge.layerX(1);
@@ -2081,6 +2242,9 @@ class PlayerEngine extends ChangeNotifier {
       final nativeStartFrame = bridge.layerStartFrame(2);
       _layers[_tertiaryLayerIndex].startFrame =
           nativeStartFrame >= 0 ? nativeStartFrame : clampedStart;
+      final nativeEndFrame = bridge.layerEndFrame(2);
+      _layers[_tertiaryLayerIndex].endFrame =
+          nativeEndFrame >= 0 ? nativeEndFrame : clampedEnd;
       _layers[_tertiaryLayerIndex].opacity =
           bridge.layerOpacity(2).clamp(0.0, 1.0).toDouble();
       _layers[_tertiaryLayerIndex].x = bridge.layerX(2);
@@ -2094,6 +2258,8 @@ class PlayerEngine extends ChangeNotifier {
       _layers[_tertiaryLayerIndex].audioGain =
           bridge.trackAudioGain(2).clamp(0.0, 1.0).toDouble();
     }
+
+    _syncLayerSourceRangeFromNative(targetLayerIndex);
 
     _layers[_baseLayerIndex].audioGain =
         bridge.trackAudioGain(0).clamp(0.0, 1.0).toDouble();
@@ -2243,6 +2409,7 @@ class PlayerEngine extends ChangeNotifier {
         primaryPath: media.path,
         secondaryPath: before.layers[_secondaryLayerIndex].path,
         secondaryStartFrame: before.layers[_secondaryLayerIndex].startFrame,
+        secondaryEndFrame: before.layers[_secondaryLayerIndex].endFrame,
         tertiaryPath: null,
         tertiaryStartFrame: null,
         playheadFrame: playheadFrame,
@@ -2337,8 +2504,10 @@ class PlayerEngine extends ChangeNotifier {
         primaryPath: basePath,
         secondaryPath: secondaryPath,
         secondaryStartFrame: editState.layers[_secondaryLayerIndex].startFrame,
+        secondaryEndFrame: editState.layers[_secondaryLayerIndex].endFrame,
         tertiaryPath: editState.layers[_tertiaryLayerIndex].path,
         tertiaryStartFrame: editState.layers[_tertiaryLayerIndex].startFrame,
+        tertiaryEndFrame: editState.layers[_tertiaryLayerIndex].endFrame,
         playheadFrame: currentFrame,
         primaryGain: editState.layers[_baseLayerIndex].audioGain,
         secondaryGain: editState.layers[_secondaryLayerIndex].audioGain,
@@ -2418,8 +2587,10 @@ class PlayerEngine extends ChangeNotifier {
         primaryPath: basePath,
         secondaryPath: editState.layers[_secondaryLayerIndex].path,
         secondaryStartFrame: editState.layers[_secondaryLayerIndex].startFrame,
+        secondaryEndFrame: editState.layers[_secondaryLayerIndex].endFrame,
         tertiaryPath: tertiaryPath,
         tertiaryStartFrame: editState.layers[_tertiaryLayerIndex].startFrame,
+        tertiaryEndFrame: editState.layers[_tertiaryLayerIndex].endFrame,
         playheadFrame: currentFrame,
         primaryGain: editState.layers[_baseLayerIndex].audioGain,
         secondaryGain: editState.layers[_secondaryLayerIndex].audioGain,
@@ -2501,6 +2672,16 @@ class PlayerEngine extends ChangeNotifier {
             oldMedia.fps > 0
         ? oldEditState.layers[_tertiaryLayerIndex].startFrame! / oldMedia.fps
         : 0.0;
+    final secondaryEndSeconds = oldEditState.layers[_secondaryLayerIndex].path != null &&
+            oldEditState.layers[_secondaryLayerIndex].endFrame != null &&
+            oldMedia.fps > 0
+        ? (oldEditState.layers[_secondaryLayerIndex].endFrame! + 1) / oldMedia.fps
+        : 0.0;
+    final tertiaryEndSeconds = oldEditState.layers[_tertiaryLayerIndex].path != null &&
+            oldEditState.layers[_tertiaryLayerIndex].endFrame != null &&
+            oldMedia.fps > 0
+        ? (oldEditState.layers[_tertiaryLayerIndex].endFrame! + 1) / oldMedia.fps
+        : 0.0;
 
     final opened = await open(path);
     final replacementMedia = _media;
@@ -2517,8 +2698,10 @@ class PlayerEngine extends ChangeNotifier {
         primaryPath: oldBasePath,
         secondaryPath: oldEditState.layers[_secondaryLayerIndex].path,
         secondaryStartFrame: oldEditState.layers[_secondaryLayerIndex].startFrame,
+        secondaryEndFrame: oldEditState.layers[_secondaryLayerIndex].endFrame,
         tertiaryPath: oldEditState.layers[_tertiaryLayerIndex].path,
         tertiaryStartFrame: oldEditState.layers[_tertiaryLayerIndex].startFrame,
+        tertiaryEndFrame: oldEditState.layers[_tertiaryLayerIndex].endFrame,
         playheadFrame: oldPlayheadFrame,
         primaryGain: oldEditState.layers[_baseLayerIndex].audioGain,
         secondaryGain: oldEditState.layers[_secondaryLayerIndex].audioGain,
@@ -2556,14 +2739,30 @@ class PlayerEngine extends ChangeNotifier {
     final newTertiaryStart = oldEditState.layers[_tertiaryLayerIndex].path != null && newFps > 0
         ? (tertiaryStartSeconds * newFps).round()
         : null;
+    final newSecondaryEnd = oldEditState.layers[_secondaryLayerIndex].path != null &&
+            oldEditState.layers[_secondaryLayerIndex].endFrame != null &&
+            newFps > 0
+        ? ((secondaryEndSeconds * newFps).round() - 1)
+            .clamp(0, replacementMedia.frames - 1)
+            .toInt()
+        : null;
+    final newTertiaryEnd = oldEditState.layers[_tertiaryLayerIndex].path != null &&
+            oldEditState.layers[_tertiaryLayerIndex].endFrame != null &&
+            newFps > 0
+        ? ((tertiaryEndSeconds * newFps).round() - 1)
+            .clamp(0, replacementMedia.frames - 1)
+            .toInt()
+        : null;
 
     if (oldEditState.layers[_secondaryLayerIndex].path != null) {
       final rebuilt = await _rebuildLayerStack(
         primaryPath: path,
         secondaryPath: oldEditState.layers[_secondaryLayerIndex].path,
         secondaryStartFrame: newSecondaryStart,
+        secondaryEndFrame: newSecondaryEnd,
         tertiaryPath: oldEditState.layers[_tertiaryLayerIndex].path,
         tertiaryStartFrame: newTertiaryStart,
+        tertiaryEndFrame: newTertiaryEnd,
         playheadFrame: newPlayheadFrame,
         primaryGain: oldEditState.layers[_baseLayerIndex].audioGain,
         secondaryGain: oldEditState.layers[_secondaryLayerIndex].audioGain,
@@ -2588,8 +2787,10 @@ class PlayerEngine extends ChangeNotifier {
           primaryPath: oldBasePath,
           secondaryPath: oldEditState.layers[_secondaryLayerIndex].path,
           secondaryStartFrame: oldEditState.layers[_secondaryLayerIndex].startFrame,
+          secondaryEndFrame: oldEditState.layers[_secondaryLayerIndex].endFrame,
           tertiaryPath: oldEditState.layers[_tertiaryLayerIndex].path,
           tertiaryStartFrame: oldEditState.layers[_tertiaryLayerIndex].startFrame,
+          tertiaryEndFrame: oldEditState.layers[_tertiaryLayerIndex].endFrame,
           playheadFrame: oldPlayheadFrame,
           primaryGain: oldEditState.layers[_baseLayerIndex].audioGain,
           secondaryGain: oldEditState.layers[_secondaryLayerIndex].audioGain,
@@ -2631,7 +2832,7 @@ class PlayerEngine extends ChangeNotifier {
   ///
   /// This is deliberately a layer-order operation, not timeline editing.
   /// Layer 1 remains the timed base slot at frame zero; Layer 2 keeps its
-  /// existing insertion time, opacity, visibility, and audio-gain controls.
+  /// existing start/end timing, opacity, visibility, and audio-gain controls.
   /// A still image cannot be swapped into Layer 1.
   Future<bool> swapLayerOrder() async {
     final oldMedia = _media;
@@ -2663,6 +2864,10 @@ class PlayerEngine extends ChangeNotifier {
     final oldStartSeconds = oldMedia.fps > 0
         ? oldStartFrame / oldMedia.fps
         : 0.0;
+    final oldEndFrame = _layers[_secondaryLayerIndex].endFrame;
+    final oldEndBoundarySeconds = oldMedia.fps > 0 && oldEndFrame != null
+        ? (oldEndFrame + 1) / oldMedia.fps
+        : null;
     final oldPlayheadFrame = bridge.positionFrame;
     final oldPlayheadSeconds = oldMedia.fps > 0
         ? oldPlayheadFrame / oldMedia.fps
@@ -2699,6 +2904,7 @@ class PlayerEngine extends ChangeNotifier {
         primaryPath: oldBasePath,
         secondaryPath: oldSecondaryPath,
         secondaryStartFrame: oldStartFrame,
+        secondaryEndFrame: oldEditState.layers[_secondaryLayerIndex].endFrame,
         playheadFrame: oldPlayheadFrame,
         primaryGain: primaryGain,
         secondaryGain: secondaryGain,
@@ -2722,6 +2928,9 @@ class PlayerEngine extends ChangeNotifier {
     final newStartFrame = newFps > 0
         ? (oldStartSeconds * newFps).round()
         : 0;
+    final newEndFrame = newFps > 0 && oldEndBoundarySeconds != null
+        ? (oldEndBoundarySeconds * newFps).round() - 1
+        : null;
     final newPlayheadFrame = newFps > 0
         ? (oldPlayheadSeconds * newFps).round()
         : 0;
@@ -2730,6 +2939,7 @@ class PlayerEngine extends ChangeNotifier {
       primaryPath: oldSecondaryPath,
       secondaryPath: oldBasePath,
       secondaryStartFrame: newStartFrame,
+      secondaryEndFrame: newEndFrame,
       playheadFrame: newPlayheadFrame,
       primaryGain: primaryGain,
       secondaryGain: secondaryGain,
@@ -2754,6 +2964,7 @@ class PlayerEngine extends ChangeNotifier {
       primaryPath: oldBasePath,
       secondaryPath: oldSecondaryPath,
       secondaryStartFrame: oldStartFrame,
+      secondaryEndFrame: oldEditState.layers[_secondaryLayerIndex].endFrame,
       playheadFrame: oldPlayheadFrame,
       primaryGain: primaryGain,
       secondaryGain: secondaryGain,
@@ -2779,8 +2990,14 @@ class PlayerEngine extends ChangeNotifier {
     required String primaryPath,
     required String? secondaryPath,
     required int? secondaryStartFrame,
+    int? secondaryEndFrame,
+    int? secondarySourceInFrame,
+    int? secondarySourceOutFrame,
     String? tertiaryPath,
     int? tertiaryStartFrame,
+    int? tertiaryEndFrame,
+    int? tertiarySourceInFrame,
+    int? tertiarySourceOutFrame,
     required int playheadFrame,
     required double primaryGain,
     required double secondaryGain,
@@ -2812,6 +3029,15 @@ class PlayerEngine extends ChangeNotifier {
       return false;
     }
 
+    final resolvedSecondarySourceIn = secondarySourceInFrame ??
+        editState?.layers[_secondaryLayerIndex].sourceInFrame;
+    final resolvedSecondarySourceOut = secondarySourceOutFrame ??
+        editState?.layers[_secondaryLayerIndex].sourceOutFrame;
+    final resolvedTertiarySourceIn = tertiarySourceInFrame ??
+        editState?.layers[_tertiaryLayerIndex].sourceInFrame;
+    final resolvedTertiarySourceOut = tertiarySourceOutFrame ??
+        editState?.layers[_tertiaryLayerIndex].sourceOutFrame;
+
     if (!await open(primaryPath)) {
       return false;
     }
@@ -2829,6 +3055,9 @@ class PlayerEngine extends ChangeNotifier {
       final added = await _addTrackAtFrame(
         secondaryPath,
         secondaryStartFrame ?? 0,
+        endFrame: secondaryEndFrame,
+        sourceInFrame: resolvedSecondarySourceIn,
+        sourceOutFrame: resolvedSecondarySourceOut,
       );
       if (!added) {
         return false;
@@ -2839,6 +3068,9 @@ class PlayerEngine extends ChangeNotifier {
       final added = await _addTrackAtFrame(
         tertiaryPath,
         tertiaryStartFrame ?? 0,
+        endFrame: tertiaryEndFrame,
+        sourceInFrame: resolvedTertiarySourceIn,
+        sourceOutFrame: resolvedTertiarySourceOut,
       );
       if (!added) {
         return false;
@@ -2970,6 +3202,346 @@ class PlayerEngine extends ChangeNotifier {
       return;
     }
     setLayerVisible(layerIndex, !_layers[layerIndex].visible);
+  }
+
+  Future<bool> setLayerTiming(
+    int layerIndex, {
+    required int startFrame,
+    required int endFrame,
+  }) async {
+    final media = _media;
+    if (!initialized ||
+        media == null ||
+        media.isStill ||
+        media.frames <= 0 ||
+        layerIndex <= _baseLayerIndex ||
+        layerIndex >= _layerSlotCount ||
+        !hasLayer(layerIndex) ||
+        _opening ||
+        _addingTrack ||
+        _exporting ||
+        _restoringEditState) {
+      return false;
+    }
+
+    if (startFrame > endFrame) {
+      return false;
+    }
+
+    final requestedStart = startFrame.clamp(0, media.frames - 1).toInt();
+    final requestedEnd = endFrame.clamp(requestedStart, media.frames - 1).toInt();
+
+    final layer = _layers[layerIndex];
+    if (layer.startFrame == requestedStart &&
+        layer.endFrame == requestedEnd) {
+      return true;
+    }
+
+    final before = _captureEditState();
+    final originalUndo = List<_ClipEditState>.from(_undoStack);
+    final originalRedo = List<_ClipEditState>.from(_redoStack);
+    final desiredLayers = List<_LayerEditState>.from(before.layers);
+    final old = desiredLayers[layerIndex];
+    desiredLayers[layerIndex] = _LayerEditState(
+      present: old.present,
+      path: old.path,
+      startFrame: requestedStart,
+      endFrame: requestedEnd,
+      sourceInFrame: old.sourceInFrame,
+      sourceOutFrame: old.sourceOutFrame,
+      sourceFrameCount: old.sourceFrameCount,
+      opacity: old.opacity,
+      x: old.x,
+      y: old.y,
+      scale: old.scale,
+      visible: old.visible,
+      isStill: old.isStill,
+      hasAlpha: old.hasAlpha,
+      alphaMode: old.alphaMode,
+      hasAudio: old.hasAudio,
+      audioGain: old.audioGain,
+    );
+
+    final desired = _ClipEditState(
+      trimInFrame: before.trimInFrame,
+      trimOutFrame: before.trimOutFrame,
+      inFrame: before.inFrame,
+      outFrame: before.outFrame,
+      layers: desiredLayers,
+    );
+
+    final basePath = _layers[_baseLayerIndex].path ?? media.path;
+
+    _finishContinuousEditGroup();
+    _restoringEditState = true;
+    notifyListeners();
+
+    bool restored = false;
+    String? timingError;
+    try {
+      if (!await _parkPlaybackForLayerChange()) {
+        return false;
+      }
+
+      final playheadFrame = bridge.positionFrame;
+
+      restored = await _applyEditState(
+        desired,
+        basePath: basePath,
+        playheadFrame: playheadFrame,
+      );
+
+      if (!restored) {
+        timingError = _error;
+        final rolledBack = await _applyEditState(
+          before,
+          basePath: basePath,
+          playheadFrame: playheadFrame,
+        );
+
+        _undoStack
+          ..clear()
+          ..addAll(originalUndo);
+        _redoStack
+          ..clear()
+          ..addAll(originalRedo);
+
+        _error = rolledBack
+            ? (timingError ?? 'The layer timing could not be changed.')
+            : 'Layer timing failed and the previous composition could not be restored.';
+        return false;
+      }
+
+      _syncLayerTimingFromNative(layerIndex);
+      final after = _captureEditState();
+
+      _undoStack
+        ..clear()
+        ..addAll(originalUndo);
+      _redoStack.clear();
+
+      if (!before.sameAs(after)) {
+        _undoStack.add(before);
+      }
+
+      _error = null;
+      return true;
+    } finally {
+      _restoringEditState = false;
+      notifyListeners();
+    }
+  }
+
+  Future<bool> nudgeLayerStart(int layerIndex, int deltaFrames) {
+    final layer = layerState(layerIndex);
+    final start = layer.startFrame;
+    final end = layer.endFrame;
+    if (!layer.present || start == null || end == null) {
+      return Future<bool>.value(false);
+    }
+    final media = _media;
+    if (media == null || media.frames <= 0) {
+      return Future<bool>.value(false);
+    }
+
+    final target = (start + deltaFrames).clamp(0, end).toInt();
+    return setLayerTiming(
+      layerIndex,
+      startFrame: target,
+      endFrame: end,
+    );
+  }
+
+  Future<bool> nudgeLayerEnd(int layerIndex, int deltaFrames) {
+    final layer = layerState(layerIndex);
+    final start = layer.startFrame;
+    final end = layer.endFrame;
+    if (!layer.present || start == null || end == null) {
+      return Future<bool>.value(false);
+    }
+    final media = _media;
+    if (media == null || media.frames <= 0) {
+      return Future<bool>.value(false);
+    }
+
+    final target =
+        (end + deltaFrames).clamp(start, media.frames - 1).toInt();
+    return setLayerTiming(
+      layerIndex,
+      startFrame: start,
+      endFrame: target,
+    );
+  }
+
+  Future<bool> setLayerSourceRange(
+    int layerIndex, {
+    required int sourceInFrame,
+    required int sourceOutFrame,
+  }) async {
+    final media = _media;
+    final layer = layerState(layerIndex);
+    final sourceFrameCount = layer.sourceFrameCount;
+
+    if (!initialized ||
+        media == null ||
+        media.isStill ||
+        layerIndex <= _baseLayerIndex ||
+        layerIndex >= _layerSlotCount ||
+        !layer.present ||
+        layer.isStill ||
+        sourceFrameCount == null ||
+        sourceFrameCount <= 0 ||
+        _opening ||
+        _addingTrack ||
+        _exporting ||
+        _restoringEditState) {
+      return false;
+    }
+
+    if (sourceInFrame > sourceOutFrame) {
+      return false;
+    }
+
+    final requestedIn = sourceInFrame.clamp(0, sourceFrameCount - 1).toInt();
+    final requestedOut =
+        sourceOutFrame.clamp(requestedIn, sourceFrameCount - 1).toInt();
+
+    if (layer.sourceInFrame == requestedIn &&
+        layer.sourceOutFrame == requestedOut) {
+      return true;
+    }
+
+    final before = _captureEditState();
+    final originalUndo = List<_ClipEditState>.from(_undoStack);
+    final originalRedo = List<_ClipEditState>.from(_redoStack);
+    final desiredLayers = List<_LayerEditState>.from(before.layers);
+    final old = desiredLayers[layerIndex];
+
+    desiredLayers[layerIndex] = _LayerEditState(
+      present: old.present,
+      path: old.path,
+      startFrame: old.startFrame,
+      endFrame: old.endFrame,
+      sourceInFrame: requestedIn,
+      sourceOutFrame: requestedOut,
+      sourceFrameCount: old.sourceFrameCount,
+      opacity: old.opacity,
+      x: old.x,
+      y: old.y,
+      scale: old.scale,
+      visible: old.visible,
+      isStill: old.isStill,
+      hasAlpha: old.hasAlpha,
+      alphaMode: old.alphaMode,
+      hasAudio: old.hasAudio,
+      audioGain: old.audioGain,
+    );
+
+    final desired = _ClipEditState(
+      trimInFrame: before.trimInFrame,
+      trimOutFrame: before.trimOutFrame,
+      inFrame: before.inFrame,
+      outFrame: before.outFrame,
+      layers: desiredLayers,
+    );
+
+    final basePath = _layers[_baseLayerIndex].path ?? media.path;
+
+    _finishContinuousEditGroup();
+    _restoringEditState = true;
+    notifyListeners();
+
+    try {
+      if (!await _parkPlaybackForLayerChange()) {
+        return false;
+      }
+
+      final playheadFrame = bridge.positionFrame;
+      final restored = await _applyEditState(
+        desired,
+        basePath: basePath,
+        playheadFrame: playheadFrame,
+      );
+
+      if (!restored) {
+        final sourceError = _error;
+        final rolledBack = await _applyEditState(
+          before,
+          basePath: basePath,
+          playheadFrame: playheadFrame,
+        );
+
+        _undoStack
+          ..clear()
+          ..addAll(originalUndo);
+        _redoStack
+          ..clear()
+          ..addAll(originalRedo);
+
+        _error = rolledBack
+            ? (sourceError ?? 'The layer source range could not be changed.')
+            : 'Layer source trim failed and the previous composition could not be restored.';
+        return false;
+      }
+
+      _syncLayerSourceRangeFromNative(layerIndex);
+      _syncLayerTimingFromNative(layerIndex);
+      final after = _captureEditState();
+
+      _undoStack
+        ..clear()
+        ..addAll(originalUndo);
+      _redoStack.clear();
+
+      if (!before.sameAs(after)) {
+        _undoStack.add(before);
+      }
+
+      _error = null;
+      return true;
+    } finally {
+      _restoringEditState = false;
+      notifyListeners();
+    }
+  }
+
+  Future<bool> nudgeLayerSourceIn(int layerIndex, int deltaFrames) {
+    final layer = layerState(layerIndex);
+    final sourceIn = layer.sourceInFrame;
+    final sourceOut = layer.sourceOutFrame;
+    if (!layer.present || layer.isStill || sourceIn == null || sourceOut == null) {
+      return Future<bool>.value(false);
+    }
+
+    final target = (sourceIn + deltaFrames).clamp(0, sourceOut).toInt();
+    return setLayerSourceRange(
+      layerIndex,
+      sourceInFrame: target,
+      sourceOutFrame: sourceOut,
+    );
+  }
+
+  Future<bool> nudgeLayerSourceOut(int layerIndex, int deltaFrames) {
+    final layer = layerState(layerIndex);
+    final sourceIn = layer.sourceInFrame;
+    final sourceOut = layer.sourceOutFrame;
+    final sourceFrameCount = layer.sourceFrameCount;
+    if (!layer.present ||
+        layer.isStill ||
+        sourceIn == null ||
+        sourceOut == null ||
+        sourceFrameCount == null ||
+        sourceFrameCount <= 0) {
+      return Future<bool>.value(false);
+    }
+
+    final target =
+        (sourceOut + deltaFrames).clamp(sourceIn, sourceFrameCount - 1).toInt();
+    return setLayerSourceRange(
+      layerIndex,
+      sourceInFrame: sourceIn,
+      sourceOutFrame: target,
+    );
   }
 
   void setLayerGeometry({

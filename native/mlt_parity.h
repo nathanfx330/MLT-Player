@@ -14,6 +14,8 @@ typedef struct _MltCompositionLayerDerivedState {
     int present;
     int64_t start_frame;
     int64_t timeline_length;
+    int64_t source_in_frame;
+    int64_t source_out_frame;
 
     int is_still;
     int alpha_mode;

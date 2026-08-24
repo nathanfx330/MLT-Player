@@ -35,6 +35,30 @@ MLT_LAYER_API_EXPORT int mlt_bridge_add_layer_with_state(
     int layer_index,
     const char *path,
     int64_t start_frame,
+    int64_t end_frame,
+    double x,
+    double y,
+    double scale,
+    double opacity,
+    int alpha_mode,
+    double audio_gain);
+MLT_LAYER_API_EXPORT int mlt_bridge_add_track_bounded(
+    const char *path,
+    int64_t start_frame,
+    int64_t end_frame);
+MLT_LAYER_API_EXPORT int mlt_bridge_add_track_bounded_source(
+    const char *path,
+    int64_t start_frame,
+    int64_t end_frame,
+    int64_t source_in_frame,
+    int64_t source_out_frame);
+MLT_LAYER_API_EXPORT int mlt_bridge_add_layer_with_state_trimmed(
+    int layer_index,
+    const char *path,
+    int64_t start_frame,
+    int64_t end_frame,
+    int64_t source_in_frame,
+    int64_t source_out_frame,
     double x,
     double y,
     double scale,
@@ -42,6 +66,10 @@ MLT_LAYER_API_EXPORT int mlt_bridge_add_layer_with_state(
     int alpha_mode,
     double audio_gain);
 MLT_LAYER_API_EXPORT int64_t mlt_bridge_layer_start_frame(int layer_index);
+MLT_LAYER_API_EXPORT int64_t mlt_bridge_layer_end_frame(int layer_index);
+MLT_LAYER_API_EXPORT int64_t mlt_bridge_layer_source_in_frame(int layer_index);
+MLT_LAYER_API_EXPORT int64_t mlt_bridge_layer_source_out_frame(int layer_index);
+MLT_LAYER_API_EXPORT int64_t mlt_bridge_layer_source_length_frames(int layer_index);
 MLT_LAYER_API_EXPORT int mlt_bridge_set_layer_opacity(int layer_index, double opacity);
 MLT_LAYER_API_EXPORT double mlt_bridge_layer_opacity(int layer_index);
 MLT_LAYER_API_EXPORT int mlt_bridge_set_layer_geometry(int layer_index, double x, double y, double scale);

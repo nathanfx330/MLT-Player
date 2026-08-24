@@ -10,10 +10,36 @@ import 'mlt_bridge.dart';
 typedef _PreviewUpdateNative = Int32 Function(Pointer<Void>);
 typedef _PreviewUpdateDart = int Function(Pointer<Void>);
 
+typedef _AddTrackBoundedNative = Int32 Function(
+  Pointer<Utf8>,
+  Int64,
+  Int64,
+);
+typedef _AddTrackBoundedDart = int Function(
+  Pointer<Utf8>,
+  int,
+  int,
+);
+
+typedef _AddTrackBoundedSourceNative = Int32 Function(
+  Pointer<Utf8>,
+  Int64,
+  Int64,
+  Int64,
+  Int64,
+);
+typedef _AddTrackBoundedSourceDart = int Function(
+  Pointer<Utf8>,
+  int,
+  int,
+  int,
+  int,
+);
 
 typedef _AddLayerWithStateNative = Int32 Function(
   Int32,
   Pointer<Utf8>,
+  Int64,
   Int64,
   Double,
   Double,
@@ -25,6 +51,36 @@ typedef _AddLayerWithStateNative = Int32 Function(
 typedef _AddLayerWithStateDart = int Function(
   int,
   Pointer<Utf8>,
+  int,
+  int,
+  double,
+  double,
+  double,
+  double,
+  int,
+  double,
+);
+
+typedef _AddLayerWithStateTrimmedNative = Int32 Function(
+  Int32,
+  Pointer<Utf8>,
+  Int64,
+  Int64,
+  Int64,
+  Int64,
+  Double,
+  Double,
+  Double,
+  Double,
+  Int32,
+  Double,
+);
+typedef _AddLayerWithStateTrimmedDart = int Function(
+  int,
+  Pointer<Utf8>,
+  int,
+  int,
+  int,
   int,
   double,
   double,
@@ -85,15 +141,51 @@ extension MltLayerBridge on MltBridge {
     'mlt_bridge_preview_update_end',
   );
 
+  static final _AddTrackBoundedDart _addTrackBounded =
+      _library.lookupFunction<_AddTrackBoundedNative, _AddTrackBoundedDart>(
+    'mlt_bridge_add_track_bounded',
+  );
+
+  static final _AddTrackBoundedSourceDart _addTrackBoundedSource =
+      _library.lookupFunction<
+          _AddTrackBoundedSourceNative, _AddTrackBoundedSourceDart>(
+    'mlt_bridge_add_track_bounded_source',
+  );
 
   static final _AddLayerWithStateDart _addLayerWithState =
       _library.lookupFunction<_AddLayerWithStateNative, _AddLayerWithStateDart>(
     'mlt_bridge_add_layer_with_state',
   );
 
+  static final _AddLayerWithStateTrimmedDart _addLayerWithStateTrimmed =
+      _library.lookupFunction<
+          _AddLayerWithStateTrimmedNative, _AddLayerWithStateTrimmedDart>(
+    'mlt_bridge_add_layer_with_state_trimmed',
+  );
+
   static final _IndexedInt64Dart _layerStartFrame =
       _library.lookupFunction<_IndexedInt64Native, _IndexedInt64Dart>(
     'mlt_bridge_layer_start_frame',
+  );
+
+  static final _IndexedInt64Dart _layerEndFrame =
+      _library.lookupFunction<_IndexedInt64Native, _IndexedInt64Dart>(
+    'mlt_bridge_layer_end_frame',
+  );
+
+  static final _IndexedInt64Dart _layerSourceInFrame =
+      _library.lookupFunction<_IndexedInt64Native, _IndexedInt64Dart>(
+    'mlt_bridge_layer_source_in_frame',
+  );
+
+  static final _IndexedInt64Dart _layerSourceOutFrame =
+      _library.lookupFunction<_IndexedInt64Native, _IndexedInt64Dart>(
+    'mlt_bridge_layer_source_out_frame',
+  );
+
+  static final _IndexedInt64Dart _layerSourceLengthFrames =
+      _library.lookupFunction<_IndexedInt64Native, _IndexedInt64Dart>(
+    'mlt_bridge_layer_source_length_frames',
   );
 
   static final _IndexedSetDoubleDart _setLayerOpacity =
@@ -160,11 +252,46 @@ extension MltLayerBridge on MltBridge {
   bool endPreviewUpdate() =>
       _previewUpdateEnd(_layerEnginePointer) != 0;
 
+  bool addTrackBounded(
+    String path, {
+    required int startFrame,
+    required int endFrame,
+  }) {
+    final nativePath = path.toNativeUtf8();
+    try {
+      return _addTrackBounded(nativePath, startFrame, endFrame) != 0;
+    } finally {
+      malloc.free(nativePath);
+    }
+  }
+
+  bool addTrackBoundedSource(
+    String path, {
+    required int startFrame,
+    required int endFrame,
+    required int sourceInFrame,
+    required int sourceOutFrame,
+  }) {
+    final nativePath = path.toNativeUtf8();
+    try {
+      return _addTrackBoundedSource(
+            nativePath,
+            startFrame,
+            endFrame,
+            sourceInFrame,
+            sourceOutFrame,
+          ) !=
+          0;
+    } finally {
+      malloc.free(nativePath);
+    }
+  }
 
   bool addLayerWithState(
     int layerIndex,
     String path, {
     required int startFrame,
+    required int endFrame,
     required double x,
     required double y,
     required double scale,
@@ -178,6 +305,43 @@ extension MltLayerBridge on MltBridge {
             layerIndex,
             nativePath,
             startFrame,
+            endFrame,
+            x,
+            y,
+            scale,
+            opacity,
+            alphaMode,
+            audioGain,
+          ) !=
+          0;
+    } finally {
+      malloc.free(nativePath);
+    }
+  }
+
+  bool addLayerWithStateTrimmed(
+    int layerIndex,
+    String path, {
+    required int startFrame,
+    required int endFrame,
+    required int sourceInFrame,
+    required int sourceOutFrame,
+    required double x,
+    required double y,
+    required double scale,
+    required double opacity,
+    required int alphaMode,
+    required double audioGain,
+  }) {
+    final nativePath = path.toNativeUtf8();
+    try {
+      return _addLayerWithStateTrimmed(
+            layerIndex,
+            nativePath,
+            startFrame,
+            endFrame,
+            sourceInFrame,
+            sourceOutFrame,
             x,
             y,
             scale,
@@ -192,6 +356,15 @@ extension MltLayerBridge on MltBridge {
   }
 
   int layerStartFrame(int layerIndex) => _layerStartFrame(layerIndex);
+
+  int layerEndFrame(int layerIndex) => _layerEndFrame(layerIndex);
+
+  int layerSourceInFrame(int layerIndex) => _layerSourceInFrame(layerIndex);
+
+  int layerSourceOutFrame(int layerIndex) => _layerSourceOutFrame(layerIndex);
+
+  int layerSourceLengthFrames(int layerIndex) =>
+      _layerSourceLengthFrames(layerIndex);
 
   bool setLayerOpacity(int layerIndex, double opacity) =>
       _setLayerOpacity(layerIndex, opacity) != 0;
@@ -225,6 +398,42 @@ extension MltLayerBridge on MltBridge {
   int layerAlphaMode(int layerIndex) => _layerAlphaMode(layerIndex);
 }
 
+Future<bool> addTrackBoundedOnHelperIsolate(
+  int engineAddress,
+  String path, {
+  required int startFrame,
+  required int endFrame,
+}) {
+  return Isolate.run(() {
+    final bridge = MltBridge.attach(engineAddress);
+    return bridge.addTrackBounded(
+      path,
+      startFrame: startFrame,
+      endFrame: endFrame,
+    );
+  });
+}
+
+Future<bool> addTrackBoundedSourceOnHelperIsolate(
+  int engineAddress,
+  String path, {
+  required int startFrame,
+  required int endFrame,
+  required int sourceInFrame,
+  required int sourceOutFrame,
+}) {
+  return Isolate.run(() {
+    final bridge = MltBridge.attach(engineAddress);
+    return bridge.addTrackBoundedSource(
+      path,
+      startFrame: startFrame,
+      endFrame: endFrame,
+      sourceInFrame: sourceInFrame,
+      sourceOutFrame: sourceOutFrame,
+    );
+  });
+}
+
 /// Restores Layer 3 on a helper isolate with its final state already installed
 /// before native preview resumes. This keeps Undo from exposing intermediate
 /// Layer-2-only/default-Layer-3 frames.
@@ -233,6 +442,9 @@ Future<bool> addLayerWithStateOnHelperIsolate(
   int layerIndex,
   String path, {
   required int startFrame,
+  required int endFrame,
+  int? sourceInFrame,
+  int? sourceOutFrame,
   required double x,
   required double y,
   required double scale,
@@ -242,10 +454,28 @@ Future<bool> addLayerWithStateOnHelperIsolate(
 }) {
   return Isolate.run(() {
     final bridge = MltBridge.attach(engineAddress);
+    if (sourceInFrame != null && sourceOutFrame != null) {
+      return bridge.addLayerWithStateTrimmed(
+        layerIndex,
+        path,
+        startFrame: startFrame,
+        endFrame: endFrame,
+        sourceInFrame: sourceInFrame,
+        sourceOutFrame: sourceOutFrame,
+        x: x,
+        y: y,
+        scale: scale,
+        opacity: opacity,
+        alphaMode: alphaMode,
+        audioGain: audioGain,
+      );
+    }
+
     return bridge.addLayerWithState(
       layerIndex,
       path,
       startFrame: startFrame,
+      endFrame: endFrame,
       x: x,
       y: y,
       scale: scale,

@@ -17,6 +17,12 @@
 
 #define MLT_EXPORT_DEINTERLACER "onefield"
 
+#if defined(__GNUC__)
+#define MLT_EXPORT_API __attribute__((visibility("default")))
+#else
+#define MLT_EXPORT_API
+#endif
+
 /* ------------------------------------------------------------------------- */
 
 /*
@@ -31,6 +37,26 @@ static int export_cancel_requested = 0;
 static double export_progress = 0.0;
 static char export_error[512] = "";
 
+/*
+ * Purpose-named movie export presets. The selected process-level value is
+ * copied into each ExportJob before its worker starts, so a later UI change
+ * cannot mutate an export already in flight.
+ */
+enum {
+    EXPORT_VIDEO_PRESET_H264_DELIVERY = 0,
+    EXPORT_VIDEO_PRESET_PRORES_422_HQ = 1
+};
+
+static int export_video_preset = EXPORT_VIDEO_PRESET_H264_DELIVERY;
+
+/*
+ * 0/1 means "match the source profile". Non-zero values are canonical
+ * rational output rates selected by the UI. Like the codec preset, the pair
+ * is copied into each ExportJob before the worker starts.
+ */
+static int export_video_frame_rate_num = 0;
+static int export_video_frame_rate_den = 1;
+
 typedef struct _ExportJob {
     char *export_source_path;
     char *export_secondary_path;
@@ -39,7 +65,13 @@ typedef struct _ExportJob {
     int64_t export_in_frame;
     int64_t export_out_frame;
     int64_t export_secondary_start_frame;
+    int64_t export_secondary_end_frame;
+    int64_t export_secondary_source_in_frame;
+    int64_t export_secondary_source_out_frame;
     int64_t export_tertiary_start_frame;
+    int64_t export_tertiary_end_frame;
+    int64_t export_tertiary_source_in_frame;
+    int64_t export_tertiary_source_out_frame;
     int export_has_secondary;
     int export_has_tertiary;
     int export_snapshot_valid;
@@ -61,6 +93,9 @@ typedef struct _ExportJob {
     double export_tertiary_x;
     double export_tertiary_y;
     double export_tertiary_scale;
+    int export_video_preset;
+    int export_video_frame_rate_num;
+    int export_video_frame_rate_den;
     MltExportKind export_kind;
 } ExportJob;
 
@@ -77,6 +112,10 @@ typedef struct _ExportGraph {
     mlt_transition export_tertiary_composite;
     mlt_transition export_tertiary_mix;
     mlt_producer export_top;
+    int source_frame_rate_num;
+    int source_frame_rate_den;
+    double source_fps;
+    double output_fps;
     MltCompositionDerivedState derived;
 } ExportGraph;
 
@@ -95,6 +134,7 @@ typedef struct _ExportTelemetry {
     int output_width;
     int output_height;
     double source_fps;
+    double output_fps;
     int consumer_real_time;
     int consumer_buffer;
     int consumer_prefill;
@@ -179,11 +219,17 @@ static int64_t output_file_size(const char *path)
     return (int64_t)info.st_size;
 }
 
-static const char *export_kind_name(MltExportKind kind)
+static const char *export_kind_name(const ExportJob *job)
 {
-    switch (kind) {
+    if (job == NULL) {
+        return "unknown";
+    }
+
+    switch (job->export_kind) {
         case MLT_EXPORT_KIND_MP4:
-            return "mp4";
+            return job->export_video_preset == EXPORT_VIDEO_PRESET_PRORES_422_HQ
+                ? "mov"
+                : "mp4";
         case MLT_EXPORT_KIND_PNG_FRAME:
             return "png_frame";
         case MLT_EXPORT_KIND_PNG_SEQUENCE:
@@ -193,6 +239,111 @@ static const char *export_kind_name(MltExportKind kind)
         default:
             return "unknown";
     }
+}
+
+static const char *export_video_codec_name(const ExportJob *job)
+{
+    if (job == NULL || job->export_kind != MLT_EXPORT_KIND_MP4) {
+        return "n/a";
+    }
+
+    return job->export_video_preset == EXPORT_VIDEO_PRESET_PRORES_422_HQ
+        ? "prores_ks"
+        : "libx264";
+}
+
+static const char *export_video_preset_name(const ExportJob *job)
+{
+    if (job == NULL || job->export_kind != MLT_EXPORT_KIND_MP4) {
+        return "n/a";
+    }
+
+    return job->export_video_preset == EXPORT_VIDEO_PRESET_PRORES_422_HQ
+        ? "prores_422_hq_master"
+        : "h264_delivery";
+}
+
+static int export_video_frame_rate_is_supported(
+    int numerator,
+    int denominator)
+{
+    if (numerator == 0) {
+        return denominator == 1;
+    }
+
+    static const int supported[][2] = {
+        {24000, 1001},
+        {24, 1},
+        {25, 1},
+        {30000, 1001},
+        {30, 1},
+        {50, 1},
+        {60000, 1001},
+        {60, 1},
+    };
+
+    for (size_t index = 0;
+         index < sizeof(supported) / sizeof(supported[0]);
+         index++) {
+        if (supported[index][0] == numerator &&
+            supported[index][1] == denominator) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static int export_job_has_explicit_video_frame_rate(
+    const ExportJob *job)
+{
+    return job != NULL &&
+        job->export_kind == MLT_EXPORT_KIND_MP4 &&
+        job->export_video_frame_rate_num > 0 &&
+        job->export_video_frame_rate_den > 0;
+}
+
+/*
+ * Convert a frame boundary by time instead of by frame number. Using
+ * boundaries is important for inclusive In/Out ranges: [0..24] at 25 fps is
+ * one second, so its exclusive end boundary is frame 25 and becomes frame 30
+ * at 30 fps.
+ */
+static int64_t export_scale_frame_boundary(
+    int64_t source_boundary,
+    int source_num,
+    int source_den,
+    int target_num,
+    int target_den)
+{
+    if (source_boundary <= 0) {
+        return 0;
+    }
+
+    if (source_num <= 0 ||
+        source_den <= 0 ||
+        target_num <= 0 ||
+        target_den <= 0) {
+        return source_boundary;
+    }
+
+    if ((int64_t)source_num * target_den ==
+        (int64_t)target_num * source_den) {
+        return source_boundary;
+    }
+
+    const long double scaled =
+        ((long double)source_boundary *
+         (long double)target_num *
+         (long double)source_den) /
+        ((long double)source_num *
+         (long double)target_den);
+
+    if (scaled >= (long double)INT64_MAX) {
+        return INT64_MAX;
+    }
+
+    return (int64_t)(scaled + 0.5L);
 }
 
 static char *export_report_path(const ExportJob *job)
@@ -460,7 +611,7 @@ static int export_write_report(
         fputs("null", file);
     }
     fputs(",\n  \"export_kind\": ", file);
-    export_json_write_string(file, export_kind_name(job->export_kind));
+    export_json_write_string(file, export_kind_name(job));
     fputs(",\n  \"output_path\": ", file);
     export_json_write_string(file, job->export_output_path);
     fputs(",\n  \"source_path\": ", file);
@@ -482,13 +633,17 @@ static int export_write_report(
     );
     fprintf(
         file,
-        "  \"video\": {\"width\": %d, \"height\": %d, \"source_fps\": %.6f, \"codec\": \"%s\", \"preset\": \"%s\", \"crf\": %d},\n",
+        "  \"video\": {\"width\": %d, \"height\": %d, \"source_fps\": %.6f, \"output_fps\": %.6f, \"codec\": \"%s\", \"preset\": \"%s\", \"crf\": %d},\n",
         telemetry->output_width,
         telemetry->output_height,
         telemetry->source_fps,
-        job->export_kind == MLT_EXPORT_KIND_MP4 ? "libx264" : "n/a",
-        job->export_kind == MLT_EXPORT_KIND_MP4 ? "medium" : "n/a",
-        job->export_kind == MLT_EXPORT_KIND_MP4 ? 18 : 0
+        telemetry->output_fps,
+        export_video_codec_name(job),
+        export_video_preset_name(job),
+        job->export_kind == MLT_EXPORT_KIND_MP4 &&
+                job->export_video_preset == EXPORT_VIDEO_PRESET_H264_DELIVERY
+            ? 18
+            : 0
     );
     fprintf(
         file,
@@ -1065,6 +1220,31 @@ static int export_prepare_source_graph(
 
     mlt_producer_probe(probe_producer);
     mlt_profile_from_producer(graph->export_profile, probe_producer);
+
+    graph->source_frame_rate_num = graph->export_profile->frame_rate_num;
+    graph->source_frame_rate_den = graph->export_profile->frame_rate_den;
+    graph->source_fps = mlt_profile_fps(graph->export_profile);
+
+    if (graph->source_frame_rate_num <= 0 ||
+        graph->source_frame_rate_den <= 0 ||
+        graph->source_fps <= 0.0) {
+        export_set_failure(
+            failure,
+            failure_size,
+            "The base source has an invalid frame rate."
+        );
+        goto fail;
+    }
+
+    if (export_job_has_explicit_video_frame_rate(job)) {
+        graph->export_profile->frame_rate_num =
+            job->export_video_frame_rate_num;
+        graph->export_profile->frame_rate_den =
+            job->export_video_frame_rate_den;
+    }
+
+    graph->output_fps = mlt_profile_fps(graph->export_profile);
+
     mlt_producer_close(probe_producer);
     probe_producer = NULL;
 
@@ -1095,6 +1275,34 @@ static int export_prepare_source_graph(
     if (in_frame < 0) {
         in_frame = 0;
     }
+
+    if (export_job_has_explicit_video_frame_rate(job)) {
+        const int64_t source_out_boundary =
+            out_frame < INT64_MAX ? out_frame + 1 : INT64_MAX;
+
+        in_frame = export_scale_frame_boundary(
+            in_frame,
+            graph->source_frame_rate_num,
+            graph->source_frame_rate_den,
+            job->export_video_frame_rate_num,
+            job->export_video_frame_rate_den
+        );
+
+        const int64_t target_out_boundary =
+            export_scale_frame_boundary(
+                source_out_boundary,
+                graph->source_frame_rate_num,
+                graph->source_frame_rate_den,
+                job->export_video_frame_rate_num,
+                job->export_video_frame_rate_den
+            );
+
+        out_frame =
+            target_out_boundary > 0
+                ? target_out_boundary - 1
+                : 0;
+    }
+
     if (out_frame >= source_length) {
         out_frame = source_length - 1;
     }
@@ -1122,6 +1330,8 @@ static int export_prepare_source_graph(
     base->present = 1;
     base->start_frame = 0;
     base->timeline_length = source_length;
+    base->source_in_frame = 0;
+    base->source_out_frame = source_length - 1;
     base->base_width = graph->derived.profile_width;
     base->base_height = graph->derived.profile_height;
     base->x = 0.0;
@@ -1237,16 +1447,84 @@ static int export_prepare_source_graph(
     mlt_producer_probe(graph->export_secondary);
 
     mlt_position normalized_secondary_start = 0;
+    mlt_position normalized_secondary_source_in = -1;
+    mlt_position normalized_secondary_source_out = -1;
+    int64_t secondary_start_frame = job->export_secondary_start_frame;
+    int64_t secondary_end_frame = job->export_secondary_end_frame;
+    int64_t secondary_source_in_frame = job->export_secondary_source_in_frame;
+    int64_t secondary_source_out_frame = job->export_secondary_source_out_frame;
+
+    if (export_job_has_explicit_video_frame_rate(job)) {
+        secondary_start_frame = export_scale_frame_boundary(
+            secondary_start_frame,
+            graph->source_frame_rate_num,
+            graph->source_frame_rate_den,
+            job->export_video_frame_rate_num,
+            job->export_video_frame_rate_den
+        );
+
+        if (secondary_end_frame >= 0) {
+            const int64_t source_end_boundary =
+                secondary_end_frame < INT64_MAX
+                    ? secondary_end_frame + 1
+                    : secondary_end_frame;
+            const int64_t target_end_boundary =
+                export_scale_frame_boundary(
+                    source_end_boundary,
+                    graph->source_frame_rate_num,
+                    graph->source_frame_rate_den,
+                    job->export_video_frame_rate_num,
+                    job->export_video_frame_rate_den
+                );
+            secondary_end_frame =
+                target_end_boundary > 0
+                    ? target_end_boundary - 1
+                    : 0;
+        }
+
+        if (secondary_source_in_frame >= 0) {
+            secondary_source_in_frame = export_scale_frame_boundary(
+                secondary_source_in_frame,
+                graph->source_frame_rate_num,
+                graph->source_frame_rate_den,
+                job->export_video_frame_rate_num,
+                job->export_video_frame_rate_den
+            );
+        }
+        if (secondary_source_out_frame >= 0) {
+            const int64_t source_trim_out_boundary =
+                secondary_source_out_frame < INT64_MAX
+                    ? secondary_source_out_frame + 1
+                    : secondary_source_out_frame;
+            const int64_t target_trim_out_boundary =
+                export_scale_frame_boundary(
+                    source_trim_out_boundary,
+                    graph->source_frame_rate_num,
+                    graph->source_frame_rate_den,
+                    job->export_video_frame_rate_num,
+                    job->export_video_frame_rate_den
+                );
+            secondary_source_out_frame =
+                target_trim_out_boundary > 0
+                    ? target_trim_out_boundary - 1
+                    : 0;
+        }
+    }
 
     const MltSecondaryPlacementResult placement_result =
-        mlt_composition_build_secondary_playlist(
+        mlt_composition_build_secondary_playlist_trimmed(
             graph->export_profile,
             graph->export_secondary,
-            (mlt_position)job->export_secondary_start_frame,
+            (mlt_position)secondary_start_frame,
+            (mlt_position)secondary_end_frame,
+            (mlt_position)secondary_source_in_frame,
+            (mlt_position)secondary_source_out_frame,
             (mlt_position)source_length,
             job->export_secondary_is_still,
             &graph->export_secondary_playlist,
-            &normalized_secondary_start
+            &normalized_secondary_start,
+            &normalized_secondary_source_in,
+            &normalized_secondary_source_out
         );
 
     if (placement_result != MLT_SECONDARY_PLACEMENT_OK) {
@@ -1299,6 +1577,10 @@ static int export_prepare_source_graph(
     }
 
     layer2->start_frame = (int64_t)normalized_secondary_start;
+    layer2->source_in_frame =
+        job->export_secondary_is_still ? -1 : (int64_t)normalized_secondary_source_in;
+    layer2->source_out_frame =
+        job->export_secondary_is_still ? -1 : (int64_t)normalized_secondary_source_out;
     layer2->timeline_length =
         (int64_t)mlt_producer_get_length(
             mlt_playlist_producer(graph->export_secondary_playlist)
@@ -1368,15 +1650,84 @@ static int export_prepare_source_graph(
 
         mlt_producer_probe(graph->export_tertiary);
         mlt_position normalized_tertiary_start = 0;
+        mlt_position normalized_tertiary_source_in = -1;
+        mlt_position normalized_tertiary_source_out = -1;
+        int64_t tertiary_start_frame = job->export_tertiary_start_frame;
+        int64_t tertiary_end_frame = job->export_tertiary_end_frame;
+        int64_t tertiary_source_in_frame = job->export_tertiary_source_in_frame;
+        int64_t tertiary_source_out_frame = job->export_tertiary_source_out_frame;
+
+        if (export_job_has_explicit_video_frame_rate(job)) {
+            tertiary_start_frame = export_scale_frame_boundary(
+                tertiary_start_frame,
+                graph->source_frame_rate_num,
+                graph->source_frame_rate_den,
+                job->export_video_frame_rate_num,
+                job->export_video_frame_rate_den
+            );
+
+            if (tertiary_end_frame >= 0) {
+                const int64_t source_end_boundary =
+                    tertiary_end_frame < INT64_MAX
+                        ? tertiary_end_frame + 1
+                        : tertiary_end_frame;
+                const int64_t target_end_boundary =
+                    export_scale_frame_boundary(
+                        source_end_boundary,
+                        graph->source_frame_rate_num,
+                        graph->source_frame_rate_den,
+                        job->export_video_frame_rate_num,
+                        job->export_video_frame_rate_den
+                    );
+                tertiary_end_frame =
+                    target_end_boundary > 0
+                        ? target_end_boundary - 1
+                        : 0;
+            }
+
+            if (tertiary_source_in_frame >= 0) {
+                tertiary_source_in_frame = export_scale_frame_boundary(
+                    tertiary_source_in_frame,
+                    graph->source_frame_rate_num,
+                    graph->source_frame_rate_den,
+                    job->export_video_frame_rate_num,
+                    job->export_video_frame_rate_den
+                );
+            }
+            if (tertiary_source_out_frame >= 0) {
+                const int64_t source_trim_out_boundary =
+                    tertiary_source_out_frame < INT64_MAX
+                        ? tertiary_source_out_frame + 1
+                        : tertiary_source_out_frame;
+                const int64_t target_trim_out_boundary =
+                    export_scale_frame_boundary(
+                        source_trim_out_boundary,
+                        graph->source_frame_rate_num,
+                        graph->source_frame_rate_den,
+                        job->export_video_frame_rate_num,
+                        job->export_video_frame_rate_den
+                    );
+                tertiary_source_out_frame =
+                    target_trim_out_boundary > 0
+                        ? target_trim_out_boundary - 1
+                        : 0;
+            }
+        }
+
         const MltSecondaryPlacementResult tertiary_placement =
-            mlt_composition_build_secondary_playlist(
+            mlt_composition_build_secondary_playlist_trimmed(
                 graph->export_profile,
                 graph->export_tertiary,
-                (mlt_position)job->export_tertiary_start_frame,
+                (mlt_position)tertiary_start_frame,
+                (mlt_position)tertiary_end_frame,
+                (mlt_position)tertiary_source_in_frame,
+                (mlt_position)tertiary_source_out_frame,
                 (mlt_position)source_length,
                 job->export_tertiary_is_still,
                 &graph->export_tertiary_playlist,
-                &normalized_tertiary_start
+                &normalized_tertiary_start,
+                &normalized_tertiary_source_in,
+                &normalized_tertiary_source_out
             );
         if (tertiary_placement != MLT_SECONDARY_PLACEMENT_OK) {
             export_set_failure(failure, failure_size, "Could not configure Layer 3 placement for export.");
@@ -1403,6 +1754,10 @@ static int export_prepare_source_graph(
             &graph->derived.layers[MLT_COMPOSITION_SECOND_OVERLAY];
         layer3->present = 1;
         layer3->start_frame = (int64_t)normalized_tertiary_start;
+        layer3->source_in_frame =
+            job->export_tertiary_is_still ? -1 : (int64_t)normalized_tertiary_source_in;
+        layer3->source_out_frame =
+            job->export_tertiary_is_still ? -1 : (int64_t)normalized_tertiary_source_out;
         layer3->timeline_length = (int64_t)mlt_producer_get_length(
             mlt_playlist_producer(graph->export_tertiary_playlist)
         );
@@ -1883,51 +2238,55 @@ static int export_source_has_audio(
     return 1;
 }
 
-static void export_configure_mp4_consumer(
+static void export_configure_video_consumer(
     mlt_properties properties,
-    int source_has_audio)
+    int composition_has_audio,
+    int video_preset)
 {
-    /*
-     * Fixed POC 9 delivery preset. Match the progressive/deinterlaced image
-     * policy used by the viewer and PNG exports, and do not manufacture an
-     * AAC stream when the source has no audio.
-     */
-    mlt_properties_set(properties, "f", "mp4");
-    mlt_properties_set(properties, "vcodec", "libx264");
-    mlt_properties_set(properties, "pix_fmt", "yuv420p");
-    mlt_properties_set(properties, "preset", "medium");
-    mlt_properties_set_int(properties, "crf", 18);
-    mlt_properties_set(properties, "movflags", "+faststart");
+    if (video_preset == EXPORT_VIDEO_PRESET_PRORES_422_HQ) {
+        /*
+         * Purpose-named edit/master preset: QuickTime MOV carrying ProRes 422
+         * HQ at 10-bit 4:2:2. PCM audio avoids a second lossy encode in the
+         * master. Frame rate remains the composition profile's frame rate.
+         */
+        mlt_properties_set(properties, "f", "mov");
+        mlt_properties_set(properties, "vcodec", "prores_ks");
+        mlt_properties_set(properties, "pix_fmt", "yuv422p10le");
+        mlt_properties_set(properties, "vprofile", "hq");
 
+        if (composition_has_audio) {
+            mlt_properties_set(properties, "acodec", "pcm_s24le");
+            mlt_properties_set(properties, "mlt_audio_format", "s32le");
+        } else {
+            mlt_properties_set_int(properties, "an", 1);
+        }
+    } else {
+        /*
+         * H.264 Delivery is the original POC 9 movie preset. Keep its exact
+         * behavior as the default so existing exports remain unchanged.
+         */
+        mlt_properties_set(properties, "f", "mp4");
+        mlt_properties_set(properties, "vcodec", "libx264");
+        mlt_properties_set(properties, "pix_fmt", "yuv420p");
+        mlt_properties_set(properties, "preset", "medium");
+        mlt_properties_set_int(properties, "crf", 18);
+        mlt_properties_set(properties, "movflags", "+faststart");
+
+        if (composition_has_audio) {
+            mlt_properties_set(properties, "acodec", "aac");
+        } else {
+            mlt_properties_set_int(properties, "an", 1);
+        }
+    }
+
+    /* Both movie presets follow the viewer's progressive output policy. */
     mlt_properties_set(
         properties,
         "deinterlacer",
         MLT_EXPORT_DEINTERLACER
     );
-    mlt_properties_set_int(
-        properties,
-        "top_field_first",
-        -1
-    );
-    mlt_properties_set_int(
-        properties,
-        "progressive",
-        1
-    );
-
-    if (source_has_audio) {
-        mlt_properties_set(
-            properties,
-            "acodec",
-            "aac"
-        );
-    } else {
-        mlt_properties_set_int(
-            properties,
-            "an",
-            1
-        );
-    }
+    mlt_properties_set_int(properties, "top_field_first", -1);
+    mlt_properties_set_int(properties, "progressive", 1);
 }
 
 static void export_configure_wav_audio_consumer(
@@ -2103,9 +2462,10 @@ static int export_configure_consumer(
 
     switch (kind) {
         case MLT_EXPORT_KIND_MP4:
-            export_configure_mp4_consumer(
+            export_configure_video_consumer(
                 properties,
-                composition_has_audio
+                composition_has_audio,
+                job->export_video_preset
             );
             break;
 
@@ -2337,7 +2697,8 @@ static gpointer export_worker(gpointer data)
     if (export_profile != NULL) {
         telemetry.output_width = export_profile->width;
         telemetry.output_height = export_profile->height;
-        telemetry.source_fps = mlt_profile_fps(export_profile);
+        telemetry.source_fps = graph.source_fps;
+        telemetry.output_fps = graph.output_fps;
     }
 
     if (!export_prepare_consumer_profile(
@@ -2653,6 +3014,58 @@ static void join_finished_export_thread(void)
     }
 }
 
+MLT_EXPORT_API
+int mlt_bridge_export_set_video_preset(int preset)
+{
+    if (preset != EXPORT_VIDEO_PRESET_H264_DELIVERY &&
+        preset != EXPORT_VIDEO_PRESET_PRORES_422_HQ) {
+        return 0;
+    }
+
+    /* A completed worker may still have a joinable GThread handle. */
+    join_finished_export_thread();
+
+    ensure_export_lock();
+    g_mutex_lock(&export_mutex);
+
+    if (export_running) {
+        g_mutex_unlock(&export_mutex);
+        return 0;
+    }
+
+    export_video_preset = preset;
+    g_mutex_unlock(&export_mutex);
+    return 1;
+}
+
+MLT_EXPORT_API
+int mlt_bridge_export_set_video_frame_rate(
+    int numerator,
+    int denominator)
+{
+    if (!export_video_frame_rate_is_supported(
+            numerator,
+            denominator)) {
+        return 0;
+    }
+
+    /* A completed worker may still have a joinable GThread handle. */
+    join_finished_export_thread();
+
+    ensure_export_lock();
+    g_mutex_lock(&export_mutex);
+
+    if (export_running) {
+        g_mutex_unlock(&export_mutex);
+        return 0;
+    }
+
+    export_video_frame_rate_num = numerator;
+    export_video_frame_rate_den = denominator;
+    g_mutex_unlock(&export_mutex);
+    return 1;
+}
+
 static void cancel_export_and_join(void)
 {
     ensure_export_lock();
@@ -2707,6 +3120,9 @@ static void export_job_apply_composition_snapshot(
 
     job->export_has_secondary = 1;
     job->export_secondary_start_frame = layer2->start_frame;
+    job->export_secondary_end_frame = layer2->end_frame;
+    job->export_secondary_source_in_frame = layer2->source_in_frame;
+    job->export_secondary_source_out_frame = layer2->source_out_frame;
     job->export_secondary_has_audio = layer2->has_audio ? 1 : 0;
     job->export_secondary_is_still = layer2->is_still ? 1 : 0;
     job->export_secondary_alpha_mode = layer2->alpha_mode;
@@ -2727,6 +3143,9 @@ static void export_job_apply_composition_snapshot(
         &snapshot->layers[MLT_COMPOSITION_SECOND_OVERLAY];
     job->export_has_tertiary = 1;
     job->export_tertiary_start_frame = layer3->start_frame;
+    job->export_tertiary_end_frame = layer3->end_frame;
+    job->export_tertiary_source_in_frame = layer3->source_in_frame;
+    job->export_tertiary_source_out_frame = layer3->source_out_frame;
     job->export_tertiary_has_audio = layer3->has_audio ? 1 : 0;
     job->export_tertiary_is_still = layer3->is_still ? 1 : 0;
     job->export_tertiary_alpha_mode = layer3->alpha_mode;
@@ -2765,6 +3184,10 @@ static int launch_export_job(ExportJob *job)
         g_mutex_unlock(&export_mutex);
         return 0;
     }
+
+    job->export_video_preset = export_video_preset;
+    job->export_video_frame_rate_num = export_video_frame_rate_num;
+    job->export_video_frame_rate_den = export_video_frame_rate_den;
 
     export_running = 1;
     export_success = 0;

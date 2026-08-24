@@ -8,6 +8,7 @@ import '../../services/player_engine.dart';
 
 typedef LayerDoubleChanged = void Function(int layerIndex, double value);
 typedef LayerIntChanged = void Function(int layerIndex, int value);
+typedef LayerFrameNudge = void Function(int layerIndex, int deltaFrames);
 typedef LayerAction = void Function(int layerIndex);
 
 class LayersInspector extends StatelessWidget {
@@ -26,6 +27,10 @@ class LayersInspector extends StatelessWidget {
     required this.onYChanged,
     required this.onScaleChanged,
     required this.onAnchorChanged,
+    required this.onStartNudge,
+    required this.onEndNudge,
+    required this.onSourceInNudge,
+    required this.onSourceOutNudge,
     required this.onReplaceSource,
     required this.onToggleVisible,
     required this.onAddLayer,
@@ -49,6 +54,10 @@ class LayersInspector extends StatelessWidget {
   final LayerDoubleChanged onYChanged;
   final LayerDoubleChanged onScaleChanged;
   final LayerIntChanged onAnchorChanged;
+  final LayerFrameNudge onStartNudge;
+  final LayerFrameNudge onEndNudge;
+  final LayerFrameNudge onSourceInNudge;
+  final LayerFrameNudge onSourceOutNudge;
   final LayerAction onReplaceSource;
   final LayerAction onToggleVisible;
   final VoidCallback onAddLayer;
@@ -108,6 +117,21 @@ class LayersInspector extends StatelessWidget {
           name: _displayName(layer),
           badge: layer.isStill ? 'STILL' : 'VIDEO',
           start: formatFrame(layer.startFrame ?? 0),
+          end: formatFrame(layer.endFrame ?? layer.startFrame ?? 0),
+          onStartNudge: (delta) => onStartNudge(layer.index, delta),
+          onEndNudge: (delta) => onEndNudge(layer.index, delta),
+          sourceIn: !layer.isStill && layer.sourceInFrame != null
+              ? formatFrame(layer.sourceInFrame!)
+              : null,
+          sourceOut: !layer.isStill && layer.sourceOutFrame != null
+              ? formatFrame(layer.sourceOutFrame!)
+              : null,
+          onSourceInNudge: !layer.isStill
+              ? (delta) => onSourceInNudge(layer.index, delta)
+              : null,
+          onSourceOutNudge: !layer.isStill
+              ? (delta) => onSourceOutNudge(layer.index, delta)
+              : null,
           videoOpacity: layer.opacity,
           videoVisible: layer.visible,
           sizeLabel: layer.isStill
@@ -261,6 +285,13 @@ class _LayerSection extends StatelessWidget {
     required this.name,
     required this.badge,
     required this.start,
+    this.end,
+    this.onStartNudge,
+    this.onEndNudge,
+    this.sourceIn,
+    this.sourceOut,
+    this.onSourceInNudge,
+    this.onSourceOutNudge,
     this.videoLabel,
     required this.audioEnabled,
     required this.audioGain,
@@ -289,6 +320,13 @@ class _LayerSection extends StatelessWidget {
   final String name;
   final String badge;
   final String start;
+  final String? end;
+  final ValueChanged<int>? onStartNudge;
+  final ValueChanged<int>? onEndNudge;
+  final String? sourceIn;
+  final String? sourceOut;
+  final ValueChanged<int>? onSourceInNudge;
+  final ValueChanged<int>? onSourceOutNudge;
   final String? videoLabel;
   final double? videoOpacity;
   final bool videoVisible;
@@ -409,15 +447,54 @@ class _LayerSection extends StatelessWidget {
         const _Rule(),
         _InspectorLine(
           label: 'START',
-          child: Text(
-            start,
-            style: const TextStyle(
-              fontSize: 11,
-              color: Colors.white70,
-              fontFeatures: [ui.FontFeature.tabularFigures()],
+          child: onStartNudge == null
+              ? Text(
+                  start,
+                  style: const TextStyle(
+                    fontSize: 11,
+                    color: Colors.white70,
+                    fontFeatures: [ui.FontFeature.tabularFigures()],
+                  ),
+                )
+              : _FrameNudgeControl(
+                  value: start,
+                  semanticLabel: 'layer start',
+                  onNudge: onStartNudge!,
+                ),
+        ),
+        if (end != null) ...[
+          const _Rule(),
+          _InspectorLine(
+            label: 'END',
+            child: _FrameNudgeControl(
+              value: end!,
+              semanticLabel: 'layer end',
+              onNudge: onEndNudge!,
             ),
           ),
-        ),
+        ],
+        if (sourceIn != null && onSourceInNudge != null) ...[
+          const _Rule(),
+          _InspectorLine(
+            label: 'SRC IN',
+            child: _FrameNudgeControl(
+              value: sourceIn!,
+              semanticLabel: 'source in',
+              onNudge: onSourceInNudge!,
+            ),
+          ),
+        ],
+        if (sourceOut != null && onSourceOutNudge != null) ...[
+          const _Rule(),
+          _InspectorLine(
+            label: 'SRC OUT',
+            child: _FrameNudgeControl(
+              value: sourceOut!,
+              semanticLabel: 'source out',
+              onNudge: onSourceOutNudge!,
+            ),
+          ),
+        ],
         const _Rule(),
         _InspectorLine(
           label: 'VIDEO',
@@ -557,6 +634,92 @@ class _InspectorLine extends StatelessWidget {
             const SizedBox(width: 8),
             Expanded(child: child),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _FrameNudgeControl extends StatelessWidget {
+  const _FrameNudgeControl({
+    required this.value,
+    required this.semanticLabel,
+    required this.onNudge,
+  });
+
+  final String value;
+  final String semanticLabel;
+  final ValueChanged<int> onNudge;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Expanded(
+          child: Text(
+            value,
+            style: const TextStyle(
+              fontSize: 11,
+              color: Colors.white70,
+              fontFeatures: [ui.FontFeature.tabularFigures()],
+            ),
+          ),
+        ),
+        _NudgeButton(
+          tooltip: 'Move $semanticLabel back 10 frames',
+          icon: Icons.keyboard_double_arrow_left,
+          onPressed: () => onNudge(-10),
+        ),
+        const SizedBox(width: 2),
+        _NudgeButton(
+          tooltip: 'Move $semanticLabel back 1 frame',
+          icon: Icons.chevron_left,
+          onPressed: () => onNudge(-1),
+        ),
+        const SizedBox(width: 2),
+        _NudgeButton(
+          tooltip: 'Move $semanticLabel forward 1 frame',
+          icon: Icons.chevron_right,
+          onPressed: () => onNudge(1),
+        ),
+        const SizedBox(width: 2),
+        _NudgeButton(
+          tooltip: 'Move $semanticLabel forward 10 frames',
+          icon: Icons.keyboard_double_arrow_right,
+          onPressed: () => onNudge(10),
+        ),
+      ],
+    );
+  }
+}
+
+class _NudgeButton extends StatelessWidget {
+  const _NudgeButton({
+    required this.tooltip,
+    required this.icon,
+    required this.onPressed,
+  });
+
+  final String tooltip;
+  final IconData icon;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: InkResponse(
+        radius: 15,
+        onTap: onPressed,
+        child: Container(
+          width: 26,
+          height: 24,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            border: Border.all(color: Colors.white12),
+            borderRadius: BorderRadius.circular(3),
+          ),
+          child: Icon(icon, size: 16, color: Colors.white60),
         ),
       ),
     );

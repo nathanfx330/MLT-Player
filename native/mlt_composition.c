@@ -125,10 +125,41 @@ MltSecondaryPlacementResult mlt_composition_build_secondary_playlist(
     mlt_profile target_profile,
     mlt_producer source,
     mlt_position start_frame,
+    mlt_position end_frame,
     mlt_position base_length,
     int source_is_still,
     mlt_playlist *playlist_out,
     mlt_position *normalized_start_out)
+{
+    return mlt_composition_build_secondary_playlist_trimmed(
+        target_profile,
+        source,
+        start_frame,
+        end_frame,
+        -1,
+        -1,
+        base_length,
+        source_is_still,
+        playlist_out,
+        normalized_start_out,
+        NULL,
+        NULL
+    );
+}
+
+MltSecondaryPlacementResult mlt_composition_build_secondary_playlist_trimmed(
+    mlt_profile target_profile,
+    mlt_producer source,
+    mlt_position start_frame,
+    mlt_position end_frame,
+    mlt_position source_in_frame,
+    mlt_position source_out_frame,
+    mlt_position base_length,
+    int source_is_still,
+    mlt_playlist *playlist_out,
+    mlt_position *normalized_start_out,
+    mlt_position *normalized_source_in_out,
+    mlt_position *normalized_source_out_out)
 {
     if (playlist_out == NULL) {
         return MLT_SECONDARY_PLACEMENT_INVALID_ARGUMENT;
@@ -138,6 +169,12 @@ MltSecondaryPlacementResult mlt_composition_build_secondary_playlist(
 
     if (normalized_start_out != NULL) {
         *normalized_start_out = 0;
+    }
+    if (normalized_source_in_out != NULL) {
+        *normalized_source_in_out = -1;
+    }
+    if (normalized_source_out_out != NULL) {
+        *normalized_source_out_out = -1;
     }
 
     if (target_profile == NULL ||
@@ -155,32 +192,74 @@ MltSecondaryPlacementResult mlt_composition_build_secondary_playlist(
         normalized_start = base_length - 1;
     }
 
+    mlt_position normalized_end = base_length - 1;
+
+    if (end_frame >= 0) {
+        normalized_end = end_frame;
+        if (normalized_end < normalized_start) {
+            return MLT_SECONDARY_PLACEMENT_INVALID_ARGUMENT;
+        }
+        if (normalized_end >= base_length) {
+            normalized_end = base_length - 1;
+        }
+    }
+
     const mlt_position available_length =
-        base_length - normalized_start;
+        normalized_end - normalized_start + 1;
 
     const mlt_position source_length =
         source_is_still
             ? 0
             : mlt_producer_get_length(source);
 
-    if (!source_is_still &&
-        source_length <= 0) {
+    if (!source_is_still && source_length <= 0) {
         return MLT_SECONDARY_PLACEMENT_NO_DURATION;
+    }
+
+    mlt_position normalized_source_in = 0;
+    mlt_position normalized_source_out = 0;
+    mlt_position source_range_length = available_length;
+
+    if (!source_is_still) {
+        normalized_source_in =
+            source_in_frame >= 0 ? source_in_frame : 0;
+        normalized_source_out =
+            source_out_frame >= 0 ? source_out_frame : source_length - 1;
+
+        if (normalized_source_in < 0) {
+            normalized_source_in = 0;
+        }
+        if (normalized_source_in >= source_length) {
+            return MLT_SECONDARY_PLACEMENT_NO_DURATION;
+        }
+        if (normalized_source_out >= source_length) {
+            normalized_source_out = source_length - 1;
+        }
+        if (normalized_source_out < normalized_source_in) {
+            return MLT_SECONDARY_PLACEMENT_INVALID_ARGUMENT;
+        }
+
+        source_range_length =
+            normalized_source_out - normalized_source_in + 1;
     }
 
     const mlt_position playtime =
         source_is_still
             ? available_length
-            : (source_length < available_length
-                   ? source_length
+            : (source_range_length < available_length
+                   ? source_range_length
                    : available_length);
 
     if (playtime <= 0) {
         return MLT_SECONDARY_PLACEMENT_NO_ROOM;
     }
 
-    const mlt_position source_out =
-        playtime - 1;
+    const mlt_position used_source_in =
+        source_is_still ? 0 : normalized_source_in;
+    const mlt_position used_source_out =
+        source_is_still
+            ? playtime - 1
+            : normalized_source_in + playtime - 1;
 
     if (source_is_still) {
         mlt_properties_set_position(
@@ -192,9 +271,9 @@ MltSecondaryPlacementResult mlt_composition_build_secondary_playlist(
 
     if (mlt_producer_set_in_and_out(
             source,
-            0,
-            source_out) != 0 ||
-        mlt_producer_seek(source, 0) != 0 ||
+            used_source_in,
+            used_source_out) != 0 ||
+        mlt_producer_seek(source, used_source_in) != 0 ||
         mlt_producer_set_speed(source, 0.0) != 0) {
         return MLT_SECONDARY_PLACEMENT_SOURCE_INIT_FAILED;
     }
@@ -207,9 +286,7 @@ MltSecondaryPlacementResult mlt_composition_build_secondary_playlist(
     }
 
     if (normalized_start > 0 &&
-        mlt_playlist_blank(
-            playlist,
-            normalized_start - 1) != 0) {
+        mlt_playlist_blank(playlist, normalized_start - 1) != 0) {
         mlt_playlist_close(playlist);
         return MLT_SECONDARY_PLACEMENT_LEAD_IN_FAILED;
     }
@@ -217,8 +294,8 @@ MltSecondaryPlacementResult mlt_composition_build_secondary_playlist(
     if (mlt_playlist_append_io(
             playlist,
             source,
-            0,
-            source_out) != 0) {
+            used_source_in,
+            used_source_out) != 0) {
         mlt_playlist_close(playlist);
         return MLT_SECONDARY_PLACEMENT_APPEND_FAILED;
     }
@@ -227,6 +304,12 @@ MltSecondaryPlacementResult mlt_composition_build_secondary_playlist(
 
     if (normalized_start_out != NULL) {
         *normalized_start_out = normalized_start;
+    }
+    if (!source_is_still && normalized_source_in_out != NULL) {
+        *normalized_source_in_out = normalized_source_in;
+    }
+    if (!source_is_still && normalized_source_out_out != NULL) {
+        *normalized_source_out_out = normalized_source_out;
     }
 
     return MLT_SECONDARY_PLACEMENT_OK;

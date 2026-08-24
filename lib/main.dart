@@ -11,6 +11,8 @@ import 'package:flutter/services.dart';
 import 'models/media_info.dart';
 import 'services/host_channel.dart';
 import 'services/mlt_bridge.dart';
+import 'services/mlt_export_frame_rate_bridge.dart';
+import 'services/mlt_export_preset_bridge.dart';
 import 'services/player_engine.dart';
 import 'ui/widgets/media_inspector.dart';
 import 'ui/widgets/layers_inspector.dart';
@@ -80,6 +82,17 @@ enum _ExportMenuChoice {
   video,
   imageSequence,
   audio,
+  h264Delivery,
+  proRes422HqMaster,
+  frameRateSource,
+  frameRate23976,
+  frameRate24,
+  frameRate25,
+  frameRate2997,
+  frameRate30,
+  frameRate50,
+  frameRate5994,
+  frameRate60,
   wholeMovie,
   inOut,
 }
@@ -108,6 +121,8 @@ class _PlayerPageState extends State<PlayerPage>
 
   late final PlayerEngine _engine;
   late final HostChannel _host;
+  late final MltExportPresetBridge _exportPresetBridge;
+  late final MltExportFrameRateBridge _exportFrameRateBridge;
 
   late final AnimationController _overlayController;
   late final Animation<double> _overlayCurve;
@@ -130,6 +145,8 @@ class _PlayerPageState extends State<PlayerPage>
   bool _showTransportTimecode = false;
 
   _ExportMode _exportMode = _ExportMode.video;
+  VideoExportPreset _videoExportPreset = VideoExportPreset.h264Delivery;
+  VideoExportFrameRate _videoExportFrameRate = VideoExportFrameRate.source;
 
   @override
   void initState() {
@@ -137,6 +154,11 @@ class _PlayerPageState extends State<PlayerPage>
 
     _engine = PlayerEngine(widget.bridge, initialized: widget.initialized)
       ..addListener(_onEngineChanged);
+
+    _exportPresetBridge = MltExportPresetBridge();
+    _exportPresetBridge.setVideoExportPreset(_videoExportPreset);
+    _exportFrameRateBridge = MltExportFrameRateBridge();
+    _exportFrameRateBridge.setVideoExportFrameRate(_videoExportFrameRate);
 
     _overlayController = AnimationController(
       vsync: this,
@@ -510,6 +532,8 @@ class _PlayerPageState extends State<PlayerPage>
 
     _showOverlay();
 
+    final preset = _videoExportPreset;
+    final frameRate = _videoExportFrameRate;
     final stem = _mediaStem(media.name);
     final suffix = _engine.exportRangeMode == ExportRangeMode.inOut
         ? 'selection'
@@ -517,11 +541,11 @@ class _PlayerPageState extends State<PlayerPage>
 
     final location = await getSaveLocation(
       confirmButtonText: 'Export',
-      suggestedName: '${stem}_$suffix.mp4',
-      acceptedTypeGroups: const <XTypeGroup>[
+      suggestedName: '${stem}_$suffix.${preset.extension}',
+      acceptedTypeGroups: <XTypeGroup>[
         XTypeGroup(
-          label: 'MP4 Video',
-          extensions: <String>['mp4'],
+          label: preset.typeLabel,
+          extensions: <String>[preset.extension],
         ),
       ],
     );
@@ -531,8 +555,33 @@ class _PlayerPageState extends State<PlayerPage>
     }
 
     var outputPath = location.path;
-    if (!outputPath.toLowerCase().endsWith('.mp4')) {
-      outputPath = '$outputPath.mp4';
+    final requiredExtension = '.${preset.extension.toLowerCase()}';
+    if (!outputPath.toLowerCase().endsWith(requiredExtension)) {
+      outputPath = '$outputPath$requiredExtension';
+    }
+
+    // Re-assert the selected purpose preset immediately before launch. Native
+    // snapshots it into the immutable ExportJob before starting the worker.
+    if (!_exportPresetBridge.setVideoExportPreset(preset)) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Could not select the requested video export preset.'),
+          ),
+        );
+      }
+      return;
+    }
+
+    if (!_exportFrameRateBridge.setVideoExportFrameRate(frameRate)) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Could not select the requested video frame rate.'),
+          ),
+        );
+      }
+      return;
     }
 
     _engine.startExport(outputPath);
@@ -722,6 +771,44 @@ class _PlayerPageState extends State<PlayerPage>
     _showOverlay();
   }
 
+  void _selectVideoExportPreset(VideoExportPreset preset) {
+    if (_videoExportPreset == preset) {
+      _showOverlay();
+      return;
+    }
+
+    if (!_exportPresetBridge.setVideoExportPreset(preset)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Video export preset cannot change during an export.'),
+        ),
+      );
+      return;
+    }
+
+    setState(() => _videoExportPreset = preset);
+    _showOverlay();
+  }
+
+  void _selectVideoExportFrameRate(VideoExportFrameRate frameRate) {
+    if (_videoExportFrameRate == frameRate) {
+      _showOverlay();
+      return;
+    }
+
+    if (!_exportFrameRateBridge.setVideoExportFrameRate(frameRate)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Video frame rate cannot change during an export.'),
+        ),
+      );
+      return;
+    }
+
+    setState(() => _videoExportFrameRate = frameRate);
+    _showOverlay();
+  }
+
   String _exportModeTooltip(MediaInfo media) {
     final rangeIssue = _engine.exportRangeIssue;
     if (rangeIssue != null) {
@@ -734,7 +821,7 @@ class _PlayerPageState extends State<PlayerPage>
 
     switch (_exportMode) {
       case _ExportMode.video:
-        return 'Export $rangeLabel as composited MP4 (Ctrl+E)';
+        return 'Export $rangeLabel with ${_videoExportPreset.label} • ${_videoExportFrameRate.label} (Ctrl+E)';
       case _ExportMode.imageSequence:
         if (!media.hasVideo) {
           return 'Image sequence unavailable for this media — hold or use ▾ to change export mode';
@@ -1232,6 +1319,18 @@ class _PlayerPageState extends State<PlayerPage>
                 _engine.setLayerScale(layerIndex, value),
             onAnchorChanged: (layerIndex, anchor) =>
                 _engine.setLayerAnchor(layerIndex, anchor),
+            onStartNudge: (layerIndex, deltaFrames) => unawaited(
+              _engine.nudgeLayerStart(layerIndex, deltaFrames),
+            ),
+            onEndNudge: (layerIndex, deltaFrames) => unawaited(
+              _engine.nudgeLayerEnd(layerIndex, deltaFrames),
+            ),
+            onSourceInNudge: (layerIndex, deltaFrames) => unawaited(
+              _engine.nudgeLayerSourceIn(layerIndex, deltaFrames),
+            ),
+            onSourceOutNudge: (layerIndex, deltaFrames) => unawaited(
+              _engine.nudgeLayerSourceOut(layerIndex, deltaFrames),
+            ),
             onReplaceSource: (layerIndex) => _replaceLayerSource(layerIndex),
             onToggleVisible: _engine.toggleLayerVisible,
             onAddLayer: _pickNextTrack,
@@ -1724,6 +1823,8 @@ class _PlayerPageState extends State<PlayerPage>
           const SizedBox(width: 2),
           _ExportSplitButton(
             mode: _exportMode,
+            videoPreset: _videoExportPreset,
+            videoFrameRate: _videoExportFrameRate,
             rangeMode: _engine.exportRangeMode,
             hasInOutRange: _engine.hasSelection,
             exporting: _engine.exporting,
@@ -1741,6 +1842,8 @@ class _PlayerPageState extends State<PlayerPage>
                     ? null
                     : _exportSelectedMode),
             onModeSelected: _selectExportMode,
+            onVideoPresetSelected: _selectVideoExportPreset,
+            onVideoFrameRateSelected: _selectVideoExportFrameRate,
             onRangeSelected: _selectExportRange,
           ),
           if (!_engine.exporting && _engine.exportRangeIssue != null) ...[
@@ -2034,6 +2137,8 @@ class _ModeButton extends StatelessWidget {
 class _ExportSplitButton extends StatefulWidget {
   const _ExportSplitButton({
     required this.mode,
+    required this.videoPreset,
+    required this.videoFrameRate,
     required this.rangeMode,
     required this.hasInOutRange,
     required this.exporting,
@@ -2042,10 +2147,14 @@ class _ExportSplitButton extends StatefulWidget {
     required this.audioEnabled,
     required this.onPressed,
     required this.onModeSelected,
+    required this.onVideoPresetSelected,
+    required this.onVideoFrameRateSelected,
     required this.onRangeSelected,
   });
 
   final _ExportMode mode;
+  final VideoExportPreset videoPreset;
+  final VideoExportFrameRate videoFrameRate;
   final ExportRangeMode rangeMode;
   final bool hasInOutRange;
   final bool exporting;
@@ -2054,6 +2163,8 @@ class _ExportSplitButton extends StatefulWidget {
   final bool audioEnabled;
   final VoidCallback? onPressed;
   final ValueChanged<_ExportMode> onModeSelected;
+  final ValueChanged<VideoExportPreset> onVideoPresetSelected;
+  final ValueChanged<VideoExportFrameRate> onVideoFrameRateSelected;
   final ValueChanged<ExportRangeMode> onRangeSelected;
 
   @override
@@ -2118,6 +2229,89 @@ class _ExportSplitButtonState extends State<_ExportSplitButton> {
           enabled: false,
           height: 28,
           child: Text(
+            'VIDEO PRESET',
+            style: TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 1.1,
+              color: Colors.white38,
+            ),
+          ),
+        ),
+        CheckedPopupMenuItem<_ExportMenuChoice>(
+          value: _ExportMenuChoice.h264Delivery,
+          checked: widget.videoPreset == VideoExportPreset.h264Delivery,
+          child: const Text('H.264 Delivery'),
+        ),
+        CheckedPopupMenuItem<_ExportMenuChoice>(
+          value: _ExportMenuChoice.proRes422HqMaster,
+          checked: widget.videoPreset == VideoExportPreset.proRes422HqMaster,
+          child: const Text('ProRes 422 HQ Master'),
+        ),
+        const PopupMenuDivider(),
+        const PopupMenuItem<_ExportMenuChoice>(
+          enabled: false,
+          height: 28,
+          child: Text(
+            'VIDEO FRAME RATE',
+            style: TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 1.1,
+              color: Colors.white38,
+            ),
+          ),
+        ),
+        CheckedPopupMenuItem<_ExportMenuChoice>(
+          value: _ExportMenuChoice.frameRateSource,
+          checked: widget.videoFrameRate == VideoExportFrameRate.source,
+          child: const Text('Source'),
+        ),
+        CheckedPopupMenuItem<_ExportMenuChoice>(
+          value: _ExportMenuChoice.frameRate23976,
+          checked: widget.videoFrameRate == VideoExportFrameRate.fps23976,
+          child: const Text('23.976 fps'),
+        ),
+        CheckedPopupMenuItem<_ExportMenuChoice>(
+          value: _ExportMenuChoice.frameRate24,
+          checked: widget.videoFrameRate == VideoExportFrameRate.fps24,
+          child: const Text('24 fps'),
+        ),
+        CheckedPopupMenuItem<_ExportMenuChoice>(
+          value: _ExportMenuChoice.frameRate25,
+          checked: widget.videoFrameRate == VideoExportFrameRate.fps25,
+          child: const Text('25 fps'),
+        ),
+        CheckedPopupMenuItem<_ExportMenuChoice>(
+          value: _ExportMenuChoice.frameRate2997,
+          checked: widget.videoFrameRate == VideoExportFrameRate.fps2997,
+          child: const Text('29.97 fps'),
+        ),
+        CheckedPopupMenuItem<_ExportMenuChoice>(
+          value: _ExportMenuChoice.frameRate30,
+          checked: widget.videoFrameRate == VideoExportFrameRate.fps30,
+          child: const Text('30 fps'),
+        ),
+        CheckedPopupMenuItem<_ExportMenuChoice>(
+          value: _ExportMenuChoice.frameRate50,
+          checked: widget.videoFrameRate == VideoExportFrameRate.fps50,
+          child: const Text('50 fps'),
+        ),
+        CheckedPopupMenuItem<_ExportMenuChoice>(
+          value: _ExportMenuChoice.frameRate5994,
+          checked: widget.videoFrameRate == VideoExportFrameRate.fps5994,
+          child: const Text('59.94 fps'),
+        ),
+        CheckedPopupMenuItem<_ExportMenuChoice>(
+          value: _ExportMenuChoice.frameRate60,
+          checked: widget.videoFrameRate == VideoExportFrameRate.fps60,
+          child: const Text('60 fps'),
+        ),
+        const PopupMenuDivider(),
+        const PopupMenuItem<_ExportMenuChoice>(
+          enabled: false,
+          height: 28,
+          child: Text(
             'RANGE',
             style: TextStyle(
               fontSize: 10,
@@ -2154,6 +2348,39 @@ class _ExportSplitButtonState extends State<_ExportSplitButton> {
         return;
       case _ExportMenuChoice.audio:
         widget.onModeSelected(_ExportMode.audio);
+        return;
+      case _ExportMenuChoice.h264Delivery:
+        widget.onVideoPresetSelected(VideoExportPreset.h264Delivery);
+        return;
+      case _ExportMenuChoice.proRes422HqMaster:
+        widget.onVideoPresetSelected(VideoExportPreset.proRes422HqMaster);
+        return;
+      case _ExportMenuChoice.frameRateSource:
+        widget.onVideoFrameRateSelected(VideoExportFrameRate.source);
+        return;
+      case _ExportMenuChoice.frameRate23976:
+        widget.onVideoFrameRateSelected(VideoExportFrameRate.fps23976);
+        return;
+      case _ExportMenuChoice.frameRate24:
+        widget.onVideoFrameRateSelected(VideoExportFrameRate.fps24);
+        return;
+      case _ExportMenuChoice.frameRate25:
+        widget.onVideoFrameRateSelected(VideoExportFrameRate.fps25);
+        return;
+      case _ExportMenuChoice.frameRate2997:
+        widget.onVideoFrameRateSelected(VideoExportFrameRate.fps2997);
+        return;
+      case _ExportMenuChoice.frameRate30:
+        widget.onVideoFrameRateSelected(VideoExportFrameRate.fps30);
+        return;
+      case _ExportMenuChoice.frameRate50:
+        widget.onVideoFrameRateSelected(VideoExportFrameRate.fps50);
+        return;
+      case _ExportMenuChoice.frameRate5994:
+        widget.onVideoFrameRateSelected(VideoExportFrameRate.fps5994);
+        return;
+      case _ExportMenuChoice.frameRate60:
+        widget.onVideoFrameRateSelected(VideoExportFrameRate.fps60);
         return;
       case _ExportMenuChoice.wholeMovie:
         widget.onRangeSelected(ExportRangeMode.wholeMovie);
