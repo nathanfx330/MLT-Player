@@ -6,34 +6,44 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../models/explorer_item.dart';
+import 'mlt_thumbnail_bridge.dart';
 
-typedef ThumbnailProcessRunner = Future<ProcessResult> Function(
-  String executable,
-  List<String> arguments,
-);
+typedef ThumbnailGenerator = Future<MltThumbnailGenerationResult> Function({
+  required String sourcePath,
+  required String outputPath,
+  required int width,
+  required int height,
+});
 
 class ThumbnailService {
   ThumbnailService({
     Directory? cacheDirectory,
-    int maxConcurrent = 2,
-    ThumbnailProcessRunner? processRunner,
+    int maxConcurrent = 1,
+    ThumbnailGenerator? generator,
   })  : assert(maxConcurrent > 0),
         _cacheDirectory = cacheDirectory ?? _defaultCacheDirectory(),
-        _processRunner = processRunner ?? _runProcess,
+        _generator = generator ?? generateMltThumbnail,
         _permits = _ThumbnailPermitPool(maxConcurrent);
 
   static const int thumbnailWidth = 480;
   static const int thumbnailHeight = 270;
-  static const String _cacheVersion = 'v1';
+
+  // Phase 11.2 originally used an external ffmpeg CLI at a fixed one-second
+  // seek. v2 is intentionally incompatible: thumbnails now come from MLT and
+  // video frames are selected by the representative-frame sampler.
+  static const String _cacheVersion = 'v2-mlt-representative';
 
   final Directory _cacheDirectory;
-  final ThumbnailProcessRunner _processRunner;
+  final ThumbnailGenerator _generator;
   final _ThumbnailPermitPool _permits;
   final Map<String, Future<String?>> _inFlight = <String, Future<String?>>{};
+  final Map<String, String> _failures = <String, String>{};
   bool _paused = false;
 
   Directory get cacheDirectory => _cacheDirectory;
   bool get paused => _paused;
+
+  String? failureFor(String sourcePath) => _failures[sourcePath];
 
   void resume() {
     _paused = false;
@@ -42,9 +52,10 @@ class ThumbnailService {
   Future<void> pauseAndDrain() async {
     _paused = true;
 
-    // Existing Process.run calls cannot be cancelled safely, so let the at-most
-    // two active workers finish. Requests already waiting for a permit observe
-    // _paused before launching ffmpeg and collapse to null immediately.
+    // Native MLT thumbnail calls are synchronous inside a worker isolate and
+    // cannot be interrupted safely mid-decode. Let the active job finish.
+    // Requests still waiting for a permit observe _paused before they
+    // launch and collapse to null immediately.
     while (_inFlight.isNotEmpty) {
       final pending = _inFlight.values.toList(growable: false);
       await Future.wait<void>(
@@ -52,7 +63,7 @@ class ThumbnailService {
           try {
             await future;
           } catch (_) {
-            // Thumbnail failure must never block the Explorer -> Player handoff.
+            // Thumbnail failure must never block Explorer -> Player handoff.
           }
         }),
       );
@@ -72,7 +83,8 @@ class ThumbnailService {
     FileStat stat;
     try {
       stat = await source.stat();
-    } on FileSystemException {
+    } on FileSystemException catch (error) {
+      _recordFailure(item.path, error.message);
       return null;
     }
 
@@ -80,14 +92,17 @@ class ThumbnailService {
       return null;
     }
 
+    final sourcePath = source.absolute.path;
     final cachePath = _cachePathFor(
-      source.absolute.path,
+      sourcePath,
       stat.size,
       stat.modified.microsecondsSinceEpoch,
     );
     final cached = File(cachePath);
 
     if (await _isUsableFile(cached)) {
+      _failures.remove(item.path);
+      _failures.remove(sourcePath);
       return cachePath;
     }
 
@@ -111,8 +126,7 @@ class ThumbnailService {
         return null;
       }
       return _generateThumbnail(
-        item: item,
-        sourcePath: source.absolute.path,
+        sourcePath: sourcePath,
         cachePath: cachePath,
       );
     });
@@ -128,13 +142,13 @@ class ThumbnailService {
   }
 
   Future<String?> _generateThumbnail({
-    required ExplorerItem item,
     required String sourcePath,
     required String cachePath,
   }) async {
     try {
       await _cacheDirectory.create(recursive: true);
-    } on FileSystemException {
+    } on FileSystemException catch (error) {
+      _recordFailure(sourcePath, error.message);
       return null;
     }
 
@@ -147,76 +161,46 @@ class ThumbnailService {
         return null;
       }
 
-      var generated = await _runFfmpeg(
+      final result = await _generator(
         sourcePath: sourcePath,
         outputPath: temporaryPath,
-        seekSeconds: item.kind == ExplorerItemKind.video ? 1.0 : null,
+        width: thumbnailWidth,
+        height: thumbnailHeight,
       );
 
-      if (!generated && item.kind == ExplorerItemKind.video && !_paused) {
+      if (!result.succeeded || !await _isUsableFile(temporary)) {
         await _deleteIfPresent(temporary);
-        generated = await _runFfmpeg(
-          sourcePath: sourcePath,
-          outputPath: temporaryPath,
-          seekSeconds: null,
+        _recordFailure(
+          sourcePath,
+          result.error.isEmpty
+              ? 'MLT could not generate a thumbnail.'
+              : result.error,
         );
-      }
-
-      if (!generated || !await _isUsableFile(temporary)) {
-        await _deleteIfPresent(temporary);
         return null;
       }
 
       final cached = File(cachePath);
       await _deleteIfPresent(cached);
       await temporary.rename(cachePath);
+      _failures.remove(sourcePath);
       return cachePath;
-    } on FileSystemException {
+    } on FileSystemException catch (error) {
       await _deleteIfPresent(temporary);
+      _recordFailure(sourcePath, error.message);
       return null;
-    } on ProcessException {
+    } catch (error) {
       await _deleteIfPresent(temporary);
+      _recordFailure(sourcePath, error.toString());
       return null;
     }
   }
 
-  Future<bool> _runFfmpeg({
-    required String sourcePath,
-    required String outputPath,
-    required double? seekSeconds,
-  }) async {
-    final arguments = <String>[
-      '-hide_banner',
-      '-loglevel',
-      'error',
-      '-nostdin',
-      '-y',
-    ];
-
-    if (seekSeconds != null) {
-      arguments.addAll(<String>['-ss', seekSeconds.toStringAsFixed(3)]);
-    }
-
-    arguments.addAll(<String>[
-      '-i',
-      sourcePath,
-      '-frames:v',
-      '1',
-      '-an',
-      '-sn',
-      '-dn',
-      '-vf',
-      'scale=$thumbnailWidth:$thumbnailHeight:'
-          'force_original_aspect_ratio=decrease,'
-          'pad=$thumbnailWidth:$thumbnailHeight:'
-          '(ow-iw)/2:(oh-ih)/2:color=black',
-      '-q:v',
-      '3',
-      outputPath,
-    ]);
-
-    final result = await _processRunner('ffmpeg', arguments);
-    return result.exitCode == 0;
+  void _recordFailure(String sourcePath, String message) {
+    final normalized = message.trim().isEmpty
+        ? 'MLT thumbnail generation failed.'
+        : message.trim();
+    _failures[sourcePath] = normalized;
+    stderr.writeln('thumbnail: $normalized ($sourcePath)');
   }
 
   String _cachePathFor(
@@ -256,13 +240,6 @@ class ThumbnailService {
       // Cache cleanup is best-effort. A stale temporary file must never make
       // Explorer fail to browse or open the underlying source media.
     }
-  }
-
-  static Future<ProcessResult> _runProcess(
-    String executable,
-    List<String> arguments,
-  ) {
-    return Process.run(executable, arguments);
   }
 
   static Directory _defaultCacheDirectory() {

@@ -5,10 +5,19 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mlt_player/models/explorer_item.dart';
+import 'package:mlt_player/services/mlt_thumbnail_bridge.dart';
 import 'package:mlt_player/services/thumbnail_service.dart';
 
 ExplorerItem _video(File file) {
   return ExplorerItem.media(file, ExplorerItemKind.video);
+}
+
+MltThumbnailGenerationResult _success({int selectedFrame = 0}) {
+  return MltThumbnailGenerationResult(
+    succeeded: true,
+    selectedFrame: selectedFrame,
+    error: '',
+  );
 }
 
 void main() {
@@ -34,21 +43,36 @@ void main() {
       var runs = 0;
       final service = ThumbnailService(
         cacheDirectory: cache,
-        processRunner: (executable, arguments) async {
+        generator: ({
+          required sourcePath,
+          required outputPath,
+          required width,
+          required height,
+        }) async {
           runs++;
-          expect(executable, 'ffmpeg');
-          final output = File(arguments.last);
-          await output.writeAsBytes(<int>[9, 8, 7]);
-          return ProcessResult(1, 0, '', '');
+          expect(sourcePath, source.absolute.path);
+          expect(width, ThumbnailService.thumbnailWidth);
+          expect(height, ThumbnailService.thumbnailHeight);
+          await File(outputPath).writeAsBytes(<int>[9, 8, 7]);
+          return _success(selectedFrame: 42);
         },
       );
 
       final first = await service.thumbnailFor(_video(source));
       final secondService = ThumbnailService(
         cacheDirectory: cache,
-        processRunner: (executable, arguments) async {
+        generator: ({
+          required sourcePath,
+          required outputPath,
+          required width,
+          required height,
+        }) async {
           runs++;
-          return ProcessResult(1, 1, '', 'cache miss');
+          return const MltThumbnailGenerationResult(
+            succeeded: false,
+            selectedFrame: -1,
+            error: 'cache miss',
+          );
         },
       );
       final second = await secondService.thumbnailFor(_video(source));
@@ -66,10 +90,15 @@ void main() {
       var runs = 0;
       final service = ThumbnailService(
         cacheDirectory: cache,
-        processRunner: (executable, arguments) async {
+        generator: ({
+          required sourcePath,
+          required outputPath,
+          required width,
+          required height,
+        }) async {
           runs++;
-          await File(arguments.last).writeAsBytes(<int>[runs]);
-          return ProcessResult(1, 0, '', '');
+          await File(outputPath).writeAsBytes(<int>[runs]);
+          return _success(selectedFrame: runs);
         },
       );
 
@@ -82,7 +111,6 @@ void main() {
       expect(second, isNot(equals(first)));
       expect(runs, 2);
     });
-
 
     test('pause drains active work and cancels queued generation', () async {
       final firstSource =
@@ -99,14 +127,19 @@ void main() {
       final service = ThumbnailService(
         cacheDirectory: cache,
         maxConcurrent: 1,
-        processRunner: (executable, arguments) async {
+        generator: ({
+          required sourcePath,
+          required outputPath,
+          required width,
+          required height,
+        }) async {
           runs++;
           if (runs == 1) {
             firstStarted.complete();
             await releaseFirst.future;
           }
-          await File(arguments.last).writeAsBytes(<int>[runs]);
-          return ProcessResult(1, 0, '', '');
+          await File(outputPath).writeAsBytes(<int>[runs]);
+          return _success(selectedFrame: runs);
         },
       );
 
@@ -143,9 +176,14 @@ void main() {
       var runs = 0;
       final service = ThumbnailService(
         cacheDirectory: cache,
-        processRunner: (executable, arguments) async {
+        generator: ({
+          required sourcePath,
+          required outputPath,
+          required width,
+          required height,
+        }) async {
           runs++;
-          return ProcessResult(1, 0, '', '');
+          return _success();
         },
       );
 
@@ -154,6 +192,35 @@ void main() {
 
       expect(result, isNull);
       expect(runs, 0);
+    });
+
+    test('native generation failure is retained as a diagnostic', () async {
+      final source = File('${root.path}${Platform.pathSeparator}broken.mp4');
+      await source.writeAsBytes(<int>[1, 2, 3]);
+
+      final service = ThumbnailService(
+        cacheDirectory: cache,
+        generator: ({
+          required sourcePath,
+          required outputPath,
+          required width,
+          required height,
+        }) async {
+          return const MltThumbnailGenerationResult(
+            succeeded: false,
+            selectedFrame: -1,
+            error: 'MLT could not decode a representative thumbnail frame.',
+          );
+        },
+      );
+
+      final result = await service.thumbnailFor(_video(source));
+
+      expect(result, isNull);
+      expect(
+        service.failureFor(source.absolute.path),
+        'MLT could not decode a representative thumbnail frame.',
+      );
     });
   });
 }

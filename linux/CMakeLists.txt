@@ -128,13 +128,14 @@ add_library(
   "../native/mlt_bridge.c"
   "../native/mlt_composition.c"
   "../native/mlt_export.c"
+  "../native/mlt_thumbnail.c"
 )
 
 target_include_directories(
   mlt_bridge
   PRIVATE
 
-  # Our own bridge header.
+  # Our own bridge headers.
   "${CMAKE_CURRENT_SOURCE_DIR}/../native"
 
   # Gives us:
@@ -175,6 +176,7 @@ target_link_libraries(
   PkgConfig::MLT
   PkgConfig::GTK
   PkgConfig::EPOXY
+  m
 
   # Also propagates Flutter Linux build requirements.
   flutter
