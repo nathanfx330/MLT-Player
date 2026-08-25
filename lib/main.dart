@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'models/media_info.dart';
+import 'services/bookmark_service.dart';
 import 'services/host_channel.dart';
 import 'services/mlt_bridge.dart';
 import 'services/mlt_export_frame_rate_bridge.dart';
@@ -16,6 +17,7 @@ import 'services/mlt_export_preset_bridge.dart';
 import 'services/player_engine.dart';
 import 'services/storyboard_thumbnail_service.dart';
 import 'services/srt_subtitle_service.dart';
+import 'ui/widgets/bookmark_view.dart';
 import 'ui/widgets/media_inspector.dart';
 import 'ui/explorer_page.dart';
 import 'ui/widgets/layers_inspector.dart';
@@ -195,6 +197,7 @@ class _PlayerPageState extends State<PlayerPage>
   late final MltExportPresetBridge _exportPresetBridge;
   late final MltExportFrameRateBridge _exportFrameRateBridge;
   late final StoryboardThumbnailService _storyboardThumbnailService;
+  late final BookmarkService _bookmarkService;
 
   SubtitleTrack? _subtitleTrack;
   int _subtitleLoadSerial = 0;
@@ -236,6 +239,8 @@ class _PlayerPageState extends State<PlayerPage>
     _exportFrameRateBridge = MltExportFrameRateBridge();
     _exportFrameRateBridge.setVideoExportFrameRate(_videoExportFrameRate);
     _storyboardThumbnailService = StoryboardThumbnailService();
+    _bookmarkService = BookmarkService();
+    unawaited(_loadBookmarks());
 
     _overlayController = AnimationController(
       vsync: this,
@@ -362,7 +367,7 @@ class _PlayerPageState extends State<PlayerPage>
       _tracksOpen ||
       _engine.exporting ||
       _engine.error != null ||
-      _viewMode == PlayerViewMode.storyboard;
+      _viewMode != PlayerViewMode.video;
 
   void _showOverlay() {
     if (!_overlayVisible) {
@@ -588,7 +593,7 @@ class _PlayerPageState extends State<PlayerPage>
       return;
     }
 
-    if (mode == PlayerViewMode.storyboard) {
+    if (mode != PlayerViewMode.video) {
       if (media == null ||
           media.isStill ||
           !media.hasVideo ||
@@ -600,7 +605,11 @@ class _PlayerPageState extends State<PlayerPage>
         _engine.pausePlayback();
       }
 
-      setState(() => _viewMode = PlayerViewMode.storyboard);
+      // Storyboard and Bookmarks share the exact-frame thumbnail lane.
+      // Invalidate work owned by the view being left before the new view
+      // starts issuing requests.
+      _storyboardThumbnailService.cancelPending();
+      setState(() => _viewMode = mode);
       _showOverlay();
       return;
     }
@@ -628,12 +637,106 @@ class _PlayerPageState extends State<PlayerPage>
   }
 
   void _playFromCurrentView() {
-    if (_viewMode == PlayerViewMode.storyboard) {
+    if (_viewMode != PlayerViewMode.video) {
       _storyboardThumbnailService.cancelPending();
       setState(() => _viewMode = PlayerViewMode.video);
     }
     _engine.togglePlayback();
     _showOverlay();
+  }
+
+  Future<void> _loadBookmarks() async {
+    await _bookmarkService.load();
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  Future<void> _saveBookmarks() async {
+    try {
+      await _bookmarkService.save();
+    } on FileSystemException {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not save bookmarks.')),
+      );
+    }
+  }
+
+  void _toggleBookmarkFrame(int sourceFrame) {
+    final media = _engine.media;
+    if (media == null || media.isStill || !media.hasVideo || sourceFrame < 0) {
+      return;
+    }
+
+    _bookmarkService.toggle(media.path, sourceFrame);
+    setState(() {});
+    unawaited(_saveBookmarks());
+    _showOverlay();
+  }
+
+  void _removeBookmarkFrame(int sourceFrame) {
+    final media = _engine.media;
+    if (media == null) {
+      return;
+    }
+
+    if (_bookmarkService.remove(media.path, sourceFrame)) {
+      setState(() {});
+      unawaited(_saveBookmarks());
+    }
+    _showOverlay();
+  }
+
+  void _addCurrentBookmark() {
+    final media = _engine.media;
+    if (media == null ||
+        media.isStill ||
+        !media.hasVideo ||
+        _engine.opening ||
+        _engine.exporting) {
+      return;
+    }
+
+    // A soft screenshot should point at the exact visible source frame. The
+    // existing capture helper parks transport on that frame without writing
+    // an image file.
+    final sourceFrame = _engine.captureCurrentSourceFrame();
+    if (sourceFrame == null) {
+      return;
+    }
+
+    if (_bookmarkService.add(media.path, sourceFrame)) {
+      setState(() {});
+      unawaited(_saveBookmarks());
+    }
+    _showOverlay();
+  }
+
+  void _openBookmarkFrame(int sourceFrame) {
+    final media = _engine.media;
+    if (media == null || media.fps <= 0 || _engine.clipFrameCount <= 0) {
+      return;
+    }
+
+    // PlayerEngine.seekTo converts the clip-time position back to an exact
+    // frame-native seek. Rounding to the nearest millisecond stays safely
+    // inside the target frame at ordinary video frame rates.
+    final clipFrame = _engine.clipFrameForSourceFrame(sourceFrame);
+    final clipPositionMs = ((clipFrame * 1000.0) / media.fps).round();
+    _engine.seekTo(clipPositionMs);
+
+    _storyboardThumbnailService.cancelPending();
+    setState(() => _viewMode = PlayerViewMode.video);
+    _keyboardFocus.requestFocus();
+    _showOverlay();
+  }
+
+  String _formatBookmarkFrame(MediaInfo media, int sourceFrame) {
+    final clipFrame = _engine.clipFrameForSourceFrame(sourceFrame);
+    return _formatClipTimecode(media, clipFrame);
   }
 
   Future<void> _openPath(String path) async {
@@ -651,7 +754,8 @@ class _PlayerPageState extends State<PlayerPage>
     final subtitleSerial = ++_subtitleLoadSerial;
 
     // A new file starts in normal video view, whatever the previous one was
-    // doing. Any queued Storyboard requests from that file become obsolete.
+    // doing. Any queued Storyboard/Bookmark thumbnail requests from that file
+    // become obsolete.
     _storyboardThumbnailService.cancelPending();
     if (_viewMode != PlayerViewMode.video && mounted) {
       setState(() => _viewMode = PlayerViewMode.video);
@@ -852,6 +956,51 @@ class _PlayerPageState extends State<PlayerPage>
     final location = await getSaveLocation(
       confirmButtonText: 'Export Frame',
       suggestedName: '${stem}_frame_$frameLabel.png',
+      acceptedTypeGroups: const <XTypeGroup>[
+        XTypeGroup(
+          label: 'PNG Image',
+          extensions: <String>['png'],
+        ),
+      ],
+    );
+
+    if (location == null) {
+      return;
+    }
+
+    var outputPath = location.path;
+    if (!outputPath.toLowerCase().endsWith('.png')) {
+      outputPath = '$outputPath.png';
+    }
+
+    _engine.startFrameExport(
+      outputPath,
+      sourceFrame: sourceFrame,
+    );
+  }
+
+  Future<void> _exportBookmarkFrame(int sourceFrame) async {
+    final media = _engine.media;
+    if (media == null ||
+        media.isStill ||
+        !media.hasVideo ||
+        !_engine.exportsAvailable ||
+        _engine.exporting ||
+        sourceFrame < 0 ||
+        sourceFrame >= media.frames) {
+      return;
+    }
+
+    _showOverlay();
+
+    final stem = _mediaStem(media.name);
+    final clipFrameNumber =
+        _engine.clipFrameForSourceFrame(sourceFrame) + 1;
+    final frameLabel = clipFrameNumber.toString().padLeft(6, '0');
+
+    final location = await getSaveLocation(
+      confirmButtonText: 'Export Bookmark',
+      suggestedName: '${stem}_bookmark_$frameLabel.png',
       acceptedTypeGroups: const <XTypeGroup>[
         XTypeGroup(
           label: 'PNG Image',
@@ -1422,7 +1571,7 @@ class _PlayerPageState extends State<PlayerPage>
             behavior: HitTestBehavior.opaque,
             onTap: () {
               _keyboardFocus.requestFocus();
-              if (_viewMode == PlayerViewMode.storyboard) {
+              if (_viewMode != PlayerViewMode.video) {
                 _showOverlay();
               } else if (_overlayVisible) {
                 _engine.togglePlayback();
@@ -1494,6 +1643,27 @@ class _PlayerPageState extends State<PlayerPage>
         sourceFrameForPositionMs: _engine.sourceFrameForClipPositionMs,
         onSeek: _seekStoryboardMoment,
         onOpenVideo: _openStoryboardMoment,
+        bookmarkedFrames:
+            _bookmarkService.framesFor(media.path).toSet(),
+        onToggleBookmark: _toggleBookmarkFrame,
+      );
+    }
+
+    if (_viewMode == PlayerViewMode.bookmarks && !media.isStill) {
+      return BookmarkView(
+        sourcePath: media.path,
+        sourceFrames: _bookmarkService.framesFor(media.path),
+        currentSourceFrame:
+            _engine.sourceFrameForClipPositionMs(_engine.positionMs),
+        thumbnailService: _storyboardThumbnailService,
+        formatFrame: (sourceFrame) =>
+            _formatBookmarkFrame(media, sourceFrame),
+        onAddCurrent: _addCurrentBookmark,
+        onOpenFrame: _openBookmarkFrame,
+        onRemoveFrame: _removeBookmarkFrame,
+        onExportFrame: (sourceFrame) =>
+            unawaited(_exportBookmarkFrame(sourceFrame)),
+        exportEnabled: !_engine.exporting && _engine.exportsAvailable,
       );
     }
 
@@ -2167,6 +2337,14 @@ class _PlayerPageState extends State<PlayerPage>
               ),
             ),
           ],
+          const SizedBox(width: 2),
+          _OverlayButton(
+            icon: Icons.bookmark_add_outlined,
+            tooltip: 'Keep current frame as a soft bookmark',
+            onPressed: !_engine.exporting && media.hasVideo
+                ? _addCurrentBookmark
+                : null,
+          ),
           const SizedBox(width: 2),
           _OverlayButton(
             icon: Icons.photo_camera_outlined,

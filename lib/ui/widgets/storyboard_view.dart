@@ -7,7 +7,7 @@ import 'package:flutter/material.dart';
 import '../../models/media_info.dart';
 import '../../services/storyboard_thumbnail_service.dart';
 
-enum PlayerViewMode { video, storyboard }
+enum PlayerViewMode { video, storyboard, bookmarks }
 
 class PlayerViewModeSwitch extends StatelessWidget {
   const PlayerViewModeSwitch({
@@ -59,6 +59,8 @@ class PlayerViewModeSwitch extends StatelessWidget {
           button(PlayerViewMode.video, 'VIDEO'),
           const SizedBox(width: 4),
           button(PlayerViewMode.storyboard, 'STORYBOARD'),
+          const SizedBox(width: 4),
+          button(PlayerViewMode.bookmarks, 'BOOKMARKS'),
         ],
       ),
     );
@@ -75,6 +77,8 @@ class StoryboardView extends StatefulWidget {
     required this.sourceFrameForPositionMs,
     required this.onSeek,
     required this.onOpenVideo,
+    required this.bookmarkedFrames,
+    required this.onToggleBookmark,
   });
 
   final MediaInfo media;
@@ -84,6 +88,8 @@ class StoryboardView extends StatefulWidget {
   final int Function(int clipPositionMs) sourceFrameForPositionMs;
   final ValueChanged<int> onSeek;
   final ValueChanged<int> onOpenVideo;
+  final Set<int> bookmarkedFrames;
+  final ValueChanged<int> onToggleBookmark;
 
   @override
   State<StoryboardView> createState() => _StoryboardViewState();
@@ -183,9 +189,12 @@ class _StoryboardViewState extends State<StoryboardView> {
                           sourceFrame: sourceFrame,
                           clipMs: clipMs,
                           selected: selected,
+                          bookmarked: widget.bookmarkedFrames.contains(sourceFrame),
                           service: widget.thumbnailService,
                           onTap: () => widget.onSeek(clipMs),
                           onDoubleTap: () => widget.onOpenVideo(clipMs),
+                          onToggleBookmark: () =>
+                              widget.onToggleBookmark(sourceFrame),
                         );
                       },
                     ),
@@ -272,18 +281,22 @@ class _StoryboardTile extends StatefulWidget {
     required this.sourceFrame,
     required this.clipMs,
     required this.selected,
+    required this.bookmarked,
     required this.service,
     required this.onTap,
     required this.onDoubleTap,
+    required this.onToggleBookmark,
   });
 
   final String sourcePath;
   final int sourceFrame;
   final int clipMs;
   final bool selected;
+  final bool bookmarked;
   final StoryboardThumbnailService service;
   final VoidCallback onTap;
   final VoidCallback onDoubleTap;
+  final VoidCallback onToggleBookmark;
 
   @override
   State<_StoryboardTile> createState() => _StoryboardTileState();
@@ -340,27 +353,63 @@ class _StoryboardTileState extends State<_StoryboardTile> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Expanded(
-                child: FutureBuilder<String?>(
-                  future: _thumbnail,
-                  builder: (context, snapshot) {
-                    final path = snapshot.data;
-                    if (path != null && path.isNotEmpty) {
-                      return Image.file(
-                        File(path),
-                        fit: BoxFit.cover,
-                        filterQuality: FilterQuality.medium,
-                        gaplessPlayback: true,
-                        errorBuilder: (context, error, stackTrace) =>
-                            const _StoryboardPlaceholder(failed: true),
-                      );
-                    }
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    FutureBuilder<String?>(
+                      future: _thumbnail,
+                      builder: (context, snapshot) {
+                        final path = snapshot.data;
+                        if (path != null && path.isNotEmpty) {
+                          return Image.file(
+                            File(path),
+                            fit: BoxFit.cover,
+                            filterQuality: FilterQuality.medium,
+                            gaplessPlayback: true,
+                            errorBuilder: (context, error, stackTrace) =>
+                                const _StoryboardPlaceholder(failed: true),
+                          );
+                        }
 
-                    if (snapshot.connectionState == ConnectionState.done) {
-                      return const _StoryboardPlaceholder(failed: true);
-                    }
+                        if (snapshot.connectionState == ConnectionState.done) {
+                          return const _StoryboardPlaceholder(failed: true);
+                        }
 
-                    return const _StoryboardPlaceholder(failed: false);
-                  },
+                        return const _StoryboardPlaceholder(failed: false);
+                      },
+                    ),
+                    Positioned(
+                      top: 5,
+                      right: 5,
+                      child: ExcludeFocus(
+                        child: Material(
+                          color: const Color(0xB3000000),
+                          borderRadius: BorderRadius.circular(5),
+                          child: IconButton(
+                            tooltip: widget.bookmarked
+                                ? 'Remove bookmark'
+                                : 'Keep as bookmark',
+                            onPressed: widget.onToggleBookmark,
+                            visualDensity: VisualDensity.compact,
+                            padding: const EdgeInsets.all(5),
+                            constraints: const BoxConstraints(
+                              minWidth: 28,
+                              minHeight: 28,
+                            ),
+                            iconSize: 16,
+                            color: widget.bookmarked
+                                ? const Color(0xFFE8A33D)
+                                : Colors.white70,
+                            icon: Icon(
+                              widget.bookmarked
+                                  ? Icons.bookmark
+                                  : Icons.bookmark_border,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
               Padding(
