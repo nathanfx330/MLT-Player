@@ -96,6 +96,7 @@ class _SubtitleSearchSidebarState extends State<SubtitleSearchSidebar> {
   @override
   Widget build(BuildContext context) {
     final cues = _visibleCues;
+    final accentColor = Theme.of(context).colorScheme.primary;
 
     return Material(
       color: const Color(0xF21A1A1A),
@@ -213,7 +214,7 @@ class _SubtitleSearchSidebarState extends State<SubtitleSearchSidebar> {
 
                         return Material(
                           color: active
-                              ? const Color(0x26E8A33D)
+                              ? accentColor.withAlpha(0x26)
                               : Colors.transparent,
                           child: InkWell(
                             onTap: () => widget.onSeek(cue.startMs),
@@ -232,7 +233,7 @@ class _SubtitleSearchSidebarState extends State<SubtitleSearchSidebar> {
                                             ? FontWeight.w700
                                             : FontWeight.w500,
                                         color: active
-                                            ? const Color(0xFFE8A33D)
+                                            ? accentColor
                                             : Colors.white38,
                                       ),
                                     ),

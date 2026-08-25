@@ -267,6 +267,8 @@ class _SubtitleQuickControls extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final accentColor = Theme.of(context).colorScheme.primary;
+
     return Material(
       color: const Color(0xD91A1A1A),
       elevation: 8,
@@ -286,7 +288,7 @@ class _SubtitleQuickControls extends StatelessWidget {
                 padding: const EdgeInsets.symmetric(horizontal: 10),
                 alignment: Alignment.center,
                 color: subtitlesVisible
-                    ? const Color(0xFFE8A33D)
+                    ? accentColor
                     : Colors.transparent,
                 child: Text(
                   'CC',
@@ -309,13 +311,13 @@ class _SubtitleQuickControls extends StatelessWidget {
             message: 'Search transcript (Ctrl+F)',
             child: InkWell(
               onTap: onTogglePanel,
-              child: const SizedBox(
+              child: SizedBox(
                 width: 38,
                 height: 34,
                 child: Icon(
                   Icons.manage_search,
                   size: 20,
-                  color: Colors.white70,
+                  color: accentColor,
                 ),
               ),
             ),

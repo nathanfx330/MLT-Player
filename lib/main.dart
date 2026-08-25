@@ -15,8 +15,10 @@ import 'services/mlt_bridge.dart';
 import 'services/mlt_export_frame_rate_bridge.dart';
 import 'services/mlt_export_preset_bridge.dart';
 import 'services/player_engine.dart';
+import 'services/player_settings_service.dart';
 import 'services/storyboard_thumbnail_service.dart';
 import 'services/srt_subtitle_service.dart';
+import 'ui/widgets/player_settings_button.dart';
 import 'ui/widgets/bookmark_view.dart';
 import 'ui/widgets/media_inspector.dart';
 import 'ui/explorer_page.dart';
@@ -44,7 +46,7 @@ void main() {
   );
 }
 
-class MltPlayerApp extends StatelessWidget {
+class MltPlayerApp extends StatefulWidget {
   const MltPlayerApp({
     super.key,
     required this.bridge,
@@ -59,6 +61,35 @@ class MltPlayerApp extends StatelessWidget {
   final String? startupError;
 
   @override
+  State<MltPlayerApp> createState() => _MltPlayerAppState();
+}
+
+class _MltPlayerAppState extends State<MltPlayerApp> {
+  late final PlayerSettingsService _playerSettings;
+
+  @override
+  void initState() {
+    super.initState();
+    _playerSettings = PlayerSettingsService()
+      ..addListener(_onPlayerSettingsChanged);
+    unawaited(_playerSettings.load());
+  }
+
+  @override
+  void dispose() {
+    _playerSettings
+      ..removeListener(_onPlayerSettingsChanged)
+      ..dispose();
+    super.dispose();
+  }
+
+  void _onPlayerSettingsChanged() {
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'MLT Player',
@@ -66,14 +97,15 @@ class MltPlayerApp extends StatelessWidget {
       theme: ThemeData(
         brightness: Brightness.dark,
         useMaterial3: true,
-        colorSchemeSeed: const Color(0xFFE8A33D),
+        colorSchemeSeed: _playerSettings.accentColor,
         scaffoldBackgroundColor: Colors.black,
       ),
       home: _MltExplorerShell(
-        bridge: bridge,
-        initialized: initialized,
-        version: version,
-        startupError: startupError,
+        bridge: widget.bridge,
+        initialized: widget.initialized,
+        version: widget.version,
+        startupError: widget.startupError,
+        playerSettings: _playerSettings,
       ),
     );
   }
@@ -84,12 +116,14 @@ class _MltExplorerShell extends StatefulWidget {
     required this.bridge,
     required this.initialized,
     required this.version,
+    required this.playerSettings,
     this.startupError,
   });
 
   final MltBridge bridge;
   final bool initialized;
   final String version;
+  final PlayerSettingsService playerSettings;
   final String? startupError;
 
   @override
@@ -130,6 +164,7 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
           initialized: widget.initialized,
           version: widget.version,
           startupError: widget.startupError,
+          playerSettings: widget.playerSettings,
           initialPath: _playerPath,
           openRequestSerial: _playerOpenRequest,
           onBack: _returnToExplorer,
@@ -170,6 +205,7 @@ class PlayerPage extends StatefulWidget {
     required this.bridge,
     required this.initialized,
     required this.version,
+    required this.playerSettings,
     this.startupError,
     this.initialPath,
     this.openRequestSerial = 0,
@@ -179,6 +215,7 @@ class PlayerPage extends StatefulWidget {
   final MltBridge bridge;
   final bool initialized;
   final String version;
+  final PlayerSettingsService playerSettings;
   final String? startupError;
   final String? initialPath;
   final int openRequestSerial;
@@ -1750,6 +1787,14 @@ class _PlayerPageState extends State<PlayerPage>
                 'MLT ${widget.version}',
                 style: const TextStyle(fontSize: 11, color: Colors.white54),
               ),
+              const SizedBox(width: 4),
+              ExcludeFocus(
+                child: MltPlayerSettingsButton(
+                  settings: widget.playerSettings,
+                  mltVersion: widget.version,
+                  onClosed: _keyboardFocus.requestFocus,
+                ),
+              ),
             ],
           ),
         ),
@@ -1943,8 +1988,11 @@ class _PlayerPageState extends State<PlayerPage>
         padding: const EdgeInsets.only(bottom: 8),
         child: Row(
           children: [
-            const Icon(Icons.movie_creation_outlined,
-                size: 16, color: Color(0xFFE8A33D)),
+            Icon(
+              Icons.movie_creation_outlined,
+              size: 16,
+              color: Theme.of(context).colorScheme.primary,
+            ),
             const SizedBox(width: 8),
             Expanded(
               child: Column(
@@ -2150,6 +2198,7 @@ class _PlayerPageState extends State<PlayerPage>
                         painter: _SelectionTrackPainter(
                           inFraction: inFraction,
                           outFraction: outFraction,
+                          accentColor: Theme.of(context).colorScheme.primary,
                         ),
                       ),
                     ),
@@ -2211,20 +2260,20 @@ class _PlayerPageState extends State<PlayerPage>
                   Text(
                     'SEL ${_formatFrameDuration(media, selectionFrames)}'
                     '  ·  $selectionFrames ${selectionFrames == 1 ? 'frame' : 'frames'}',
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontSize: 10,
-                      color: Color(0xFFE8A33D),
-                      fontFeatures: [ui.FontFeature.tabularFigures()],
+                      color: Theme.of(context).colorScheme.primary,
+                      fontFeatures: const [ui.FontFeature.tabularFigures()],
                     ),
                   ),
                 if (_engine.isTrimmed)
                   Text(
                     'TRIMMED ${_formatFrameDuration(media, _engine.clipFrameCount)}'
                     '  ·  ${_engine.clipFrameCount} ${_engine.clipFrameCount == 1 ? 'frame' : 'frames'}',
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontSize: 10,
-                      color: Color(0xFFE8A33D),
-                      fontFeatures: [ui.FontFeature.tabularFigures()],
+                      color: Theme.of(context).colorScheme.primary,
+                      fontFeatures: const [ui.FontFeature.tabularFigures()],
                     ),
                   ),
               ],
@@ -2330,10 +2379,10 @@ class _PlayerPageState extends State<PlayerPage>
             const SizedBox(width: 3),
             Tooltip(
               message: _engine.exportRangeIssue!,
-              child: const Icon(
+              child: Icon(
                 Icons.warning_amber_rounded,
                 size: 16,
-                color: Color(0xFFE8A33D),
+                color: Theme.of(context).colorScheme.primary,
               ),
             ),
           ],
@@ -2471,10 +2520,12 @@ class _SelectionTrackPainter extends CustomPainter {
   const _SelectionTrackPainter({
     required this.inFraction,
     required this.outFraction,
+    required this.accentColor,
   });
 
   final double? inFraction;
   final double? outFraction;
+  final Color accentColor;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -2512,7 +2563,7 @@ class _SelectionTrackPainter extends CustomPainter {
     }
 
     final markerPaint = Paint()
-      ..color = const Color(0xFFE8A33D)
+      ..color = accentColor
       ..strokeWidth = 2
       ..strokeCap = StrokeCap.round;
 
@@ -2537,7 +2588,8 @@ class _SelectionTrackPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _SelectionTrackPainter oldDelegate) {
     return oldDelegate.inFraction != inFraction ||
-        oldDelegate.outFraction != outFraction;
+        oldDelegate.outFraction != outFraction ||
+        oldDelegate.accentColor != accentColor;
   }
 }
 
@@ -2601,7 +2653,8 @@ class _ModeButton extends StatelessWidget {
         onPressed: onPressed,
         style: TextButton.styleFrom(
           foregroundColor: active ? Colors.black : Colors.white70,
-          backgroundColor: active ? const Color(0xFFE8A33D) : Colors.white10,
+          backgroundColor:
+              active ? Theme.of(context).colorScheme.primary : Colors.white10,
           minimumSize: const ui.Size(0, 30),
           padding: const EdgeInsets.symmetric(horizontal: 9),
           visualDensity: VisualDensity.compact,
@@ -2897,7 +2950,7 @@ class _ExportSplitButtonState extends State<_ExportSplitButton> {
         ? Colors.black
         : (mainEnabled ? Colors.white70 : Colors.white24);
     final background =
-        active ? const Color(0xFFE8A33D) : Colors.white10;
+        active ? Theme.of(context).colorScheme.primary : Colors.white10;
 
     return Tooltip(
       message: widget.tooltip,

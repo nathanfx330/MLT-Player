@@ -152,7 +152,7 @@ class _BookmarkToolbar extends StatelessWidget {
           icon: const Icon(Icons.bookmark_add_outlined, size: 17),
           label: const Text('ADD CURRENT'),
           style: TextButton.styleFrom(
-            foregroundColor: const Color(0xFFE8A33D),
+            foregroundColor: Theme.of(context).colorScheme.primary,
             visualDensity: VisualDensity.compact,
             textStyle: const TextStyle(
               fontSize: 10,
@@ -261,9 +261,8 @@ class _BookmarkTileState extends State<_BookmarkTile> {
 
   @override
   Widget build(BuildContext context) {
-    final borderColor = widget.selected
-        ? const Color(0xFFE8A33D)
-        : Colors.white12;
+    final accentColor = Theme.of(context).colorScheme.primary;
+    final borderColor = widget.selected ? accentColor : Colors.white12;
 
     return MouseRegion(
       cursor: SystemMouseCursors.click,
@@ -335,10 +334,10 @@ class _BookmarkTileState extends State<_BookmarkTile> {
                 padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 7),
                 child: Row(
                   children: [
-                    const Icon(
+                    Icon(
                       Icons.bookmark,
                       size: 14,
-                      color: Color(0xFFE8A33D),
+                      color: accentColor,
                     ),
                     const SizedBox(width: 6),
                     Expanded(
@@ -351,7 +350,7 @@ class _BookmarkTileState extends State<_BookmarkTile> {
                               ? FontWeight.w700
                               : FontWeight.w500,
                           color: widget.selected
-                              ? const Color(0xFFE8A33D)
+                              ? accentColor
                               : Colors.white70,
                         ),
                       ),

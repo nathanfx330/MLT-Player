@@ -33,7 +33,7 @@ class PlayerViewModeSwitch extends StatelessWidget {
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
           decoration: BoxDecoration(
-            color: active ? const Color(0xFFE8A33D) : Colors.white10,
+            color: active ? Theme.of(context).colorScheme.primary : Colors.white10,
             borderRadius: BorderRadius.circular(5),
           ),
           child: Text(
@@ -328,9 +328,8 @@ class _StoryboardTileState extends State<_StoryboardTile> {
 
   @override
   Widget build(BuildContext context) {
-    final borderColor = widget.selected
-        ? const Color(0xFFE8A33D)
-        : Colors.white12;
+    final accentColor = Theme.of(context).colorScheme.primary;
+    final borderColor = widget.selected ? accentColor : Colors.white12;
 
     return MouseRegion(
       cursor: SystemMouseCursors.click,
@@ -398,7 +397,7 @@ class _StoryboardTileState extends State<_StoryboardTile> {
                             ),
                             iconSize: 16,
                             color: widget.bookmarked
-                                ? const Color(0xFFE8A33D)
+                                ? accentColor
                                 : Colors.white70,
                             icon: Icon(
                               widget.bookmarked
@@ -421,7 +420,7 @@ class _StoryboardTileState extends State<_StoryboardTile> {
                     fontWeight:
                         widget.selected ? FontWeight.w700 : FontWeight.w500,
                     color: widget.selected
-                        ? const Color(0xFFE8A33D)
+                        ? accentColor
                         : Colors.white70,
                   ),
                 ),
