@@ -154,6 +154,7 @@ class _StoryboardViewState extends State<StoryboardView> {
                       ),
                     )
                   : GridView.builder(
+                      // ignore: deprecated_member_use
                       cacheExtent: 500,
                       padding: const EdgeInsets.only(bottom: 20),
                       gridDelegate:
