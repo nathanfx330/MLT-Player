@@ -170,7 +170,7 @@ class _SubtitleSearchSidebarState extends State<SubtitleSearchSidebar> {
                         ),
                   isDense: true,
                   filled: true,
-                  fillColor: Colors.white.withValues(alpha: 0.07),
+                  fillColor: const Color(0x12FFFFFF),
                   border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(8),
                     borderSide: BorderSide.none,
