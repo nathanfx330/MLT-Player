@@ -1,5 +1,6 @@
 // test/srt_subtitle_service_test.dart
 
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -77,6 +78,39 @@ B
 
         final track = await SrtSubtitleService.loadForMedia(media.path);
         expect(track?.textAt(500), 'Found');
+      } finally {
+        await root.delete(recursive: true);
+      }
+    });
+
+    test('decodes Windows-1252 subtitle punctuation after invalid UTF-8', () async {
+      final root = await Directory.systemTemp.createTemp('mlt_srt_test_');
+
+      try {
+        final media = File('${root.path}${Platform.pathSeparator}Movie.mp4');
+        final subtitle = File('${root.path}${Platform.pathSeparator}Movie.srt');
+        await media.writeAsBytes(<int>[1]);
+
+        final bytes = <int>[
+          ...ascii.encode('1\n00:00:00,000 --> 00:00:02,000\nIt'),
+          0x92,
+          ...ascii.encode('s '),
+          0x93,
+          ...ascii.encode('fine'),
+          0x94,
+          ...ascii.encode(' '),
+          0x96,
+          ...ascii.encode(' really '),
+          0x97,
+          ...ascii.encode(' yes'),
+          0x85,
+          ...ascii.encode('\n'),
+        ];
+        await subtitle.writeAsBytes(bytes);
+
+        final track = await SrtSubtitleService.loadForMedia(media.path);
+
+        expect(track?.textAt(1000), 'It’s “fine” – really — yes…');
       } finally {
         await root.delete(recursive: true);
       }

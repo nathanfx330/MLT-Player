@@ -281,12 +281,69 @@ class SrtSubtitleService {
         .trim();
   }
 
+  static const List<int?> _windows1252ControlCodePoints = <int?>[
+    0x20AC,
+    null,
+    0x201A,
+    0x0192,
+    0x201E,
+    0x2026,
+    0x2020,
+    0x2021,
+    0x02C6,
+    0x2030,
+    0x0160,
+    0x2039,
+    0x0152,
+    null,
+    0x017D,
+    null,
+    null,
+    0x2018,
+    0x2019,
+    0x201C,
+    0x201D,
+    0x2022,
+    0x2013,
+    0x2014,
+    0x02DC,
+    0x2122,
+    0x0161,
+    0x203A,
+    0x0153,
+    null,
+    0x017E,
+    0x0178,
+  ];
+
   static String _decode(List<int> bytes) {
     try {
       return utf8.decode(bytes);
     } on FormatException {
-      return latin1.decode(bytes);
+      return _decodeWindows1252(bytes) ?? latin1.decode(bytes);
     }
+  }
+
+  static String? _decodeWindows1252(List<int> bytes) {
+    final codePoints = <int>[];
+
+    for (final byte in bytes) {
+      if (byte < 0 || byte > 0xFF) {
+        return null;
+      }
+
+      if (byte >= 0x80 && byte <= 0x9F) {
+        final mapped = _windows1252ControlCodePoints[byte - 0x80];
+        if (mapped == null) {
+          return null;
+        }
+        codePoints.add(mapped);
+      } else {
+        codePoints.add(byte);
+      }
+    }
+
+    return String.fromCharCodes(codePoints);
   }
 
   static String _stem(String name) {
