@@ -19,7 +19,7 @@ inspector open, (3) Storyboard view.
 
 ## What this is
 
-Two connected applications that share one native engine:
+Two connected views that share one native engine:
 
 **MLT Explorer** browses a directory the way Adobe Bridge does, with real
 thumbnails decoded from the media itself, ratings, tags, sorting, and filtering.
@@ -171,6 +171,8 @@ flutter build linux --release
 | `Shift+Space` | Play Selection |
 | `Ctrl+T` | Trim Selection |
 | `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / Redo |
+| `C` | Toggle subtitles |
+| `Ctrl+F` | Open/focus transcript search |
 | `Ctrl+I` | Inspector |
 | `Ctrl+E` | Export |
 | `Esc` | Return to Explorer |
@@ -214,11 +216,21 @@ destroyed and rebuilt on every navigation. Thumbnail generation uses independent
 producer and profile objects and never drives the live player through a
 directory.
 
-For the full design notes, including what was learned embedding MLT in a Flutter
-Linux application, see [`docs/`](docs/README.md). The embedding guide is written
-for anyone attempting something similar and covers the producer and consumer
-model, threading rules, frame callbacks, external texture registration, and the
-failure modes that are not in the MLT API reference.
+For the current system as it exists now, see
+[`docs/architecture.md`](docs/architecture.md).
+
+### Building on MLT yourself?
+
+The standalone engineering guide
+**[Embedding MLT in a Flutter/Linux Desktop Player: Field Notes from Building MLT Player](docs/embedding-mlt-in-a-flutter-linux-app.md)**
+is written for developers embedding MLT rather than driving it through `melt`.
+It covers the producer/consumer model, lazy rendering, threading and lock
+boundaries, external Flutter textures, frame-exact transport, metadata,
+consumer lifecycle properties, background export, and the failures that looked
+like MLT bugs but were not.
+
+The chronological POC documents remain available as the project's historical
+engineering record in [`docs/`](docs/README.md).
 
 ---
 

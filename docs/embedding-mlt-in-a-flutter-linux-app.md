@@ -225,41 +225,60 @@ MLT data package before debugging your code.
 
 ---
 
-# 4. Initialize MLT once
+# 4. Initialize MLT once; keep playback state in opaque handles
 
-My bridge owns one repository and one playback profile:
+The bridge still initializes MLT's factory/repository once for the process:
 
 ```c
 static mlt_repository repository = NULL;
-static mlt_profile profile = NULL;
 ```
 
-Initialization is fundamentally:
-
-```c
-repository = mlt_factory_init(NULL);
-profile = mlt_profile_init(NULL);
-```
-
-I expose this to Dart as a small lifecycle API:
+with a lifecycle API shaped like:
 
 ```c
 int mlt_bridge_init(void);
 void mlt_bridge_shutdown(void);
 ```
 
-The current application keeps one playback engine per process.
+The part I changed later is playback ownership.
 
-That is a deliberate limitation, not an MLT limitation. Before adding
-multi-track editing I plan to replace file-scope playback state with opaque
-bridge handles.
+My first implementation kept profile, producer and consumer state at file
+scope. That was excellent for proving one player and increasingly awkward as
+soon as composition and background graph work arrived.
+
+The current bridge puts mutable playback/composition state behind an opaque
+handle:
+
+```c
+typedef struct _MltBridgeEngine MltBridgeEngine;
+
+MltBridgeEngine *mlt_bridge_engine_create(void);
+int mlt_bridge_engine_activate(MltBridgeEngine *engine);
+void mlt_bridge_engine_destroy(MltBridgeEngine *engine);
+```
+
+Each engine owns its own profile, producers, consumer, tractor, transitions,
+metadata snapshot, transport state and frame-transfer slots. A calling thread
+activates the handle it is about to operate on; a GLib thread-local selects that
+engine for the compact legacy-shaped bridge operations.
+
+The process-wide pieces are now infrastructure rather than playback state:
+
+```text
+MLT repository/factory
+Flutter texture registrar / visible texture path
+engine bookkeeping
+```
+
+This was the opaque-handle refactor I originally wished I had made earlier. It
+proved worth doing once the application had more than one graph-shaped concern.
 
 ## Shutdown ordering matters
 
 Do not destroy MLT while another thread is still using it.
 
-My shutdown path first cancels and joins any export thread, then stops and
-closes playback objects, then closes the profile/repository.
+My shutdown path first cancels and joins any export thread, destroys playback
+engines, and only closes the shared factory/repository once no engine remains.
 
 Likewise, the Flutter external texture is unregistered before bridge shutdown
 so nothing can attempt to mark a destroyed texture as having a new frame.
@@ -697,19 +716,25 @@ This was one of my most important FFI integration decisions.
 
 The GTK runner links `libmlt_bridge.so`.
 
-The Dart side must talk to **that same loaded bridge instance**, because the
-bridge currently owns process-global state:
+Dart must talk to **that same loaded bridge instance**.
+
+The reason evolved as the architecture evolved. Early on, almost all playback
+state was process-global. The current bridge moved mutable playback state into
+opaque `MltBridgeEngine` handles, but some infrastructure is still deliberately
+shared by the loaded bridge instance:
 
 ```text
-repository
-profile
-producer
-consumer
-texture
-frame slots
+MLT repository/factory state
+Flutter texture registrar and GL texture path
+engine bookkeeping
 ```
 
-Therefore Dart resolves symbols with:
+Dart also creates or attaches to opaque engine handles allocated by that bridge
+instance. Splitting the runner and Dart across independently loaded copies of
+the `.so` would therefore still split the infrastructure those handles depend
+on.
+
+So Dart resolves symbols with:
 
 ```dart
 final library = DynamicLibrary.process();
@@ -721,23 +746,21 @@ not:
 DynamicLibrary.open("/some/path/libmlt_bridge.so");
 ```
 
-Opening the `.so` by path can appear to work while creating a second loaded
-instance under some deployment/path conditions.
-
-The nightmare failure mode is:
+The failure mode I want to avoid is still conceptually the same:
 
 ```text
 GTK runner owns bridge instance A
-    └── texture registered there
+    └── Flutter texture/factory infrastructure lives there
 
-Dart owns bridge instance B
-    └── producer opened there
+Dart opens bridge instance B
+    └── creates or drives engine state there
 ```
 
-Everything individually looks valid, but the video never reaches the texture.
+Everything can look individually valid while the two sides are no longer
+participating in one native integration.
 
-If your native host executable already links the bridge, resolving it from the
-current process is the safer model for shared global state.
+If the native host executable already links your bridge, resolving symbols from
+the running process is the safer model when any native state must be shared.
 
 ---
 
@@ -847,7 +870,7 @@ broken.
 
 ---
 
-# 19. Frame stepping: beware millisecond round-trips
+# 19. Frame stepping: keep exact operations frame-addressed
 
 My bridge originally exposed seek in milliseconds:
 
@@ -857,17 +880,16 @@ mlt_bridge_seek_ms(...)
 
 but the UI needed exact ±1 frame stepping.
 
-Until I add a native frame-seek function, I work around floating-point /
-fractional-rate boundaries by aiming at the **middle of the target frame's
-time interval**:
+The first workable mitigation was to aim at the **middle of the target frame's
+time interval** rather than at its nominal millisecond boundary:
 
 ```dart
 final targetMs =
     (((targetFrame + 0.5) * 1000.0) / fps).floor();
 ```
 
-This avoids seeking to an exact nominal boundary that can truncate back onto
-the preceding frame at rates such as:
+That avoids many cases where a conversion at a fractional rate truncates back
+onto the preceding frame:
 
 ```text
 23.976
@@ -875,8 +897,25 @@ the preceding frame at rates such as:
 59.94
 ```
 
-It is a good workaround, but a true frame-addressed bridge API would be
-cleaner.
+If you are stuck behind a time-based API, the midpoint technique is a useful
+compatibility workaround.
+
+It is not the architecture I would choose for a frame-precision application.
+
+I eventually replaced the round-trip with a frame-addressed bridge API:
+
+```c
+int mlt_bridge_seek_frame(int64_t frame);
+int64_t mlt_bridge_position_frame(void);
+```
+
+The millisecond methods remain for time-based scrubbing and convenience, while
+frame stepping and edit boundaries use native frame numbers.
+
+That progression produced a stronger rule than the original workaround:
+
+> If an operation is defined in frames, keep it in frames across the FFI
+> boundary. Convert to time only for UI that is actually time-oriented.
 
 ---
 
@@ -1724,16 +1763,16 @@ This boundary kept the bridge manageable.
 
 ---
 
-# 43. What I would change if starting again
+# 43. What I changed once I knew better
 
-A few improvements are obvious now.
+The most useful “starting again” lessons are the ones I eventually acted on.
 
-## Add a native frame seek immediately
+## I replaced millisecond frame stepping with a native frame API
 
-Do not make exact frame stepping round-trip through milliseconds if your
-application cares about frame precision.
+The original midpoint workaround in section 19 was useful, but it was still a
+workaround around the wrong abstraction.
 
-Expose:
+The bridge now exposes:
 
 ```text
 seek_frame(frame)
@@ -1742,20 +1781,36 @@ position_frame()
 
 alongside millisecond convenience methods.
 
-## Use opaque playback handles earlier if multiple graphs are on the roadmap
+The result is simpler transport code and a clearer contract: exact edit and
+stepping operations stay frame-addressed across the FFI boundary.
 
-Process-global state is excellent for proving one player.
+## I moved playback state behind opaque engine handles
 
-It becomes technical debt the moment you need:
+Process-global playback state was excellent for proving one player.
+
+It became technical debt when the project grew toward:
 
 ```text
-multiple players
+multiple graph-shaped operations
 tracks
-parallel preview graphs
-comparison viewers
+background work
+composition rebuilds
 ```
 
-## Keep an MLT property notebook from day one
+The bridge now owns mutable playback/composition state in opaque
+`MltBridgeEngine` handles. The MLT repository/factory and the single Flutter
+preview texture path remain shared infrastructure by design.
+
+That refactor did not make every graph identical. Export and thumbnails still
+own independent purpose-built objects. What it did was remove accidental
+global playback ownership from the core bridge.
+
+For the present-tense system map, see
+[`architecture.md`](architecture.md).
+
+## I kept the MLT property notebook
+
+This one remained good advice rather than a regret to retire.
 
 For each property, record:
 
@@ -1771,6 +1826,10 @@ source file where behavior was verified
 
 MLT is property-driven enough that this becomes part of your effective API
 documentation.
+
+The broader lesson is that a “what I would change” section should not stay
+frozen after the architecture changes. A regret that was acted on is better
+evidence than a regret left permanently in future tense.
 
 ---
 
@@ -1936,6 +1995,12 @@ would give another developer first:
 
 15. **Document every property you prove.**
     In an MLT integration, those properties are a large part of your real API.
+
+16. **Keep frame-defined operations frame-addressed across FFI.**
+    A time conversion is presentation, not a substitute for frame identity.
+
+17. **Move mutable playback state behind opaque handles before the second
+    graph-shaped requirement turns globals into architecture.**
 
 MLT gave me nearly every capability I needed for a QuickTime-style inspection
 tool. The difficult part was not implementing decoding, audio, transport or
