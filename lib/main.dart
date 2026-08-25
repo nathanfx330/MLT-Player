@@ -637,6 +637,15 @@ class _PlayerPageState extends State<PlayerPage>
   }
 
   Future<void> _openPath(String path) async {
+    // On Linux, file_selector can return while the native GTK chooser and its
+    // thumbnail work are still unwinding. Starting MLT immediately from that
+    // callback can overlap native teardown. Give the chooser one short settle
+    // window before any player/native media work begins.
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    if (!mounted) {
+      return;
+    }
+
     // Invalidate any sidecar read from the previous media immediately. Actual
     // SRT discovery still starts only after the native player open completes.
     final subtitleSerial = ++_subtitleLoadSerial;
@@ -1109,6 +1118,16 @@ class _PlayerPageState extends State<PlayerPage>
     final shiftPressed = HardwareKeyboard.instance.isShiftPressed;
     final altPressed = HardwareKeyboard.instance.isAltPressed;
 
+    final primaryFocusContext = FocusManager.instance.primaryFocus?.context;
+    final textInputFocused = primaryFocusContext != null &&
+        (primaryFocusContext.widget is EditableText ||
+            primaryFocusContext.findAncestorWidgetOfExactType<EditableText>() !=
+                null);
+
+    if (textInputFocused) {
+      return KeyEventResult.ignored;
+    }
+
     _showOverlay();
 
     if (event is KeyDownEvent &&
@@ -1240,7 +1259,10 @@ class _PlayerPageState extends State<PlayerPage>
       return KeyEventResult.handled;
     }
 
-    if (key == LogicalKeyboardKey.keyF) {
+    if (!controlPressed &&
+        !shiftPressed &&
+        !altPressed &&
+        key == LogicalKeyboardKey.keyF) {
       _toggleFullscreen();
       return KeyEventResult.handled;
     }
@@ -1416,15 +1438,6 @@ class _PlayerPageState extends State<PlayerPage>
               children: [
                 const ColoredBox(color: Colors.black),
                 _buildViewport(media),
-                SubtitleOverlay(
-                  track: _subtitleTrack,
-                  positionMs: _engine.positionMs,
-                  enabled: media != null &&
-                      media.hasVideo &&
-                      !media.isStill &&
-                      _viewMode == PlayerViewMode.video,
-                  controlsVisible: _overlayVisible,
-                ),
                 _buildTopBar(media),
                 if (media == null && widget.onBack != null)
                   Positioned(
@@ -1438,6 +1451,16 @@ class _PlayerPageState extends State<PlayerPage>
                   ),
                 _buildBottomOverlay(media),
                 _buildTracksInspector(media),
+                SubtitleOverlay(
+                  track: _subtitleTrack,
+                  positionMs: _engine.positionMs,
+                  enabled: media != null &&
+                      media.hasVideo &&
+                      !media.isStill &&
+                      _viewMode == PlayerViewMode.video,
+                  controlsVisible: _overlayVisible,
+                  onSeek: _engine.seekTo,
+                ),
               ],
             ),
           ),
