@@ -696,52 +696,22 @@ static int thumbnail_render_selected_frame(
     return 1;
 }
 
-int mlt_thumbnail_generate(
+typedef enum _ThumbnailSelectionMode {
+    THUMBNAIL_SELECT_REPRESENTATIVE,
+    THUMBNAIL_SELECT_EXACT_FRAME,
+} ThumbnailSelectionMode;
+
+static int thumbnail_generate_locked(
     const char *source_path,
     const char *output_path,
     int output_width,
     int output_height,
+    ThumbnailSelectionMode selection_mode,
+    int64_t requested_frame,
     int64_t *selected_frame_out,
     char *error_buffer,
     int error_capacity)
 {
-    thumbnail_ensure_mutex();
-    g_mutex_lock(&thumbnail_generation_mutex);
-
-    if (selected_frame_out != NULL) {
-        *selected_frame_out = -1;
-    }
-    if (error_buffer != NULL && error_capacity > 0) {
-        error_buffer[0] = '\0';
-    }
-
-    if (source_path == NULL || source_path[0] == '\0') {
-        thumbnail_set_error(
-            error_buffer,
-            error_capacity,
-            "The thumbnail source path is empty."
-        );
-        return 0;
-    }
-
-    if (output_path == NULL || output_path[0] == '\0') {
-        thumbnail_set_error(
-            error_buffer,
-            error_capacity,
-            "The thumbnail output path is empty."
-        );
-        return 0;
-    }
-
-    if (output_width <= 0 || output_height <= 0) {
-        thumbnail_set_error(
-            error_buffer,
-            error_capacity,
-            "The thumbnail dimensions are invalid."
-        );
-        return 0;
-    }
-
     const int is_still = thumbnail_path_is_still(source_path);
     mlt_profile profile = mlt_profile_init(NULL);
     mlt_producer probe = NULL;
@@ -810,7 +780,7 @@ int mlt_thumbnail_generate(
         goto cleanup;
     }
 
-    int64_t source_length =
+    const int64_t source_length =
         is_still ? 1 : (int64_t)mlt_producer_get_length(producer);
 
     if (source_length <= 0) {
@@ -823,11 +793,16 @@ int mlt_thumbnail_generate(
     }
 
     int64_t selected_frame = 0;
-    if (!thumbnail_choose_frame(
-            producer,
-            source_length,
-            is_still,
-            &selected_frame)) {
+    if (selection_mode == THUMBNAIL_SELECT_EXACT_FRAME) {
+        selected_frame = is_still ? 0 : requested_frame;
+        if (selected_frame >= source_length) {
+            selected_frame = source_length - 1;
+        }
+    } else if (!thumbnail_choose_frame(
+                   producer,
+                   source_length,
+                   is_still,
+                   &selected_frame)) {
         thumbnail_set_error(
             error_buffer,
             error_capacity,
@@ -864,6 +839,129 @@ cleanup:
         mlt_profile_close(profile);
     }
 
+    return succeeded;
+}
+
+static int thumbnail_generate_serialized(
+    const char *source_path,
+    const char *output_path,
+    int output_width,
+    int output_height,
+    ThumbnailSelectionMode selection_mode,
+    int64_t requested_frame,
+    int64_t *selected_frame_out,
+    char *error_buffer,
+    int error_capacity)
+{
+    if (selected_frame_out != NULL) {
+        *selected_frame_out = -1;
+    }
+    if (error_buffer != NULL && error_capacity > 0) {
+        error_buffer[0] = '\0';
+    }
+
+    /*
+     * Validate arguments before taking the process-wide generation lock. A
+     * malformed direct FFI/native call must fail without changing the lock
+     * state seen by the next valid thumbnail request. Once the mutex is held,
+     * every generation exit returns through this wrapper and unlocks it.
+     */
+    if (source_path == NULL || source_path[0] == '\0') {
+        thumbnail_set_error(
+            error_buffer,
+            error_capacity,
+            "The thumbnail source path is empty."
+        );
+        return 0;
+    }
+
+    if (output_path == NULL || output_path[0] == '\0') {
+        thumbnail_set_error(
+            error_buffer,
+            error_capacity,
+            "The thumbnail output path is empty."
+        );
+        return 0;
+    }
+
+    if (output_width <= 0 || output_height <= 0) {
+        thumbnail_set_error(
+            error_buffer,
+            error_capacity,
+            "The thumbnail dimensions are invalid."
+        );
+        return 0;
+    }
+
+    if (selection_mode == THUMBNAIL_SELECT_EXACT_FRAME && requested_frame < 0) {
+        thumbnail_set_error(
+            error_buffer,
+            error_capacity,
+            "The requested thumbnail frame is invalid."
+        );
+        return 0;
+    }
+
+    thumbnail_ensure_mutex();
+    g_mutex_lock(&thumbnail_generation_mutex);
+
+    const int succeeded = thumbnail_generate_locked(
+        source_path,
+        output_path,
+        output_width,
+        output_height,
+        selection_mode,
+        requested_frame,
+        selected_frame_out,
+        error_buffer,
+        error_capacity
+    );
+
     g_mutex_unlock(&thumbnail_generation_mutex);
     return succeeded;
+}
+
+int mlt_thumbnail_generate(
+    const char *source_path,
+    const char *output_path,
+    int output_width,
+    int output_height,
+    int64_t *selected_frame_out,
+    char *error_buffer,
+    int error_capacity)
+{
+    return thumbnail_generate_serialized(
+        source_path,
+        output_path,
+        output_width,
+        output_height,
+        THUMBNAIL_SELECT_REPRESENTATIVE,
+        0,
+        selected_frame_out,
+        error_buffer,
+        error_capacity
+    );
+}
+
+int mlt_thumbnail_generate_at_frame(
+    const char *source_path,
+    const char *output_path,
+    int output_width,
+    int output_height,
+    int64_t requested_frame,
+    int64_t *selected_frame_out,
+    char *error_buffer,
+    int error_capacity)
+{
+    return thumbnail_generate_serialized(
+        source_path,
+        output_path,
+        output_width,
+        output_height,
+        THUMBNAIL_SELECT_EXACT_FRAME,
+        requested_frame,
+        selected_frame_out,
+        error_buffer,
+        error_capacity
+    );
 }

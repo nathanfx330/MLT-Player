@@ -14,9 +14,11 @@ import 'services/mlt_bridge.dart';
 import 'services/mlt_export_frame_rate_bridge.dart';
 import 'services/mlt_export_preset_bridge.dart';
 import 'services/player_engine.dart';
+import 'services/storyboard_thumbnail_service.dart';
 import 'ui/widgets/media_inspector.dart';
 import 'ui/explorer_page.dart';
 import 'ui/widgets/layers_inspector.dart';
+import 'ui/widgets/storyboard_view.dart';
 
 // ---------------------------------------------------------------------------
 // Application
@@ -190,6 +192,7 @@ class _PlayerPageState extends State<PlayerPage>
   late final HostChannel _host;
   late final MltExportPresetBridge _exportPresetBridge;
   late final MltExportFrameRateBridge _exportFrameRateBridge;
+  late final StoryboardThumbnailService _storyboardThumbnailService;
 
   late final AnimationController _overlayController;
   late final Animation<double> _overlayCurve;
@@ -210,6 +213,7 @@ class _PlayerPageState extends State<PlayerPage>
   double _scrubMs = 0;
 
   bool _showTransportTimecode = false;
+  PlayerViewMode _viewMode = PlayerViewMode.video;
 
   _ExportMode _exportMode = _ExportMode.video;
   VideoExportPreset _videoExportPreset = VideoExportPreset.h264Delivery;
@@ -226,6 +230,7 @@ class _PlayerPageState extends State<PlayerPage>
     _exportPresetBridge.setVideoExportPreset(_videoExportPreset);
     _exportFrameRateBridge = MltExportFrameRateBridge();
     _exportFrameRateBridge.setVideoExportFrameRate(_videoExportFrameRate);
+    _storyboardThumbnailService = StoryboardThumbnailService();
 
     _overlayController = AnimationController(
       vsync: this,
@@ -298,6 +303,7 @@ class _PlayerPageState extends State<PlayerPage>
     _overlayController.dispose();
     _infoController.dispose();
     _keyboardFocus.dispose();
+    _storyboardThumbnailService.cancelPending();
     _engine
       ..removeListener(_onEngineChanged)
       ..dispose();
@@ -350,7 +356,8 @@ class _PlayerPageState extends State<PlayerPage>
       _infoOpen ||
       _tracksOpen ||
       _engine.exporting ||
-      _engine.error != null;
+      _engine.error != null ||
+      _viewMode == PlayerViewMode.storyboard;
 
   void _showOverlay() {
     if (!_overlayVisible) {
@@ -568,7 +575,70 @@ class _PlayerPageState extends State<PlayerPage>
     }
   }
 
+  void _setViewMode(PlayerViewMode mode) {
+    final media = _engine.media;
+
+    if (mode == _viewMode) {
+      _showOverlay();
+      return;
+    }
+
+    if (mode == PlayerViewMode.storyboard) {
+      if (media == null ||
+          media.isStill ||
+          !media.hasVideo ||
+          _engine.durationMs <= 0) {
+        return;
+      }
+
+      if (_engine.playing) {
+        _engine.pausePlayback();
+      }
+
+      setState(() => _viewMode = PlayerViewMode.storyboard);
+      _showOverlay();
+      return;
+    }
+
+    _storyboardThumbnailService.cancelPending();
+    setState(() => _viewMode = PlayerViewMode.video);
+    _showOverlay();
+  }
+
+  void _seekStoryboardMoment(int clipPositionMs) {
+    _engine.seekTo(clipPositionMs);
+    _keyboardFocus.requestFocus();
+    _showOverlay();
+  }
+
+  void _openStoryboardMoment(int clipPositionMs) {
+    _engine.seekTo(clipPositionMs);
+    _storyboardThumbnailService.cancelPending();
+    setState(() => _viewMode = PlayerViewMode.video);
+    if (!_engine.playing) {
+      _engine.togglePlayback();
+    }
+    _keyboardFocus.requestFocus();
+    _showOverlay();
+  }
+
+  void _playFromCurrentView() {
+    if (_viewMode == PlayerViewMode.storyboard) {
+      _storyboardThumbnailService.cancelPending();
+      setState(() => _viewMode = PlayerViewMode.video);
+    }
+    _engine.togglePlayback();
+    _showOverlay();
+  }
+
   Future<void> _openPath(String path) async {
+    // A new file starts in normal video view, whatever the previous one was
+    // doing. Any queued Storyboard requests from that file become obsolete.
+    _storyboardThumbnailService.cancelPending();
+    if (_viewMode != PlayerViewMode.video && mounted) {
+      setState(() => _viewMode = PlayerViewMode.video);
+    }
+
     // A new file starts closed, whatever the previous one was doing.
     if (_infoOpen || _tracksOpen) {
       setState(() {
@@ -588,6 +658,7 @@ class _PlayerPageState extends State<PlayerPage>
     if (_engine.playing) {
       _engine.pausePlayback();
     }
+    _storyboardThumbnailService.cancelPending();
     widget.onBack?.call();
   }
 
@@ -1075,7 +1146,7 @@ class _PlayerPageState extends State<PlayerPage>
     }
 
     if (key == LogicalKeyboardKey.space) {
-      _engine.togglePlayback();
+      _playFromCurrentView();
       return KeyEventResult.handled;
     }
 
@@ -1289,13 +1360,17 @@ class _PlayerPageState extends State<PlayerPage>
             behavior: HitTestBehavior.opaque,
             onTap: () {
               _keyboardFocus.requestFocus();
-              if (_overlayVisible) {
+              if (_viewMode == PlayerViewMode.storyboard) {
+                _showOverlay();
+              } else if (_overlayVisible) {
                 _engine.togglePlayback();
               } else {
                 _showOverlay();
               }
             },
-            onDoubleTap: _toggleFullscreen,
+            onDoubleTap: _viewMode == PlayerViewMode.video
+                ? _toggleFullscreen
+                : null,
             child: Stack(
               fit: StackFit.expand,
               children: [
@@ -1335,6 +1410,18 @@ class _PlayerPageState extends State<PlayerPage>
     if (!media.hasVideo) {
       return const Center(
         child: Icon(Icons.graphic_eq, size: 96, color: Colors.white24),
+      );
+    }
+
+    if (_viewMode == PlayerViewMode.storyboard && !media.isStill) {
+      return StoryboardView(
+        media: media,
+        durationMs: _engine.durationMs,
+        positionMs: _engine.positionMs,
+        thumbnailService: _storyboardThumbnailService,
+        sourceFrameForPositionMs: _engine.sourceFrameForClipPositionMs,
+        onSeek: _seekStoryboardMoment,
+        onOpenVideo: _openStoryboardMoment,
       );
     }
 
@@ -1404,6 +1491,16 @@ class _PlayerPageState extends State<PlayerPage>
                     fontWeight: FontWeight.w500,
                     shadows: [Shadow(blurRadius: 6, color: Colors.black87)],
                   ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              ExcludeFocus(
+                child: PlayerViewModeSwitch(
+                  mode: _viewMode,
+                  enabled: !media.isStill &&
+                      media.hasVideo &&
+                      _engine.durationMs > 0,
+                  onChanged: _setViewMode,
                 ),
               ),
               const SizedBox(width: 12),
@@ -1909,7 +2006,7 @@ class _PlayerPageState extends State<PlayerPage>
                 ? 'Replay'
                 : (_engine.playing ? 'Pause (space)' : 'Play (space)'),
             size: 30,
-            onPressed: _engine.togglePlayback,
+            onPressed: _playFromCurrentView,
           ),
           const SizedBox(width: 2),
           _ModeButton(

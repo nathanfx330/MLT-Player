@@ -208,6 +208,46 @@ int main(int argc, char **argv)
         check_jpeg_geometry(video_output, 480, 270);
     }
 
+    /* Storyboard/Visual Time asks for a deterministic source frame. */
+    char *exact_output =
+        g_strdup_printf("%s.exact.jpg", video_output);
+    if (exact_output != NULL) {
+        remove(exact_output);
+    }
+
+    error[0] = '\0';
+    selected_frame = -1;
+    const int exact_ok =
+        exact_output != NULL &&
+        mlt_thumbnail_generate_at_frame(
+            video_path,
+            exact_output,
+            256,
+            144,
+            75,
+            &selected_frame,
+            error,
+            (int)sizeof(error)
+        ) != 0;
+
+    if (!exact_ok && error[0] != '\0') {
+        fprintf(stderr, "  exact-frame thumbnail error: %s\n", error);
+    }
+
+    check(exact_ok, "explicit storyboard frame generation succeeds through MLT");
+    check(selected_frame == 75, "storyboard generation preserves the requested source frame");
+    check(
+        exact_output != NULL && file_has_data(exact_output),
+        "storyboard generation publishes thumbnail output"
+    );
+    if (exact_output != NULL && file_has_data(exact_output)) {
+        check_jpeg_geometry(exact_output, 256, 144);
+    }
+    if (exact_output != NULL) {
+        remove(exact_output);
+        g_free(exact_output);
+    }
+
     error[0] = '\0';
     selected_frame = -1;
 
@@ -249,6 +289,63 @@ int main(int argc, char **argv)
         "missing media fails closed"
     );
     check(error[0] != '\0', "thumbnail failure returns a diagnostic");
+
+    /*
+     * Regression for the process-wide serialization lock: malformed arguments
+     * must fail before the mutex is acquired so the next valid request cannot
+     * be poisoned by an unreleased lock.
+     */
+    error[0] = '\0';
+    selected_frame = -1;
+    check(
+        mlt_thumbnail_generate(
+            video_path,
+            video_output,
+            0,
+            270,
+            &selected_frame,
+            error,
+            (int)sizeof(error)
+        ) == 0,
+        "invalid thumbnail dimensions fail before generation"
+    );
+    check(
+        error[0] != '\0',
+        "invalid thumbnail dimensions return a diagnostic"
+    );
+
+    char *recovery_output =
+        g_strdup_printf("%s.recovery.jpg", video_output);
+    if (recovery_output != NULL) {
+        remove(recovery_output);
+    }
+
+    error[0] = '\0';
+    selected_frame = -1;
+    const int recovery_ok =
+        recovery_output != NULL &&
+        mlt_thumbnail_generate(
+            video_path,
+            recovery_output,
+            480,
+            270,
+            &selected_frame,
+            error,
+            (int)sizeof(error)
+        ) != 0;
+    check(
+        recovery_ok,
+        "valid generation still succeeds after an invalid request"
+    );
+    check(
+        recovery_output != NULL && file_has_data(recovery_output),
+        "post-failure generation publishes fresh thumbnail output"
+    );
+
+    if (recovery_output != NULL) {
+        remove(recovery_output);
+        g_free(recovery_output);
+    }
 
     check_concurrent_generation(video_path, video_output);
 
