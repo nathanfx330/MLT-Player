@@ -5,7 +5,7 @@
 These notes document the implementation journey behind MLT Player rather than
 trying to replace the upstream MLT API reference.
 
-The project now has two connected product surfaces:
+The project has two connected product surfaces:
 
 ```text
 MLT Explorer
@@ -42,14 +42,20 @@ precision playback, inspection, composition, and export workspace.
    from seeing a graph rebuild happen.
 
 5. [POC 11: MLT Explorer Foundation](poc-11-mlt-explorer-foundation.md)
-   — the product pivot from a standalone precision player to an Adobe
-   Bridge-style local media browser whose selected asset opens in the existing
-   persistent MLT Player.
+   — the Phase 11.1 product pivot from a standalone precision player to an
+   Adobe Bridge-style local media browser whose selected asset opens in the
+   existing persistent MLT Player.
+
+6. [POC 11 continuation: Explorer Growth, MLT-Native Thumbnails, and Release Hardening](poc-11-explorer-growth-thumbnail-hardening.md)
+   — Phases 11.2–11.8, the transition from placeholder cards to a useful local
+   media browser, the replacement of external ffmpeg thumbnail generation with
+   an MLT-native representative-frame path, and the two release-only failures
+   that changed the project's validation strategy.
 
 ## Current checkpoint
 
-The current checkpoint is **Phase 11.1: MLT Explorer foundation** on top of the
-completed three-layer Player architecture.
+The current checkpoint is **POC 11 through Phase 11.8 plus MLT-native thumbnail
+hardening**, on top of the completed three-layer Player architecture.
 
 The Player has a tested three-layer composition model with:
 
@@ -76,26 +82,55 @@ The Explorer now provides:
 - Open Folder
 - non-recursive local directory scan
 - supported-media classification
-- folders-before-media alphabetical ordering
-- folder navigation
-- item selection
-- double-click / Enter opening
+- real image/video thumbnails
+- representative video-frame selection
+- persistent thumbnail cache
+- release-safe still-image decoding through explicit MLT producer policy
+- selected-file metadata pane
+- Back / Forward / Up / Home navigation
+- Favorites and Recent locations
+- thumbnail size / density preferences
+- filename filtering
+- Name / Modified / Size / Type sorting
+- persistent 0–5 star ratings
+- persistent tags
+- minimum-rating filtering
+- exact-tag filtering
+- filename + rating + tag AND semantics
 - Explorer → persistent Player handoff
 - Player → Explorer return without tearing down the native Player lifecycle
-
-The first Explorer cards intentionally use placeholders. Real image/video
-thumbnails and persistent caching are the next phase.
 
 At this checkpoint:
 
 ```text
-flutter analyze     clean
-flutter test        21 passed
-tools/smoke.sh      all native groups passed
+flutter analyze          clean
+flutter test             64 passed
+tools/thumbnail_smoke.sh PASS, 0 failures
+tools/smoke.sh           all native groups passed
+flutter run -d linux     interactively proven
+standalone release       interactively proven
 ```
 
 All implementation notes currently describe behavior tested against **MLT
 7.22.0 on Linux** unless a section says otherwise.
+
+## The validation model changed during POC 11
+
+Explorer development produced two separate failures that worked correctly under
+`flutter run` but failed in the standalone release bundle.
+
+That established four distinct proof layers for native-heavy work:
+
+```text
+1. Flutter analyze/unit tests
+2. headless native smoke tests
+3. flutter run interactive behavior
+4. standalone release-bundle behavior
+```
+
+The release tier is not redundant with debug execution. It caught both an
+implicit Qt still-image producer/thread-context problem and, later, unsafe
+concurrent in-process MLT thumbnail generation.
 
 ## Product boundary
 

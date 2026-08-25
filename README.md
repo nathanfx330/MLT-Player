@@ -6,7 +6,7 @@
 
 **MLT Player** is a Flutter/Linux media utility built on the **MLT (Media Lovin' Toolkit)**.
 
-The project now has two deliberately connected parts:
+The project has two deliberately connected parts:
 
 - **MLT Explorer** — an Adobe Bridge-style local media browser.
 - **MLT Player** — a QuickTime 7 Pro-style precision player and small composition/export tool.
@@ -25,7 +25,7 @@ open a directory
 → return to the browser
 ```
 
-Flutter owns the application and UI. MLT owns media playback, compositing, metadata, and export. Video reaches Flutter through an OpenGL texture rather than a second native playback window.
+Flutter owns the application and UI. MLT owns media playback, compositing, metadata, export, and Explorer thumbnail decoding. Video reaches Flutter through an OpenGL texture rather than a second native playback window.
 
 Built and tested against **MLT 7.22.0 on Linux**.
 
@@ -33,15 +33,20 @@ Built and tested against **MLT 7.22.0 on Linux**.
 
 ## Current checkpoint
 
-MLT Player has completed the hardened player/composition phase and the first working **MLT Explorer** shell.
+MLT Player has completed the hardened three-layer Player/composition phase and the first substantial **MLT Explorer** phase through **11.8**, followed by a dedicated MLT-native thumbnail hardening pass.
 
-At the Phase 11.1 Explorer checkpoint:
+At the current checkpoint:
 
-- `flutter analyze` is clean.
-- the Flutter suite reports **21 passing tests**.
-- all native smoke groups report zero failures.
-- the Explorer builds and runs successfully on Linux.
-- directory browsing → media selection → existing MLT Player → return to Explorer is interactively proven.
+```text
+flutter analyze          clean
+flutter test             64 passed
+tools/smoke.sh           all native groups passed, 0 failures
+tools/thumbnail_smoke.sh PASS, 0 failures
+flutter run -d linux     interactively proven
+standalone release       interactively proven
+```
+
+The standalone release proof is now a first-class validation tier because two separate native failures appeared only outside `flutter run` during Explorer development.
 
 ### Current status
 
@@ -70,13 +75,20 @@ At the Phase 11.1 Explorer checkpoint:
 | Explicit output frame-rate conform | Done |
 | MLT Explorer application home | Done |
 | Open Folder / folder navigation | Done |
+| Navigation history / Home / Favorites / Recent | Done |
 | Supported-media directory scan | Done |
 | Explorer → persistent Player handoff | Done |
-| Explorer selection / keyboard navigation foundation | Done |
-| Real image/video thumbnails | Planned |
-| Persistent thumbnail cache | Planned |
-| Rich Explorer metadata pane | Planned |
-| Search / ratings / tags | Not currently a goal |
+| Explorer selection / keyboard navigation | Done |
+| Real image/video thumbnails | Done |
+| Persistent thumbnail cache | Done |
+| MLT-native representative-frame thumbnails | Done |
+| Release-safe still-image producer policy | Done |
+| Rich Explorer metadata pane | Done |
+| Thumbnail size / view density | Done |
+| Filename filtering | Done |
+| Name / Modified / Size / Type sorting | Done |
+| Persistent ratings / tags | Done |
+| Rating / tag filtering | Done |
 | Blend-mode exploration | Planned |
 | Broader alpha / color policy | Planned |
 | MLT XML interchange | Planned |
@@ -87,9 +99,7 @@ Engineering notes live in [`docs/`](docs/README.md).
 
 # MLT Explorer
 
-The application now launches into **MLT Explorer** rather than an empty player.
-
-Phase 11.1 intentionally establishes the browser/navigation architecture before thumbnail generation.
+The application launches into **MLT Explorer** rather than an empty player.
 
 ```text
 Launch MLT Player
@@ -98,15 +108,17 @@ Launch MLT Player
       ↓
    Open Folder
       ↓
-folder + media grid
+visual folder/media browser
       ↓
-select / double-click
+select / inspect / filter
+      ↓
+double-click / Enter
       ↓
 existing MLT Player
       ↓
 Back / Esc
       ↓
-same Explorer directory and selection
+same Explorer context
 ```
 
 ## What Explorer does today
@@ -116,19 +128,56 @@ Explorer can:
 - open a local directory
 - scan that directory non-recursively
 - show folders and supported media
-- filter unsupported files
-- sort folders before media
-- sort items alphabetically
-- enter folders
-- navigate to the parent folder
-- select an item
+- generate persistent image/video thumbnails
+- choose representative video frames rather than assuming the first second is useful
+- show selected-file metadata in the right pane
+- navigate Back / Forward / Up / Home
+- maintain Favorites and Recent locations
+- preserve directory/selection context when entering Player
+- change thumbnail size and view density
+- filter the current folder by filename
+- sort by Name, Modified, Size, or Type
+- reverse sort direction while keeping folders above media
+- assign 0–5 star ratings
+- assign persistent free-form tags
+- filter by minimum rating
+- filter by exact tag
+- combine filename + rating + tag filters with AND semantics
 - open media by double-click, Enter, or **Open in Player**
 - return from Player to the same Explorer state
 - open a single media file directly with the existing file chooser
 
-The first browser cards use media-type placeholders rather than generated thumbnails.
+The Explorer intentionally remains a fast local browser rather than a recursive catalog/database system.
 
-That is deliberate. The browser shell and Player lifecycle were proven first so the next phase can add asynchronous thumbnail workers without coupling them to the interactive preview engine.
+## Explorer annotations
+
+Ratings and tags are sidecar metadata owned by MLT Player, not by the source media.
+
+They are stored under the user configuration directory, normally:
+
+```text
+~/.config/mlt_player/explorer_annotations.json
+```
+
+Ratings are clamped to 0–5. Tags are trimmed and deduplicated case-insensitively while preserving display casing.
+
+The annotation catalog stays sparse: an asset with no rating and no tags has no persisted record.
+
+## Explorer filters
+
+Current filtering is scoped to the open folder:
+
+```text
+filename text
+AND
+minimum rating
+AND
+exact tag
+```
+
+Annotation filters hide directories because folders do not carry ratings or tags. Clearing the annotation filters restores normal folder visibility.
+
+Filter state is session-local. Ratings and tags themselves persist.
 
 ## Explorer shortcuts
 
@@ -136,10 +185,170 @@ Current browser-oriented shortcuts include:
 
 - `Ctrl+Shift+O` — Open Folder
 - `Ctrl+O` — Open media directly
+- `Ctrl+F` — focus filename filter
+- `Alt+Left` — Back
+- `Alt+Right` — Forward
+- `Alt+Home` — Home
+- `Backspace` — parent directory
 - `Enter` — open selected folder/media
-- `Backspace` — parent folder
 - double-click — open selected folder/media
 - `Esc` from Player — return to Explorer when not fullscreen
+
+---
+
+# MLT-native thumbnails
+
+Explorer thumbnails originally began as an asynchronous cache backed by an external `ffmpeg` executable. The surrounding cache architecture was sound, but the decoder choice was not ideal for this project.
+
+The hardened architecture is now:
+
+```text
+Explorer ThumbnailService
+        ↓
+Dart worker isolate
+        ↓
+MltThumbnailBridge
+        ↓
+serialized native thumbnail lane
+        ↓
+private MLT producer/profile
+        ↓
+representative-frame selection
+        ↓
+480 × 270 JPEG cache entry
+```
+
+The application does **not** shell out to `ffmpeg` to render runtime thumbnails.
+
+## Representative video frames
+
+Timed video samples three strategic positions:
+
+```text
+15%
+50%
+85%
+```
+
+Candidate frames are scored for visual variance/contrast with a penalty for near-black imagery. The strongest candidate is rendered into the cache.
+
+This avoids the common “wall of black thumbnails” failure caused by always taking frame zero or a fixed one-second frame from media with slates, fade-ins, or black leaders.
+
+The focused thumbnail smoke fixture contains a two-second black leader and proves that representative-frame selection skips it.
+
+## Still-image producer policy
+
+Still images use an explicit safe producer order:
+
+```text
+pixbuf
+→ avformat fallback
+```
+
+The runtime avoids implicit `qimage` selection for this path.
+
+That producer policy was established after a standalone-release failure exposed a Qt image-producer/thread-context problem that was not reproducible under `flutter run`.
+
+## Thumbnail cache
+
+The persistent cache normally lives under:
+
+```text
+~/.cache/mlt_player/thumbnails/
+```
+
+Cache identity uses:
+
+```text
+cache version
++ absolute path
++ file size
++ modification timestamp
+```
+
+The current cache version identifies the MLT representative-frame implementation, so older ffmpeg-generated thumbnails invalidate cleanly.
+
+The cache preserves:
+
+- in-flight deduplication
+- atomic temp-file publish + rename
+- pause/drain during Explorer → Player handoff
+- bounded background work
+- cache hits without regeneration
+
+Native MLT thumbnail generation itself is serialized. That restriction is deliberate and release-proven.
+
+---
+
+# Two release-only failures that changed the test strategy
+
+Explorer development exposed an important distinction:
+
+```text
+works under flutter run
+≠
+works as the installed standalone release bundle
+```
+
+Two unrelated native problems demonstrated this.
+
+## Release issue 1: primary still images and `qimage`
+
+The first issue appeared when opening still images from the standalone release build.
+
+The same application path worked under `flutter run`, but release execution could select MLT's Qt `qimage` producer in a worker context. Diagnostics pointed to Qt application/thread assumptions, and the release process could fail even though normal debug testing was green.
+
+The fix was to make still-image producer selection explicit:
+
+```text
+still extension
+→ pixbuf
+→ avformat fallback
+→ do not rely on qimage auto-selection
+```
+
+That made standalone MP4 and PNG opening behave consistently with the tested Player architecture.
+
+## Release issue 2: in-process MLT thumbnail concurrency
+
+The second issue appeared later, after runtime thumbnail decoding moved from external ffmpeg subprocesses into the application process through MLT.
+
+All of the following were green:
+
+- Flutter analysis
+- Flutter tests
+- single native thumbnail smoke
+- full Player/native smoke
+- interactive `flutter run`
+
+But the optimized standalone release still crashed while browsing thumbnails.
+
+The architectural difference was concurrency. The original ffmpeg thumbnail workers were isolated in subprocesses. The new implementation allowed more than one Dart worker isolate to enter in-process MLT thumbnail decoding at the same time.
+
+The final fix was deliberately conservative:
+
+```text
+one active Explorer thumbnail worker
++
+process-wide native thumbnail mutex
+```
+
+A new native regression test launches multiple thumbnail callers concurrently and proves that they all complete safely through the serialized lane.
+
+The release bundle was then rebuilt and interactively tested against the folder that had previously crashed. It remained stable.
+
+## Resulting validation tiers
+
+Native-heavy changes now deserve four distinct proofs:
+
+```text
+1. Flutter static/unit tests
+2. headless native smoke tests
+3. flutter run interactive behavior
+4. standalone release-bundle interactive behavior
+```
+
+A green debug run is no longer treated as evidence that packaging, producer choice, optimized scheduling, and native thread behavior are release-safe.
 
 ---
 
@@ -269,7 +478,7 @@ logical layer role
 visual Z-order
 ```
 
-Visual Move Up / Move Down ordering can place Layer 1, Layer 2, or Layer 3 anywhere in the displayed stack while preserving the media-owned state.
+Visual Move Up / Move Down ordering can place Layer 1, Layer 2, or Layer 3 anywhere in the displayed stack while preserving media-owned state.
 
 Crossing the **base-role boundary** is different.
 
@@ -289,8 +498,6 @@ A still image cannot become Layer 1.
 ## Three-layer base-role promotion
 
 Base promotion is generalized across all three current slots.
-
-Examples:
 
 ```text
 A = current base
@@ -312,7 +519,7 @@ before:  A(base), B, C
 after:   C(base), B, A
 ```
 
-Layer 2/3 state that survives a promotion keeps its media-owned properties.
+Layer state that survives a promotion keeps its media-owned properties.
 
 When the new base has a different frame rate, timeline and timed-source boundaries are converted through time rather than copied as raw frame numbers.
 
@@ -428,7 +635,19 @@ Flutter application
     |      |      +-- supported-media classification
     |      |
     |      +-- ExplorerPage
-    |      +-- persistent browser state
+    |      +-- navigation/history/preferences
+    |      +-- annotation service
+    |      +-- sort/filter service
+    |      +-- metadata service
+    |      |
+    |      +-- ThumbnailService
+    |             +-- persistent cache
+    |             +-- in-flight dedupe
+    |             +-- pause/drain handoff
+    |             +-- one active worker
+    |             +-- MltThumbnailBridge
+    |                    ↓
+    |             serialized native MLT thumbnail lane
     |
     +-- Player view
     |      |
@@ -467,7 +686,7 @@ Flutter application
 
 Explorer and Player are maintained as persistent application views rather than repeatedly destroying and recreating the native Player lifecycle when the user returns to the browser.
 
-Thumbnail generation will be a separate background subsystem. It will **not** drive the live PlayerEngine through every asset in a directory.
+Thumbnail generation uses independent producer/profile objects and never drives the live Player through every file in the directory.
 
 ---
 
@@ -478,18 +697,20 @@ Primary commands:
 ```bash
 flutter analyze
 flutter test
+tools/thumbnail_smoke.sh
 tools/smoke.sh
 ```
 
-At the Phase 11.1 Explorer checkpoint:
+Current automated checkpoint:
 
 ```text
-Flutter analyze: clean
-Flutter tests:   21 passed
-Native smoke:    all groups passed, 0 failures
+Flutter analyze:       clean
+Flutter tests:         64 passed
+Thumbnail native smoke: PASS, 0 failures
+Native smoke groups:   all passed, 0 failures
 ```
 
-The native safety net covers:
+The native Player safety net covers:
 
 1. no-active-engine guards
 2. native transport/composition smoke
@@ -500,7 +721,27 @@ The native safety net covers:
 7. video export presets
 8. layered output frame-rate conform
 
-The Explorer service has Flutter tests covering directory scanning, supported-media filtering, and ordering behavior.
+The focused thumbnail safety net covers:
+
+1. MLT-native timed-video generation
+2. persistent output creation
+3. black-leader representative-frame selection
+4. requested thumbnail dimensions
+5. MLT-native still generation
+6. missing-media failure
+7. explicit native diagnostic propagation
+8. concurrent callers safely serialized through the native thumbnail lane
+
+## Release validation
+
+Native-heavy Explorer changes are not complete until the installed-style bundle is exercised:
+
+```bash
+flutter build linux --release
+./build/linux/x64/release/bundle/mlt_player
+```
+
+At minimum, release testing should browse a thumbnail-heavy folder and open both a timed-video file and a still image through Explorer.
 
 ---
 
@@ -536,33 +777,83 @@ Completed:
 
 ## POC 11 — MLT Explorer — current
 
-### Phase 11.1 — complete
+### Phase 11.1 — Explorer foundation — complete
 
-- Explorer is the application home
+- Explorer becomes application home
 - Open Folder
 - directory scan
 - folder/media grid
 - media classification
 - selection
 - folder navigation
-- Explorer → persistent Player handoff
-- Player → Explorer return
+- persistent Explorer ↔ Player shell
 
-### Phase 11.2 — next
+### Phase 11.2 — real thumbnails + release still hardening — complete
 
-- asynchronous real thumbnails
-- video representative frames
-- image thumbnails
-- cancellation/prioritization for visible grid items
-- persistent thumbnail cache keyed by source identity/change state
+- asynchronous real video/image thumbnails
+- persistent thumbnail cache
+- Explorer → Player thumbnail pause/drain handoff
+- release-safe still-image producer policy
+- `pixbuf` primary still path with `avformat` fallback
+- standalone release MP4/PNG proof
 
-Likely follow-on Explorer work:
+### Phase 11.3 — selection metadata — complete
 
-- richer selection metadata
-- thumbnail-size control
-- navigation history
-- optional favorites / locations
-- performance work for very large directories
+- right-side selected-file metadata pane
+- file size / modified / type / format
+- selected image dimensions
+- metadata caching without scanning every asset through MLT
+
+### Phase 11.4 — navigation + locations — complete
+
+- Back / Forward / Up / Home
+- keyboard history shortcuts
+- Favorites
+- Recent locations
+- persisted location state
+
+### Phase 11.5 — thumbnail size + density — complete
+
+- Compact / Small / Standard / Large / Extra Large
+- grid geometry changes together
+- persisted view preferences
+
+### Phase 11.6 — sort + current-folder filename filter — complete
+
+- case-insensitive filename filtering
+- `Ctrl+F`
+- Name / Modified / Size / Type sorts
+- ascending / descending
+- folders remain above media
+- sort preferences persist
+
+### Phase 11.7 — ratings + tags — complete
+
+- persistent 0–5 star ratings
+- persistent tags
+- case-insensitive tag dedupe
+- sparse annotation catalog
+- source media remains untouched
+
+### Phase 11.8 — rating + tag filters — complete
+
+- minimum-star filter
+- exact-tag filter populated from current folder
+- filename + rating + tag AND semantics
+- clear-all filters
+- selection remains path-stable when an edited asset leaves the current result set
+
+### Thumbnail architecture hardening — complete
+
+- removed runtime external ffmpeg thumbnail dependency
+- dedicated MLT-native thumbnail FFI path
+- representative video frame selection
+- MLT still-image producer policy aligned with Player behavior
+- serialized native thumbnail lane
+- release-only concurrency crash regression coverage
+- cache-version migration from the earlier generator
+
+Likely follow-on Explorer work should remain bounded and workflow-driven rather than expanding automatically into a full DAM.
 
 ## POC 12 — interchange / file-oriented extensions
 
@@ -582,6 +873,7 @@ Potential later work:
 - [POC 10: Multitrack, Compositing, and Tractor-Aware Export](docs/poc-10-multitrack-compositing-and-export.md)
 - [POC 10 continuation: Layer Ordering, Role Promotion, and Atomic Presentation](docs/poc-10-layer-ordering-and-atomic-role-swaps.md)
 - [POC 11: MLT Explorer Foundation](docs/poc-11-mlt-explorer-foundation.md)
+- [POC 11 continuation: Explorer Growth, MLT-Native Thumbnails, and Release Hardening](docs/poc-11-explorer-growth-thumbnail-hardening.md)
 
 ---
 
@@ -592,6 +884,7 @@ Typical native-change rebuild:
 ```bash
 flutter clean
 flutter pub get
+flutter build linux --debug
 flutter run -d linux
 ```
 
@@ -602,12 +895,20 @@ flutter analyze
 flutter run -d linux
 ```
 
-Full regression pass:
+Full automated regression pass:
 
 ```bash
 flutter analyze
 flutter test
+tools/thumbnail_smoke.sh
 tools/smoke.sh
+```
+
+For native or packaging-sensitive changes, add the standalone release proof:
+
+```bash
+flutter build linux --release
+./build/linux/x64/release/bundle/mlt_player
 ```
 
 ---
@@ -628,6 +929,11 @@ can carry different licenses and some MLT build configurations enable GPL
 components. FFmpeg is normally LGPL-2.1-or-later, but its effective license can
 become GPL when GPL components or external libraries such as `libx264` are
 enabled.
+
+Runtime Explorer thumbnail generation no longer shells out to the `ffmpeg`
+command-line executable. MLT can still use FFmpeg-backed modules internally,
+and the build/test tooling uses ffmpeg/ffprobe for deterministic fixture
+creation and encoded-output validation.
 
 Anyone distributing prebuilt MLT Player binaries should audit the exact MLT
 modules, FFmpeg build configuration, codec libraries, and other dependencies
