@@ -52,10 +52,17 @@ precision playback, inspection, composition, and export workspace.
    an MLT-native representative-frame path, and the two release-only failures
    that changed the project's validation strategy.
 
+7. [POC 12: Storyboard, Searchable Subtitles, and the Last Mile of Release Hardening](poc-12-storyboard-subtitles-and-last-mile-hardening.md)
+   — exact-frame Storyboard generation, SRT sidecars and transcript search,
+   Windows-1252 handling, keyboard/focus ownership, a file-chooser-only release
+   crash, differential debugging with drag/drop and `strace`, cross-Flutter CI
+   compatibility, dead-code cleanup, and the final stability rules that emerged
+   once feature work was complete.
+
 ## Current checkpoint
 
-The current checkpoint is **POC 11 through Phase 11.8 plus MLT-native thumbnail
-hardening**, on top of the completed three-layer Player architecture.
+The current checkpoint is **POC 12 final hardening**, on top of the completed
+three-layer Player architecture and Explorer workflow.
 
 The Player has a tested three-layer composition model with:
 
@@ -76,10 +83,23 @@ The Player has a tested three-layer composition model with:
 - H.264 / ProRes / PNG / sequence / WAV export
 - explicit output-rate conform
 
-The Explorer now provides:
+The Player also now provides:
+
+- exact-frame Storyboard browsing at 5 / 10 / 30 / 60 second intervals
+- same-basename SRT sidecar discovery
+- on-screen subtitle presentation
+- subtitle visibility control
+- searchable floating transcript
+- click-to-seek transcript cues
+- UTF-8, Windows-1252, and Latin-1 subtitle decoding policy
+- keyboard/focus isolation between Player shortcuts and transcript text input
+
+The Explorer provides:
 
 - application-home entry point
 - Open Folder
+- direct Open File
+- drag/drop media opening
 - non-recursive local directory scan
 - supported-media classification
 - real image/video thumbnails
@@ -104,33 +124,44 @@ At this checkpoint:
 
 ```text
 flutter analyze          clean
-flutter test             64 passed
+flutter test             73 passed
 tools/thumbnail_smoke.sh PASS, 0 failures
 tools/smoke.sh           all native groups passed
 flutter run -d linux     interactively proven
 standalone release       interactively proven
+GitHub CI                passing
 ```
 
 All implementation notes currently describe behavior tested against **MLT
 7.22.0 on Linux** unless a section says otherwise.
 
-## The validation model changed during POC 11
+## The validation model changed during POC 11 and hardened further in POC 12
 
 Explorer development produced two separate failures that worked correctly under
 `flutter run` but failed in the standalone release bundle.
 
-That established four distinct proof layers for native-heavy work:
+POC 12 then added another important distinction: the same standalone release
+could open a file successfully through drag/drop while the native Open File
+handoff could fail.
+
+That established a broader proof model for native-heavy work:
 
 ```text
 1. Flutter analyze/unit tests
 2. headless native smoke tests
 3. flutter run interactive behavior
 4. standalone release-bundle behavior
+5. launch from an unrelated working directory
+6. exercise the exact desktop handoff that changed
 ```
 
-The release tier is not redundant with debug execution. It caught both an
-implicit Qt still-image producer/thread-context problem and, later, unsafe
-concurrent in-process MLT thumbnail generation.
+The release tier is not redundant with debug execution. It caught implicit
+producer/thread-context problems, unsafe concurrent native thumbnail timing,
+and later helped isolate a file-chooser-specific handoff from the media-open
+path itself.
+
+The final rule is simple: test the built artifact through the same entry point a
+user will actually use.
 
 ## Product boundary
 
@@ -150,3 +181,8 @@ browse
 
 The Explorer does not change the Player's core design principle. It gives that
 precision tool the media-browsing entry point it was originally built to serve.
+
+At the current checkpoint, broad structural cleanup is deliberately secondary
+to preserving known-good runtime behavior. Disconnected dead code is cheap to
+remove; working native-adjacent architecture is changed only when a concrete
+feature or defect justifies the risk.
