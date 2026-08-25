@@ -15,10 +15,12 @@ import 'services/mlt_export_frame_rate_bridge.dart';
 import 'services/mlt_export_preset_bridge.dart';
 import 'services/player_engine.dart';
 import 'services/storyboard_thumbnail_service.dart';
+import 'services/srt_subtitle_service.dart';
 import 'ui/widgets/media_inspector.dart';
 import 'ui/explorer_page.dart';
 import 'ui/widgets/layers_inspector.dart';
 import 'ui/widgets/storyboard_view.dart';
+import 'ui/widgets/subtitle_overlay.dart';
 
 // ---------------------------------------------------------------------------
 // Application
@@ -193,6 +195,9 @@ class _PlayerPageState extends State<PlayerPage>
   late final MltExportPresetBridge _exportPresetBridge;
   late final MltExportFrameRateBridge _exportFrameRateBridge;
   late final StoryboardThumbnailService _storyboardThumbnailService;
+
+  SubtitleTrack? _subtitleTrack;
+  int _subtitleLoadSerial = 0;
 
   late final AnimationController _overlayController;
   late final Animation<double> _overlayCurve;
@@ -632,6 +637,10 @@ class _PlayerPageState extends State<PlayerPage>
   }
 
   Future<void> _openPath(String path) async {
+    // Invalidate any sidecar read from the previous media immediately. Actual
+    // SRT discovery still starts only after the native player open completes.
+    final subtitleSerial = ++_subtitleLoadSerial;
+
     // A new file starts in normal video view, whatever the previous one was
     // doing. Any queued Storyboard requests from that file become obsolete.
     _storyboardThumbnailService.cancelPending();
@@ -647,11 +656,42 @@ class _PlayerPageState extends State<PlayerPage>
       });
       await _infoController.reverse();
     }
-    await _engine.open(path);
-    if (mounted) {
-      _keyboardFocus.requestFocus();
-      _showOverlay();
+
+    // Keep sidecar discovery strictly after the native player has completed
+    // its normal open path. SRT support is a Flutter overlay and must not
+    // participate in native media probing or graph construction.
+    final opened = await _engine.open(path);
+
+    if (!mounted) {
+      return;
     }
+
+    if (_subtitleTrack != null) {
+      setState(() => _subtitleTrack = null);
+    }
+
+    if (opened &&
+        _engine.media != null &&
+        _engine.media!.hasVideo &&
+        !_engine.media!.isStill) {
+      unawaited(_loadSidecarSubtitles(path, subtitleSerial));
+    }
+
+    _keyboardFocus.requestFocus();
+    _showOverlay();
+  }
+
+  Future<void> _loadSidecarSubtitles(
+    String mediaPath,
+    int subtitleSerial,
+  ) async {
+    final track = await SrtSubtitleService.loadForMedia(mediaPath);
+
+    if (!mounted || subtitleSerial != _subtitleLoadSerial) {
+      return;
+    }
+
+    setState(() => _subtitleTrack = track);
   }
 
   void _returnToExplorer() {
@@ -1376,6 +1416,15 @@ class _PlayerPageState extends State<PlayerPage>
               children: [
                 const ColoredBox(color: Colors.black),
                 _buildViewport(media),
+                SubtitleOverlay(
+                  track: _subtitleTrack,
+                  positionMs: _engine.positionMs,
+                  enabled: media != null &&
+                      media.hasVideo &&
+                      !media.isStill &&
+                      _viewMode == PlayerViewMode.video,
+                  controlsVisible: _overlayVisible,
+                ),
                 _buildTopBar(media),
                 if (media == null && widget.onBack != null)
                   Positioned(
