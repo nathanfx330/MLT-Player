@@ -1616,7 +1616,7 @@ class _PlayerPageState extends State<PlayerPage>
               _engine.nudgeLayerSourceIn(layerIndex, deltaFrames),
             ),
             onSourceOutNudge: (layerIndex, deltaFrames) => unawaited(
-              _engine.nudgeLayerSourceOutFrame(layerIndex, deltaFrames),
+              _engine.nudgeLayerSourceOut(layerIndex, deltaFrames),
             ),
             onReplaceSource: (layerIndex) => _replaceLayerSource(layerIndex),
             onToggleVisible: _engine.toggleLayerVisible,
@@ -1652,9 +1652,13 @@ class _PlayerPageState extends State<PlayerPage>
             _pointerOverControls = false;
             _restartOverlayTimer();
           },
+          // Absorbs taps so that clicking the scrim beside a button does
+          // not fall through to the video and toggle playback.
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
             onTap: () {},
+            // The player owns the keyboard. Nothing in here may take
+            // focus, or the slider would eat the arrow keys.
             child: ExcludeFocus(
               child: Container(
                 decoration: const BoxDecoration(
@@ -1688,6 +1692,11 @@ class _PlayerPageState extends State<PlayerPage>
     );
   }
 
+  /// The rolling file information panel.
+  ///
+  /// Anchored to the bottom of its own clip rect, so growing the height
+  /// factor rolls the panel up out of the control bar and shrinking it
+  /// rolls it back down behind it.
   Widget _buildInfoRoll(MediaInfo media) {
     return AnimatedBuilder(
       animation: _infoController,
@@ -1819,9 +1828,12 @@ class _PlayerPageState extends State<PlayerPage>
     final maxValue = durationMs > 0 ? durationMs.toDouble() : 1.0;
     final value = (_scrubbing ? _scrubMs : _positionForDisplay().toDouble())
         .clamp(0.0, maxValue);
+
     final showHours = durationMs >= 3600000;
+
     final displayPositionMs =
         _scrubbing ? _scrubMs.round() : _positionForDisplay();
+
     final inFrame = _engine.inFrame;
     final outFrame = _engine.outFrame;
     final inFraction = _fractionForFrame(media, inFrame);
@@ -2270,6 +2282,9 @@ class _SelectionTrackPainter extends CustomPainter {
       return;
     }
 
+    // Flutter's slider track is inset by the 14 px overlay radius used by
+    // this scrubber. Matching that inset keeps frame markers aligned with
+    // the actual track endpoints rather than the widget's outer bounds.
     const inset = 14.0;
     final trackWidth = size.width - (inset * 2);
     if (trackWidth <= 0) {
@@ -2326,6 +2341,12 @@ class _SelectionTrackPainter extends CustomPainter {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Overlay pieces
+// ---------------------------------------------------------------------------
+
+/// Fade plus a short slide, and no hit testing once it is gone, so an
+/// invisible control bar cannot swallow a click meant for the video.
 class _OverlayFade extends StatelessWidget {
   const _OverlayFade({
     required this.animation,
