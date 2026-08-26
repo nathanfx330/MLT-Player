@@ -32,11 +32,21 @@ class ProjectPage extends StatelessWidget {
     required this.projectCatalogService,
     required this.projectMediaMetadataService,
     required this.activeProjectId,
+    required this.onOpenCatalog,
+    required this.onOpenRating,
+    required this.onOpenTag,
+    required this.onOpenColor,
+    required this.onOpenBookmarks,
   });
 
   final ProjectCatalogService projectCatalogService;
   final ProjectMediaMetadataService projectMediaMetadataService;
   final String? activeProjectId;
+  final ValueChanged<String> onOpenCatalog;
+  final ValueChanged<int> onOpenRating;
+  final ValueChanged<String> onOpenTag;
+  final ValueChanged<String> onOpenColor;
+  final VoidCallback onOpenBookmarks;
 
   @override
   Widget build(BuildContext context) {
@@ -60,6 +70,11 @@ class ProjectPage extends StatelessWidget {
                 project: project,
                 projectCatalogService: projectCatalogService,
                 projectMediaMetadataService: projectMediaMetadataService,
+                onOpenCatalog: onOpenCatalog,
+                onOpenRating: onOpenRating,
+                onOpenTag: onOpenTag,
+                onOpenColor: onOpenColor,
+                onOpenBookmarks: onOpenBookmarks,
               ),
       ),
     );
@@ -71,11 +86,21 @@ class _ProjectOverview extends StatelessWidget {
     required this.project,
     required this.projectCatalogService,
     required this.projectMediaMetadataService,
+    required this.onOpenCatalog,
+    required this.onOpenRating,
+    required this.onOpenTag,
+    required this.onOpenColor,
+    required this.onOpenBookmarks,
   });
 
   final MediaProject project;
   final ProjectCatalogService projectCatalogService;
   final ProjectMediaMetadataService projectMediaMetadataService;
+  final ValueChanged<String> onOpenCatalog;
+  final ValueChanged<int> onOpenRating;
+  final ValueChanged<String> onOpenTag;
+  final ValueChanged<String> onOpenColor;
+  final VoidCallback onOpenBookmarks;
 
   @override
   Widget build(BuildContext context) {
@@ -131,8 +156,8 @@ class _ProjectOverview extends StatelessWidget {
                   ),
                   const SizedBox(height: 8),
                   const Text(
-                    'Project-wide organization at a glance. Explorer remains '
-                    'the working browser.',
+                    'Project-wide organization at a glance. Click a Catalog, '
+                    'rating, color, or tag to open it in Explorer.',
                     style: TextStyle(
                       fontSize: 12,
                       color: Colors.white38,
@@ -180,17 +205,24 @@ class _ProjectOverview extends StatelessWidget {
                           child: _CatalogPanel(
                             projectId: projectId,
                             projectCatalogService: projectCatalogService,
+                            onOpenCatalog: onOpenCatalog,
                           ),
                         ),
                         const SizedBox(width: 14),
                         Expanded(
                           flex: 3,
-                          child: _RatingPanel(ratingCounts: ratingCounts),
+                          child: _RatingPanel(
+                            ratingCounts: ratingCounts,
+                            onOpenRating: onOpenRating,
+                          ),
                         ),
                         const SizedBox(width: 14),
                         Expanded(
                           flex: 3,
-                          child: _ColorPanel(colorCounts: colorCounts),
+                          child: _ColorPanel(
+                            colorCounts: colorCounts,
+                            onOpenColor: onOpenColor,
+                          ),
                         ),
                       ],
                     )
@@ -200,11 +232,18 @@ class _ProjectOverview extends StatelessWidget {
                         _CatalogPanel(
                           projectId: projectId,
                           projectCatalogService: projectCatalogService,
+                          onOpenCatalog: onOpenCatalog,
                         ),
                         const SizedBox(height: 14),
-                        _RatingPanel(ratingCounts: ratingCounts),
+                        _RatingPanel(
+                          ratingCounts: ratingCounts,
+                          onOpenRating: onOpenRating,
+                        ),
                         const SizedBox(height: 14),
-                        _ColorPanel(colorCounts: colorCounts),
+                        _ColorPanel(
+                          colorCounts: colorCounts,
+                          onOpenColor: onOpenColor,
+                        ),
                       ],
                     ),
                   const SizedBox(height: 14),
@@ -214,7 +253,10 @@ class _ProjectOverview extends StatelessWidget {
                       children: [
                         Expanded(
                           flex: 7,
-                          child: _TagPanel(tagCounts: tagCounts),
+                          child: _TagPanel(
+                            tagCounts: tagCounts,
+                            onOpenTag: onOpenTag,
+                          ),
                         ),
                         const SizedBox(width: 14),
                         Expanded(
@@ -222,6 +264,7 @@ class _ProjectOverview extends StatelessWidget {
                           child: _BookmarkPanel(
                             bookmarkCount: bookmarkCount,
                             bookmarkedMediaCount: bookmarkedMedia,
+                            onOpen: onOpenBookmarks,
                           ),
                         ),
                       ],
@@ -229,11 +272,15 @@ class _ProjectOverview extends StatelessWidget {
                   else
                     Column(
                       children: [
-                        _TagPanel(tagCounts: tagCounts),
+                        _TagPanel(
+                          tagCounts: tagCounts,
+                          onOpenTag: onOpenTag,
+                        ),
                         const SizedBox(height: 14),
                         _BookmarkPanel(
                           bookmarkCount: bookmarkCount,
                           bookmarkedMediaCount: bookmarkedMedia,
+                          onOpen: onOpenBookmarks,
                         ),
                       ],
                     ),
@@ -372,10 +419,12 @@ class _CatalogPanel extends StatelessWidget {
   const _CatalogPanel({
     required this.projectId,
     required this.projectCatalogService,
+    required this.onOpenCatalog,
   });
 
   final String projectId;
   final ProjectCatalogService projectCatalogService;
+  final ValueChanged<String> onOpenCatalog;
 
   @override
   Widget build(BuildContext context) {
@@ -401,10 +450,14 @@ class _CatalogPanel extends StatelessWidget {
               children: [
                 for (var index = 0; index < entries.length; index++) ...[
                   _CatalogOverviewRow(
+                    key: ValueKey<String>(
+                      'project-catalog-${entries[index].catalog.id}',
+                    ),
                     entry: entries[index],
                     count: projectCatalogService.mediaCountForCatalog(
                       entries[index].catalog.id,
                     ),
+                    onTap: () => onOpenCatalog(entries[index].catalog.id),
                   ),
                   if (index != entries.length - 1)
                     const Divider(
@@ -429,61 +482,73 @@ class _CatalogEntry {
 
 class _CatalogOverviewRow extends StatelessWidget {
   const _CatalogOverviewRow({
+    super.key,
     required this.entry,
     required this.count,
+    required this.onTap,
   });
 
   final _CatalogEntry entry;
   final int count;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
     final catalog = entry.catalog;
 
-    return Padding(
-      padding: EdgeInsets.fromLTRB(
-        16 + entry.depth * 18.0,
-        10,
-        16,
-        10,
-      ),
-      child: Row(
-        children: [
-          Icon(
-            catalog.isFavorites ? Icons.star : Icons.folder_outlined,
-            size: 16,
-            color: catalog.isFavorites ? _projectAccent : Colors.white38,
-          ),
-          const SizedBox(width: 9),
-          Expanded(
-            child: Text(
-              catalog.name,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                fontSize: 12,
-                color: Colors.white70,
+    return InkWell(
+      onTap: onTap,
+      mouseCursor: SystemMouseCursors.click,
+      hoverColor: const Color(0x09FFFFFF),
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(
+          16 + entry.depth * 18.0,
+          10,
+          16,
+          10,
+        ),
+        child: Row(
+          children: [
+            Icon(
+              catalog.isFavorites ? Icons.star : Icons.folder_outlined,
+              size: 16,
+              color: catalog.isFavorites ? _projectAccent : Colors.white38,
+            ),
+            const SizedBox(width: 9),
+            Expanded(
+              child: Text(
+                catalog.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 12,
+                  color: Colors.white70,
+                ),
               ),
             ),
-          ),
-          Text(
-            '$count',
-            style: const TextStyle(
-              fontSize: 11,
-              fontWeight: FontWeight.w600,
-              color: Colors.white38,
+            Text(
+              '$count',
+              style: const TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                color: Colors.white38,
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
 }
 
 class _RatingPanel extends StatelessWidget {
-  const _RatingPanel({required this.ratingCounts});
+  const _RatingPanel({
+    required this.ratingCounts,
+    required this.onOpenRating,
+  });
 
   final Map<int, int> ratingCounts;
+  final ValueChanged<int> onOpenRating;
 
   @override
   Widget build(BuildContext context) {
@@ -494,9 +559,13 @@ class _RatingPanel extends StatelessWidget {
         children: [
           for (var rating = 5; rating >= 1; rating--)
             _OverviewCountRow(
+              key: ValueKey<String>('project-rating-$rating'),
               label: _ratingLabel(rating),
               count: ratingCounts[rating] ?? 0,
               accent: _projectAccent,
+              onTap: (ratingCounts[rating] ?? 0) > 0
+                  ? () => onOpenRating(rating)
+                  : null,
             ),
         ],
       ),
@@ -505,9 +574,13 @@ class _RatingPanel extends StatelessWidget {
 }
 
 class _ColorPanel extends StatelessWidget {
-  const _ColorPanel({required this.colorCounts});
+  const _ColorPanel({
+    required this.colorCounts,
+    required this.onOpenColor,
+  });
 
   final Map<String, int> colorCounts;
+  final ValueChanged<String> onOpenColor;
 
   @override
   Widget build(BuildContext context) {
@@ -527,8 +600,12 @@ class _ColorPanel extends StatelessWidget {
               children: [
                 for (final colorHex in orderedColors)
                   _OverviewCountRow(
+                    key: ValueKey<String>('project-color-$colorHex'),
                     label: _projectColorNames[colorHex] ?? colorHex,
                     count: colorCounts[colorHex] ?? 0,
+                    onTap: (colorCounts[colorHex] ?? 0) > 0
+                        ? () => onOpenColor(colorHex)
+                        : null,
                     leading: Container(
                       width: 11,
                       height: 11,
@@ -546,9 +623,13 @@ class _ColorPanel extends StatelessWidget {
 }
 
 class _TagPanel extends StatelessWidget {
-  const _TagPanel({required this.tagCounts});
+  const _TagPanel({
+    required this.tagCounts,
+    required this.onOpenTag,
+  });
 
   final Map<String, int> tagCounts;
+  final ValueChanged<String> onOpenTag;
 
   @override
   Widget build(BuildContext context) {
@@ -575,35 +656,41 @@ class _TagPanel extends StatelessWidget {
                 runSpacing: 8,
                 children: [
                   for (final entry in entries)
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 10,
-                        vertical: 7,
-                      ),
-                      decoration: BoxDecoration(
-                        color: const Color(0x0FFFFFFF),
-                        borderRadius: BorderRadius.circular(14),
-                        border: Border.all(color: Colors.white10),
-                      ),
-                      child: Text.rich(
-                        TextSpan(
-                          children: [
-                            TextSpan(
-                              text: entry.key,
-                              style: const TextStyle(
-                                fontSize: 11,
-                                color: Colors.white70,
+                    InkWell(
+                      key: ValueKey<String>('project-tag-${entry.key}'),
+                      onTap: () => onOpenTag(entry.key),
+                      mouseCursor: SystemMouseCursors.click,
+                      borderRadius: BorderRadius.circular(14),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 7,
+                        ),
+                        decoration: BoxDecoration(
+                          color: const Color(0x0FFFFFFF),
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(color: Colors.white10),
+                        ),
+                        child: Text.rich(
+                          TextSpan(
+                            children: [
+                              TextSpan(
+                                text: entry.key,
+                                style: const TextStyle(
+                                  fontSize: 11,
+                                  color: Colors.white70,
+                                ),
                               ),
-                            ),
-                            TextSpan(
-                              text: '  ${entry.value}',
-                              style: const TextStyle(
-                                fontSize: 10,
-                                fontWeight: FontWeight.w700,
-                                color: _projectAccent,
+                              TextSpan(
+                                text: '  ${entry.value}',
+                                style: const TextStyle(
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w700,
+                                  color: _projectAccent,
+                                ),
                               ),
-                            ),
-                          ],
+                            ],
+                          ),
                         ),
                       ),
                     ),
@@ -618,38 +705,50 @@ class _BookmarkPanel extends StatelessWidget {
   const _BookmarkPanel({
     required this.bookmarkCount,
     required this.bookmarkedMediaCount,
+    required this.onOpen,
   });
 
   final int bookmarkCount;
   final int bookmarkedMediaCount;
+  final VoidCallback onOpen;
 
   @override
   Widget build(BuildContext context) {
     return _ProjectPanel(
       title: 'BOOKMARKS',
       icon: Icons.bookmark_border,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(18, 20, 18, 22),
-        child: Row(
-          children: [
-            Expanded(
-              child: _BookmarkMeasure(
-                value: bookmarkCount,
-                label: 'MOMENTS',
-              ),
+      child: Tooltip(
+        message: 'Open bookmarked media in Explorer',
+        child: InkWell(
+          key: const ValueKey<String>('project-bookmarks-open'),
+          onTap: bookmarkedMediaCount > 0 ? onOpen : null,
+          mouseCursor: bookmarkedMediaCount > 0
+              ? SystemMouseCursors.click
+              : SystemMouseCursors.basic,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(18, 20, 18, 22),
+            child: Row(
+              children: [
+                Expanded(
+                  child: _BookmarkMeasure(
+                    value: bookmarkCount,
+                    label: 'MOMENTS',
+                  ),
+                ),
+                Container(
+                  width: 1,
+                  height: 48,
+                  color: Colors.white10,
+                ),
+                Expanded(
+                  child: _BookmarkMeasure(
+                    value: bookmarkedMediaCount,
+                    label: 'MEDIA FILES',
+                  ),
+                ),
+              ],
             ),
-            Container(
-              width: 1,
-              height: 48,
-              color: Colors.white10,
-            ),
-            Expanded(
-              child: _BookmarkMeasure(
-                value: bookmarkedMediaCount,
-                label: 'MEDIA FILES',
-              ),
-            ),
-          ],
+          ),
         ),
       ),
     );
@@ -694,20 +793,23 @@ class _BookmarkMeasure extends StatelessWidget {
 
 class _OverviewCountRow extends StatelessWidget {
   const _OverviewCountRow({
+    super.key,
     required this.label,
     required this.count,
     this.leading,
     this.accent,
+    this.onTap,
   });
 
   final String label;
   final int count;
   final Widget? leading;
   final Color? accent;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
+    final content = Padding(
       padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
       child: Row(
         children: [
@@ -735,6 +837,17 @@ class _OverviewCountRow extends StatelessWidget {
           ),
         ],
       ),
+    );
+
+    if (onTap == null) {
+      return content;
+    }
+
+    return InkWell(
+      onTap: onTap,
+      mouseCursor: SystemMouseCursors.click,
+      hoverColor: const Color(0x09FFFFFF),
+      child: content,
     );
   }
 }

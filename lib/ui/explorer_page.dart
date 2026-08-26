@@ -43,7 +43,7 @@ const Map<String, String> _explorerColorLabelNames = <String, String>{
 
 enum _ExplorerHistoryMove { none, back, forward }
 
-enum _ExplorerSourceMode { directory, catalog }
+enum _ExplorerSourceMode { directory, catalog, project }
 
 enum _RatingFilterChoice {
   any,
@@ -105,6 +105,35 @@ extension on _RatingFilterChoice {
       };
 }
 
+class ExplorerProjectViewRequest {
+  const ExplorerProjectViewRequest({
+    required this.serial,
+    this.catalogId,
+    this.exactRating,
+    this.tag,
+    this.colorHex,
+    this.bookmarkedOnly = false,
+  });
+
+  final int serial;
+  final String? catalogId;
+  final int? exactRating;
+  final String? tag;
+  final String? colorHex;
+  final bool bookmarkedOnly;
+}
+
+_RatingFilterChoice _exactRatingFilterChoice(int? rating) {
+  return switch (rating) {
+    1 => _RatingFilterChoice.exact1,
+    2 => _RatingFilterChoice.exact2,
+    3 => _RatingFilterChoice.exact3,
+    4 => _RatingFilterChoice.exact4,
+    5 => _RatingFilterChoice.exact5,
+    _ => _RatingFilterChoice.any,
+  };
+}
+
 enum _ProjectMenuAction { create, rename, delete }
 
 enum _CatalogMenuAction { createChild, rename, delete }
@@ -134,6 +163,7 @@ class ExplorerPage extends StatefulWidget {
     required this.projectMediaMetadataService,
     required this.onActiveProjectChanged,
     this.playerSettings,
+    this.projectViewRequest,
     this.startupError,
     this.active = true,
   });
@@ -145,6 +175,7 @@ class ExplorerPage extends StatefulWidget {
   final ProjectCatalogService projectCatalogService;
   final ProjectMediaMetadataService projectMediaMetadataService;
   final PlayerSettingsService? playerSettings;
+  final ExplorerProjectViewRequest? projectViewRequest;
   final ValueChanged<String> onActiveProjectChanged;
   final bool active;
 
@@ -186,6 +217,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
   _RatingFilterChoice _ratingFilter = _RatingFilterChoice.any;
   String? _tagFilter;
   String? _colorFilter;
+  bool _projectBookmarkedOnly = false;
 
   bool _loading = false;
   String? _error;
@@ -214,6 +246,8 @@ class _ExplorerPageState extends State<ExplorerPage> {
     return switch (_sourceMode) {
       _ExplorerSourceMode.directory => _directoryPath != null,
       _ExplorerSourceMode.catalog => _selectedCatalogId != null,
+      _ExplorerSourceMode.project =>
+        _projectCatalogsLoaded && _annotationsLoaded,
     };
   }
 
@@ -235,6 +269,10 @@ class _ExplorerPageState extends State<ExplorerPage> {
       return breadcrumb.isEmpty ? 'Catalogs' : 'Catalogs / $breadcrumb';
     }
 
+    if (_sourceMode == _ExplorerSourceMode.project) {
+      return _projectBookmarkedOnly ? 'Project Bookmarks' : 'Project Media';
+    }
+
     final directoryPath = _directoryPath;
     final redleafLink = _activeRedleafLink;
     if (directoryPath != null && redleafLink != null) {
@@ -250,7 +288,9 @@ class _ExplorerPageState extends State<ExplorerPage> {
       _colorFilter != null;
 
   bool get _hasAnyFilter =>
-      _filterQuery.trim().isNotEmpty || _hasAnnotationFilter;
+      _filterQuery.trim().isNotEmpty ||
+      _hasAnnotationFilter ||
+      (_sourceMode == _ExplorerSourceMode.project && _projectBookmarkedOnly);
 
   List<String> get _availableTags {
     if (!_annotationsLoaded) {
@@ -287,6 +327,16 @@ class _ExplorerPageState extends State<ExplorerPage> {
       });
     } else if (!widget.active && oldWidget.active) {
       unawaited(_thumbnailService.pauseAndDrain());
+    }
+
+    final request = widget.projectViewRequest;
+    if (request != null &&
+        request.serial != oldWidget.projectViewRequest?.serial) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          unawaited(_applyProjectViewRequest(request));
+        }
+      });
     }
   }
 
@@ -450,6 +500,22 @@ class _ExplorerPageState extends State<ExplorerPage> {
           tag: _tagFilter,
           colorHex: _colorFilter,
         );
+      }).toList(growable: false);
+    }
+
+    if (_annotationsLoaded &&
+        _sourceMode == _ExplorerSourceMode.project &&
+        _projectBookmarkedOnly) {
+      visible = visible.where((item) {
+        if (item.isDirectory) {
+          return false;
+        }
+        return widget.projectMediaMetadataService
+            .bookmarkFramesFor(
+              _projectCatalogService.activeProjectId,
+              item.path,
+            )
+            .isNotEmpty;
       }).toList(growable: false);
     }
 
@@ -668,6 +734,16 @@ class _ExplorerPageState extends State<ExplorerPage> {
 
   void _clearAllFilters({bool returnFocus = false}) {
     _filterController.clear();
+
+    if (_sourceMode == _ExplorerSourceMode.project &&
+        _projectBookmarkedOnly) {
+      unawaited(_loadProjectMedia());
+      if (returnFocus) {
+        _focusNode.requestFocus();
+      }
+      return;
+    }
+
     setState(() {
       _filterQuery = '';
       _ratingFilter = _RatingFilterChoice.any;
@@ -867,7 +943,115 @@ class _ExplorerPageState extends State<ExplorerPage> {
     }
   }
 
+  Future<void> _applyProjectViewRequest(
+    ExplorerProjectViewRequest request,
+  ) async {
+    if (!_projectCatalogsLoaded || !_annotationsLoaded) {
+      return;
+    }
+
+    final catalogId = request.catalogId;
+    if (catalogId != null) {
+      _filterController.clear();
+      setState(() {
+        _filterQuery = '';
+        _ratingFilter = _RatingFilterChoice.any;
+        _tagFilter = null;
+        _colorFilter = null;
+      });
+      await _loadCatalog(catalogId);
+      return;
+    }
+
+    await _loadProjectMedia(
+      exactRating: request.exactRating,
+      tag: request.tag,
+      colorHex: request.colorHex,
+      bookmarkedOnly: request.bookmarkedOnly,
+    );
+  }
+
+  Future<void> _loadProjectMedia({
+    int? exactRating,
+    _RatingFilterChoice? ratingFilter,
+    String? tag,
+    String? colorHex,
+    bool bookmarkedOnly = false,
+  }) async {
+    if (!_projectCatalogsLoaded || !_annotationsLoaded || _loading) {
+      return;
+    }
+
+    final serial = ++_scanSerial;
+    final projectId = _projectCatalogService.activeProjectId;
+    final normalizedTag = tag?.trim();
+    final normalizedColor =
+        ProjectMediaMetadataService.normalizeColorHex(colorHex);
+
+    setState(() {
+      _loading = true;
+      _error = null;
+      _selectedPath = null;
+    });
+
+    try {
+      final paths = bookmarkedOnly
+          ? widget.projectMediaMetadataService
+              .bookmarkedMediaPathsForProject(projectId)
+          : (<String>{
+              ...widget.projectMediaMetadataService
+                  .mediaPathsForProject(projectId),
+              ..._projectCatalogService.mediaPathsForProject(projectId),
+            }.toList(growable: false)
+              ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase())));
+
+      final resolved = await Future.wait(paths.map(_catalogItemForPath));
+      if (!mounted || serial != _scanSerial) {
+        return;
+      }
+
+      final items = resolved.whereType<ExplorerItem>().toList(growable: false);
+      _filterController.clear();
+
+      setState(() {
+        _sourceMode = _ExplorerSourceMode.project;
+        _directoryPath = null;
+        _activeRedleafLink = null;
+        _selectedCatalogId = null;
+        _items = items;
+        _filterQuery = '';
+        _ratingFilter =
+            ratingFilter ?? _exactRatingFilterChoice(exactRating);
+        _tagFilter = normalizedTag == null || normalizedTag.isEmpty
+            ? null
+            : normalizedTag;
+        _colorFilter = normalizedColor;
+        _projectBookmarkedOnly = bookmarkedOnly;
+        _refreshVisibleItems();
+        _loading = false;
+      });
+    } catch (error) {
+      if (!mounted || serial != _scanSerial) {
+        return;
+      }
+      setState(() {
+        _loading = false;
+        _error = error.toString();
+      });
+    }
+  }
+
   Future<void> _reloadCurrentCatalog() async {
+    if (_sourceMode == _ExplorerSourceMode.project) {
+      await _loadProjectMedia(
+        ratingFilter: _ratingFilter,
+        tag: _tagFilter,
+        colorHex: _colorFilter,
+        bookmarkedOnly: _projectBookmarkedOnly,
+      );
+      return;
+    }
+
     final catalogId = _selectedCatalogId;
     if (_sourceMode != _ExplorerSourceMode.catalog || catalogId == null) {
       if (mounted) {
@@ -1152,6 +1336,8 @@ class _ExplorerPageState extends State<ExplorerPage> {
         final favorites =
             _projectCatalogService.favoritesCatalogForProject(projectId);
         await _loadCatalog(favorites.id);
+      } else if (_sourceMode == _ExplorerSourceMode.project) {
+        await _loadProjectMedia();
       } else {
         setState(() {
           _selectedCatalogId = null;
@@ -1260,6 +1446,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
 
       widget.onActiveProjectChanged(_projectCatalogService.activeProjectId);
       setState(() {
+        _ratingFilter = _RatingFilterChoice.any;
         _tagFilter = null;
         _colorFilter = null;
         _selectedPath = null;
@@ -1270,6 +1457,8 @@ class _ExplorerPageState extends State<ExplorerPage> {
         final favorites =
             _projectCatalogService.favoritesCatalogForProject();
         await _loadCatalog(favorites.id);
+      } else if (_sourceMode == _ExplorerSourceMode.project) {
+        await _loadProjectMedia();
       } else {
         setState(() {
           _selectedCatalogId = null;
@@ -1400,6 +1589,8 @@ class _ExplorerPageState extends State<ExplorerPage> {
               _projectCatalogService.favoritesCatalogForProject();
           await _loadCatalog(favorites.id);
         }
+      } else if (_sourceMode == _ExplorerSourceMode.project) {
+        await _reloadCurrentCatalog();
       } else {
         setState(() {});
       }
@@ -2287,7 +2478,8 @@ class _ExplorerPageState extends State<ExplorerPage> {
     // Catalog view at render time so rating/tag edits cannot leave the
     // cached visible list stale. Directory browsing keeps the normal cached
     // refresh path.
-    if (_sourceMode == _ExplorerSourceMode.catalog &&
+    if ((_sourceMode == _ExplorerSourceMode.catalog ||
+            _sourceMode == _ExplorerSourceMode.project) &&
         _projectCatalogsLoaded &&
         _annotationsLoaded) {
       _refreshVisibleItems();
@@ -2696,6 +2888,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
   Widget _buildEmptyGridState() {
     final filtered = _hasAnyFilter && _items.isNotEmpty;
     final catalogMode = _sourceMode == _ExplorerSourceMode.catalog;
+    final projectMode = _sourceMode == _ExplorerSourceMode.project;
 
     return Center(
       child: Column(
@@ -2706,7 +2899,9 @@ class _ExplorerPageState extends State<ExplorerPage> {
                 ? Icons.search_off
                 : catalogMode
                     ? Icons.folder_open_outlined
-                    : Icons.video_library_outlined,
+                    : projectMode
+                        ? Icons.dashboard_outlined
+                        : Icons.video_library_outlined,
             size: 64,
             color: Colors.white24,
           ),
@@ -2716,7 +2911,11 @@ class _ExplorerPageState extends State<ExplorerPage> {
                 ? 'No items match this filter'
                 : catalogMode
                     ? 'This Catalog is empty'
-                    : 'No supported media in this folder',
+                    : projectMode
+                        ? (_projectBookmarkedOnly
+                            ? 'No bookmarked media in this Project'
+                            : 'No Project media has been organized yet')
+                        : 'No supported media in this folder',
             style: const TextStyle(color: Colors.white54),
           ),
           if (catalogMode && !filtered) ...[
@@ -2724,6 +2923,15 @@ class _ExplorerPageState extends State<ExplorerPage> {
             const Text(
               'Right-click media in a folder to assign it here.',
               style: TextStyle(fontSize: 11, color: Colors.white30),
+            ),
+          ],
+          if (projectMode && !filtered) ...[
+            const SizedBox(height: 8),
+            Text(
+              _projectBookmarkedOnly
+                  ? 'Add bookmarks in Player to keep exact moments from a media file.'
+                  : 'Rated, tagged, labeled, bookmarked, or Catalog media appears here.',
+              style: const TextStyle(fontSize: 11, color: Colors.white30),
             ),
           ],
           if (filtered) ...[
@@ -2831,7 +3039,8 @@ class _ExplorerPageState extends State<ExplorerPage> {
             style:
                 const TextStyle(fontSize: 11, color: Colors.white54),
           ),
-          if (_sourceMode == _ExplorerSourceMode.catalog &&
+          if ((_sourceMode == _ExplorerSourceMode.catalog ||
+                  _sourceMode == _ExplorerSourceMode.project) &&
               _projectCatalogsLoaded) ...[
             const SizedBox(width: 12),
             Text(

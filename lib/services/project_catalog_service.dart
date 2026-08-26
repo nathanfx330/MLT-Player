@@ -363,6 +363,21 @@ class ProjectCatalogService {
     );
   }
 
+  List<String> mediaPathsForProject([String? projectId]) {
+    _ensureInitialized();
+    final resolvedProjectId = projectId ?? activeProjectId;
+    _requireProject(resolvedProjectId);
+
+    final paths = _memberships.values
+        .where((membership) => membership.projectId == resolvedProjectId)
+        .map((membership) => membership.mediaPath)
+        .toSet()
+        .toList(growable: false)
+      ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+
+    return List<String>.unmodifiable(paths);
+  }
+
   int mediaCountForCatalog(String catalogId) {
     return mediaPathsForCatalog(catalogId).length;
   }

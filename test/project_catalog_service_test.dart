@@ -79,6 +79,7 @@ void main() {
     final memberships = service.catalogIdsForMedia(mediaPath);
     expect(memberships, containsAll(<String>[interviews.id, bRoll.id]));
     expect(memberships, hasLength(2));
+    expect(service.mediaPathsForProject(), <String>[mediaPath]);
   });
 
   test('Favorites is a project-scoped catalog membership', () async {

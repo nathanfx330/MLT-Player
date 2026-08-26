@@ -243,6 +243,29 @@ class ProjectMediaMetadataService {
     return addBookmark(projectId, mediaPath, sourceFrame);
   }
 
+  List<String> mediaPathsForProject(String projectId) {
+    _requireProjectId(projectId);
+
+    final paths =
+        _projects[projectId]?.keys.toList(growable: false) ?? <String>[];
+    paths.sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+
+    return List<String>.unmodifiable(paths);
+  }
+
+  List<String> bookmarkedMediaPathsForProject(String projectId) {
+    _requireProjectId(projectId);
+
+    final paths = (_projects[projectId]?.entries ??
+            const <MapEntry<String, ProjectMediaMetadata>>[])
+        .where((entry) => entry.value.bookmarkFrames.isNotEmpty)
+        .map((entry) => entry.key)
+        .toList(growable: false);
+    paths.sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+
+    return List<String>.unmodifiable(paths);
+  }
+
   int ratedMediaCount(String projectId) =>
       _recordsFor(projectId).where((item) => item.rating > 0).length;
 

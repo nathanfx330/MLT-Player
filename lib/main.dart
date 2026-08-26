@@ -146,6 +146,8 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
   int _playerOpenRequest = 0;
   bool _showPlayer = false;
   _WorkspaceSection _workspaceSection = _WorkspaceSection.explorer;
+  ExplorerProjectViewRequest? _explorerProjectViewRequest;
+  int _explorerProjectViewSerial = 0;
 
   @override
   void initState() {
@@ -183,6 +185,28 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
     setState(() => _workspaceSection = section);
   }
 
+  void _openExplorerProjectView({
+    String? catalogId,
+    int? exactRating,
+    String? tag,
+    String? colorHex,
+    bool bookmarkedOnly = false,
+  }) {
+    final serial = _explorerProjectViewSerial + 1;
+    setState(() {
+      _explorerProjectViewSerial = serial;
+      _explorerProjectViewRequest = ExplorerProjectViewRequest(
+        serial: serial,
+        catalogId: catalogId,
+        exactRating: exactRating,
+        tag: tag,
+        colorHex: colorHex,
+        bookmarkedOnly: bookmarkedOnly,
+      );
+      _workspaceSection = _WorkspaceSection.explorer;
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final workspaceIndex =
@@ -210,6 +234,7 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
                     projectMediaMetadataService:
                         _projectMediaMetadataService,
                     playerSettings: widget.playerSettings,
+                    projectViewRequest: _explorerProjectViewRequest,
                     onActiveProjectChanged: _setActiveProject,
                     active: !_showPlayer &&
                         _workspaceSection == _WorkspaceSection.explorer,
@@ -219,6 +244,16 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
                     projectMediaMetadataService:
                         _projectMediaMetadataService,
                     activeProjectId: _activeProjectId,
+                    onOpenCatalog: (catalogId) =>
+                        _openExplorerProjectView(catalogId: catalogId),
+                    onOpenRating: (rating) =>
+                        _openExplorerProjectView(exactRating: rating),
+                    onOpenTag: (tag) =>
+                        _openExplorerProjectView(tag: tag),
+                    onOpenColor: (colorHex) =>
+                        _openExplorerProjectView(colorHex: colorHex),
+                    onOpenBookmarks: () =>
+                        _openExplorerProjectView(bookmarkedOnly: true),
                   ),
                 ],
               ),

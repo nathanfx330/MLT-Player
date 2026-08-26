@@ -394,15 +394,24 @@ void main() {
       metadata.addBookmark(defaultProjectId, '/tmp/a.mov', 10);
       metadata.addBookmark(defaultProjectId, '/tmp/a.mov', 20);
       metadata.addBookmark(defaultProjectId, '/tmp/b.mov', 30);
+      metadata.setRating(defaultProjectId, '/tmp/c.mov', 3);
 
-      expect(metadata.ratedMediaCount(defaultProjectId), 2);
+      expect(metadata.ratedMediaCount(defaultProjectId), 3);
       expect(metadata.taggedMediaCount(defaultProjectId), 2);
       expect(metadata.colorLabeledMediaCount(defaultProjectId), 2);
       expect(metadata.bookmarkCount(defaultProjectId), 3);
       expect(metadata.bookmarkedMediaCount(defaultProjectId), 2);
       expect(
+        metadata.mediaPathsForProject(defaultProjectId),
+        <String>['/tmp/a.mov', '/tmp/b.mov', '/tmp/c.mov'],
+      );
+      expect(
+        metadata.bookmarkedMediaPathsForProject(defaultProjectId),
+        <String>['/tmp/a.mov', '/tmp/b.mov'],
+      );
+      expect(
         metadata.ratingCountsForProject(defaultProjectId),
-        <int, int>{1: 0, 2: 0, 3: 0, 4: 1, 5: 1},
+        <int, int>{1: 0, 2: 0, 3: 1, 4: 1, 5: 1},
       );
       expect(
         metadata.tagCountsForProject(defaultProjectId),

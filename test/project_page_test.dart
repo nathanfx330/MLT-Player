@@ -38,12 +38,23 @@ void main() {
     metadata.setColorHex(projectId, '/tmp/a.mov', '#64B5F6');
     metadata.addBookmark(projectId, '/tmp/a.mov', 24);
 
+    String? openedCatalogId;
+    int? openedRating;
+    String? openedTag;
+    String? openedColor;
+    var openedBookmarks = false;
+
     await tester.pumpWidget(
       MaterialApp(
         home: ProjectPage(
           projectCatalogService: catalogs,
           projectMediaMetadataService: metadata,
           activeProjectId: projectId,
+          onOpenCatalog: (value) => openedCatalogId = value,
+          onOpenRating: (value) => openedRating = value,
+          onOpenTag: (value) => openedTag = value,
+          onOpenColor: (value) => openedColor = value,
+          onOpenBookmarks: () => openedBookmarks = true,
         ),
       ),
     );
@@ -61,5 +72,43 @@ void main() {
     expect(find.text('BOOKMARKS'), findsNWidgets(2));
     expect(find.text('Blue'), findsOneWidget);
     expect(find.textContaining('Select', findRichText: true), findsOneWidget);
+
+    await tester.ensureVisible(
+      find.byKey(ValueKey<String>('project-catalog-${archival.id}')),
+    );
+    await tester.tap(
+      find.byKey(ValueKey<String>('project-catalog-${archival.id}')),
+    );
+    expect(openedCatalogId, archival.id);
+
+    await tester.ensureVisible(
+      find.byKey(const ValueKey<String>('project-rating-5')),
+    );
+    await tester.tap(find.byKey(const ValueKey<String>('project-rating-5')));
+    expect(openedRating, 5);
+
+    await tester.ensureVisible(
+      find.byKey(const ValueKey<String>('project-color-#64B5F6')),
+    );
+    await tester.tap(
+      find.byKey(const ValueKey<String>('project-color-#64B5F6')),
+    );
+    expect(openedColor, '#64B5F6');
+
+    await tester.ensureVisible(
+      find.byKey(const ValueKey<String>('project-tag-Select')),
+    );
+    await tester.tap(
+      find.byKey(const ValueKey<String>('project-tag-Select')),
+    );
+    expect(openedTag, 'Select');
+
+    await tester.ensureVisible(
+      find.byKey(const ValueKey<String>('project-bookmarks-open')),
+    );
+    await tester.tap(
+      find.byKey(const ValueKey<String>('project-bookmarks-open')),
+    );
+    expect(openedBookmarks, isTrue);
   });
 }
