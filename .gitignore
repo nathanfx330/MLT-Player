@@ -31,7 +31,7 @@ migrate_working_dir/
 .pub-cache/
 .pub/
 /build/
-/coverage/
+coverage/
 
 # Symbolication related
 app.*.symbols
@@ -50,3 +50,4 @@ mlt_player.zip
 linux/flutter/ephemeral/
 native/*.so
 native/mlt_smoke
+lib/libapp.so
