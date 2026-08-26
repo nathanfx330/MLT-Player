@@ -1145,8 +1145,8 @@ class _PlayerPageState extends State<PlayerPage>
 
     if (opened &&
         _engine.media != null &&
-        _engine.media!.hasVideo &&
-        !_engine.media!.isStill) {
+        !_engine.media!.isStill &&
+        (_engine.media!.hasVideo || _engine.media!.hasAudio)) {
       unawaited(_loadSidecarSubtitles(path, subtitleSerial));
     }
 
@@ -1964,8 +1964,8 @@ class _PlayerPageState extends State<PlayerPage>
                   track: _subtitleTrack,
                   positionMs: _engine.positionMs,
                   enabled: media != null &&
-                      media.hasVideo &&
                       !media.isStill &&
+                      (media.hasVideo || media.hasAudio) &&
                       _viewMode == PlayerViewMode.video,
                   controlsVisible: _overlayVisible,
                   onSeek: _engine.seekTo,

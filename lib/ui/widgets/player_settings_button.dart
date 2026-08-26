@@ -5,17 +5,20 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../../services/player_settings_service.dart';
+import '../../services/redleaf_connection_service.dart';
 
 class MltPlayerSettingsButton extends StatelessWidget {
   const MltPlayerSettingsButton({
     super.key,
     required this.settings,
     required this.mltVersion,
+    this.redleaf,
     this.onClosed,
   });
 
   final PlayerSettingsService settings;
   final String mltVersion;
+  final RedleafConnectionService? redleaf;
   final VoidCallback? onClosed;
 
   @override
@@ -27,11 +30,18 @@ class MltPlayerSettingsButton extends StatelessWidget {
       padding: const EdgeInsets.all(6),
       constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
       onPressed: () async {
+        final redleafService = redleaf ?? RedleafConnectionService.instance;
+        await redleafService.load();
+        if (!context.mounted) {
+          return;
+        }
+
         await showDialog<void>(
           context: context,
           builder: (context) => _MltPlayerSettingsDialog(
             settings: settings,
             mltVersion: mltVersion,
+            redleaf: redleafService,
           ),
         );
         onClosed?.call();
@@ -41,15 +51,23 @@ class MltPlayerSettingsButton extends StatelessWidget {
   }
 }
 
-class _MltPlayerSettingsDialog extends StatelessWidget {
+class _MltPlayerSettingsDialog extends StatefulWidget {
   const _MltPlayerSettingsDialog({
     required this.settings,
     required this.mltVersion,
+    required this.redleaf,
   });
 
   final PlayerSettingsService settings;
   final String mltVersion;
+  final RedleafConnectionService redleaf;
 
+  @override
+  State<_MltPlayerSettingsDialog> createState() =>
+      _MltPlayerSettingsDialogState();
+}
+
+class _MltPlayerSettingsDialogState extends State<_MltPlayerSettingsDialog> {
   static const List<_AccentChoice> _choices = <_AccentChoice>[
     _AccentChoice('Amber', 0xFFE8A33D),
     _AccentChoice('Orange', 0xFFFF8A50),
@@ -60,6 +78,52 @@ class _MltPlayerSettingsDialog extends StatelessWidget {
     _AccentChoice('Cyan', 0xFF4DD0E1),
     _AccentChoice('Green', 0xFF66BB6A),
   ];
+
+  late final TextEditingController _serverController;
+  late final TextEditingController _usernameController;
+  late final TextEditingController _passwordController;
+  bool _obscurePassword = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _serverController = TextEditingController(text: widget.redleaf.serverUrl);
+    _usernameController = TextEditingController(text: widget.redleaf.username);
+    _passwordController = TextEditingController();
+    widget.redleaf.addListener(_onRedleafChanged);
+  }
+
+  @override
+  void dispose() {
+    widget.redleaf.removeListener(_onRedleafChanged);
+    _serverController.dispose();
+    _usernameController.dispose();
+    _passwordController.dispose();
+    super.dispose();
+  }
+
+  void _onRedleafChanged() {
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  Future<void> _signIn() async {
+    final success = await widget.redleaf.signIn(
+      serverUrl: _serverController.text,
+      username: _usernameController.text,
+      password: _passwordController.text,
+    );
+
+    if (success && mounted) {
+      _passwordController.clear();
+    }
+  }
+
+  void _disconnect() {
+    widget.redleaf.disconnect();
+    _passwordController.clear();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -72,16 +136,16 @@ class _MltPlayerSettingsDialog extends StatelessWidget {
         ],
       ),
       content: SizedBox(
-        width: 520,
+        width: 570,
         child: SingleChildScrollView(
           child: AnimatedBuilder(
-            animation: settings,
+            animation: widget.settings,
             builder: (context, _) {
               return Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const _SectionLabel('PLAYER COLOR'),
+                  const _SectionLabel('PLAYER'),
                   const SizedBox(height: 5),
                   const Text(
                     'Choose the accent used for active Player controls, '
@@ -100,12 +164,12 @@ class _MltPlayerSettingsDialog extends StatelessWidget {
                       for (final choice in _choices)
                         _ColorChoice(
                           choice: choice,
-                          selected: settings.accentArgb == choice.argb,
+                          selected: widget.settings.accentArgb == choice.argb,
                           onPressed: () {
                             unawaited(
-                              settings.setAccentArgb(choice.argb).catchError(
-                                (_) {},
-                              ),
+                              widget.settings.setAccentArgb(choice.argb).catchError(
+                                    (_) {},
+                                  ),
                             );
                           },
                         ),
@@ -113,12 +177,12 @@ class _MltPlayerSettingsDialog extends StatelessWidget {
                   ),
                   const SizedBox(height: 10),
                   TextButton(
-                    onPressed: settings.accentArgb ==
+                    onPressed: widget.settings.accentArgb ==
                             PlayerSettingsService.defaultAccentArgb
                         ? null
                         : () {
                             unawaited(
-                              settings.resetAccent().catchError((_) {}),
+                              widget.settings.resetAccent().catchError((_) {}),
                             );
                           },
                     style: TextButton.styleFrom(
@@ -127,9 +191,42 @@ class _MltPlayerSettingsDialog extends StatelessWidget {
                     ),
                     child: const Text('RESET TO AMBER'),
                   ),
+                  const _SettingsDivider(),
+                  const _SectionLabel('REDLEAF'),
+                  const SizedBox(height: 6),
+                  const Text(
+                    'Redleaf is a document search and research engine. MLT Player '
+                    'connects to Redleaf so indexed SRT transcripts with linked '
+                    'audio or video can be handed off for fast scrubbing, clipping, '
+                    'composition, watermarking, and export.',
+                    style: TextStyle(
+                      fontSize: 12,
+                      height: 1.45,
+                      color: Colors.white60,
+                    ),
+                  ),
                   const SizedBox(height: 14),
-                  const Divider(color: Colors.white12),
-                  const SizedBox(height: 14),
+                  _buildRedleafForm(context),
+                  const _SettingsDivider(),
+                  const _SectionLabel('MEDIA ENGINE'),
+                  const SizedBox(height: 8),
+                  _InfoRow(
+                    label: 'MLT Runtime',
+                    value: widget.mltVersion.trim().isEmpty
+                        ? 'Unknown'
+                        : widget.mltVersion.trim(),
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'MLT is the media engine used for playback, frame-accurate '
+                    'navigation, thumbnails, composition, and export.',
+                    style: TextStyle(
+                      fontSize: 12,
+                      height: 1.45,
+                      color: Colors.white54,
+                    ),
+                  ),
+                  const _SettingsDivider(),
                   const _SectionLabel('ABOUT'),
                   const SizedBox(height: 8),
                   Text(
@@ -151,34 +248,16 @@ class _MltPlayerSettingsDialog extends StatelessWidget {
                   ),
                   const SizedBox(height: 14),
                   const Text(
-                    'MLT Player is a media player and media manager for Linux, '
-                    'built to cover many of the tasks an NLE would normally be '
-                    'used for without requiring a full editing application: '
-                    'sorting, rating, trimming, bookmarking, and exporting.',
+                    'A filesystem-first media browser, project organizer, and '
+                    'precision player for Linux. The filesystem owns the media. '
+                    'Projects organize it. MLT plays and transforms it.',
                     style: TextStyle(
                       fontSize: 13,
                       height: 1.5,
                       fontWeight: FontWeight.w500,
                     ),
                   ),
-                  const SizedBox(height: 12),
-                  Text(
-                    'Flutter owns the application. MLT owns the media.',
-                    style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                      color: Theme.of(context).colorScheme.primary,
-                    ),
-                  ),
                   const SizedBox(height: 10),
-                  Text(
-                    'Runtime: MLT $mltVersion',
-                    style: const TextStyle(
-                      fontSize: 11,
-                      color: Colors.white54,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
                   const SelectableText(
                     'github.com/nathanfx330/MLT-Player',
                     style: TextStyle(
@@ -196,6 +275,272 @@ class _MltPlayerSettingsDialog extends StatelessWidget {
         TextButton(
           onPressed: () => Navigator.of(context).pop(),
           child: const Text('CLOSE'),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildRedleafForm(BuildContext context) {
+    final redleaf = widget.redleaf;
+    final signingIn = redleaf.status == RedleafConnectionStatus.signingIn;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        TextField(
+          controller: _serverController,
+          enabled: !signingIn,
+          keyboardType: TextInputType.url,
+          textInputAction: TextInputAction.next,
+          decoration: const InputDecoration(
+            isDense: true,
+            labelText: 'Server',
+            hintText: 'http://127.0.0.1:5000',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        const SizedBox(height: 10),
+        TextField(
+          controller: _usernameController,
+          enabled: !signingIn,
+          textInputAction: TextInputAction.next,
+          decoration: const InputDecoration(
+            isDense: true,
+            labelText: 'Username',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        const SizedBox(height: 10),
+        TextField(
+          controller: _passwordController,
+          enabled: !signingIn,
+          obscureText: _obscurePassword,
+          textInputAction: TextInputAction.done,
+          onSubmitted: (_) {
+            if (!signingIn) {
+              unawaited(_signIn());
+            }
+          },
+          decoration: InputDecoration(
+            isDense: true,
+            labelText: 'Password',
+            border: const OutlineInputBorder(),
+            suffixIcon: IconButton(
+              tooltip: _obscurePassword ? 'Show password' : 'Hide password',
+              onPressed: signingIn
+                  ? null
+                  : () => setState(
+                        () => _obscurePassword = !_obscurePassword,
+                      ),
+              icon: Icon(
+                _obscurePassword
+                    ? Icons.visibility_outlined
+                    : Icons.visibility_off_outlined,
+                size: 18,
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: 6),
+        const Text(
+          'The server address and username are remembered. Your password is '
+          'used to create the Redleaf session and is not saved by MLT Player.',
+          style: TextStyle(
+            fontSize: 10.5,
+            height: 1.35,
+            color: Colors.white38,
+          ),
+        ),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            FilledButton.icon(
+              onPressed: signingIn ? null : _signIn,
+              icon: signingIn
+                  ? const SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.login, size: 17),
+              label: Text(signingIn ? 'SIGNING IN…' : 'SIGN IN'),
+            ),
+            if (redleaf.isConnected) ...[
+              const SizedBox(width: 8),
+              TextButton(
+                onPressed: _disconnect,
+                child: const Text('DISCONNECT'),
+              ),
+            ],
+          ],
+        ),
+        const SizedBox(height: 10),
+        _RedleafStatusBlock(redleaf: redleaf),
+      ],
+    );
+  }
+}
+
+class _RedleafStatusBlock extends StatelessWidget {
+  const _RedleafStatusBlock({required this.redleaf});
+
+  final RedleafConnectionService redleaf;
+
+  @override
+  Widget build(BuildContext context) {
+    final (icon, color, title) = switch (redleaf.status) {
+      RedleafConnectionStatus.connected => (
+          Icons.check_circle,
+          Colors.greenAccent,
+          'Connected to Redleaf',
+        ),
+      RedleafConnectionStatus.signingIn => (
+          Icons.sync,
+          Theme.of(context).colorScheme.primary,
+          'Signing in to Redleaf…',
+        ),
+      RedleafConnectionStatus.error => (
+          Icons.error_outline,
+          Colors.redAccent,
+          'Redleaf connection failed',
+        ),
+      RedleafConnectionStatus.disconnected => (
+          Icons.radio_button_unchecked,
+          Colors.white38,
+          'Not connected to Redleaf',
+        ),
+    };
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(11),
+      decoration: BoxDecoration(
+        color: const Color(0x0CFFFFFF),
+        borderRadius: BorderRadius.circular(7),
+        border: Border.all(color: Colors.white12),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 17, color: color),
+          const SizedBox(width: 9),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: color,
+                  ),
+                ),
+                if (redleaf.isConnected) ...[
+                  const SizedBox(height: 5),
+                  Text(
+                    'Server: ${redleaf.serverUrl}',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      color: Colors.white60,
+                    ),
+                  ),
+                  Text(
+                    'User: ${redleaf.username}',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      color: Colors.white60,
+                    ),
+                  ),
+                  if (redleaf.instanceId.isNotEmpty)
+                    Text(
+                      'Instance: ${_shortInstanceId(redleaf.instanceId)}',
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: Colors.white60,
+                      ),
+                    ),
+                  if (redleaf.projectName.isNotEmpty)
+                    Text(
+                      'Project: ${redleaf.projectName}',
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: Colors.white60,
+                      ),
+                    ),
+                ],
+                if (redleaf.status == RedleafConnectionStatus.error &&
+                    redleaf.lastError != null) ...[
+                  const SizedBox(height: 5),
+                  Text(
+                    redleaf.lastError!,
+                    style: const TextStyle(
+                      fontSize: 11,
+                      height: 1.35,
+                      color: Colors.white60,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  static String _shortInstanceId(String value) {
+    final trimmed = value.trim();
+    if (trimmed.length <= 12) {
+      return trimmed;
+    }
+    return '${trimmed.substring(0, 12)}…';
+  }
+}
+
+class _SettingsDivider extends StatelessWidget {
+  const _SettingsDivider();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Padding(
+      padding: EdgeInsets.symmetric(vertical: 14),
+      child: Divider(height: 1, color: Colors.white12),
+    );
+  }
+}
+
+class _InfoRow extends StatelessWidget {
+  const _InfoRow({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 130,
+          child: Text(
+            label,
+            style: const TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              color: Colors.white54,
+            ),
+          ),
+        ),
+        Expanded(
+          child: SelectableText(
+            value,
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+              color: Colors.white70,
+            ),
+          ),
         ),
       ],
     );
