@@ -18,7 +18,9 @@ import '../services/explorer_sort_filter_service.dart';
 import '../services/explorer_view_preferences_service.dart';
 import '../services/project_catalog_service.dart';
 import '../services/project_media_metadata_service.dart';
+import '../services/player_settings_service.dart';
 import '../services/redleaf_link_service.dart';
+import 'widgets/player_settings_button.dart';
 import '../services/thumbnail_service.dart';
 
 const List<String> _explorerColorLabelPalette = <String>[
@@ -42,6 +44,66 @@ const Map<String, String> _explorerColorLabelNames = <String, String>{
 enum _ExplorerHistoryMove { none, back, forward }
 
 enum _ExplorerSourceMode { directory, catalog }
+
+enum _RatingFilterChoice {
+  any,
+  exact1,
+  exact2,
+  exact3,
+  exact4,
+  exact5,
+  atLeast1,
+  atLeast2,
+  atLeast3,
+  atLeast4,
+}
+
+extension on _RatingFilterChoice {
+  int? get exactRating => switch (this) {
+        _RatingFilterChoice.exact1 => 1,
+        _RatingFilterChoice.exact2 => 2,
+        _RatingFilterChoice.exact3 => 3,
+        _RatingFilterChoice.exact4 => 4,
+        _RatingFilterChoice.exact5 => 5,
+        _ => null,
+      };
+
+  int get minimumRating => switch (this) {
+        _RatingFilterChoice.atLeast1 => 1,
+        _RatingFilterChoice.atLeast2 => 2,
+        _RatingFilterChoice.atLeast3 => 3,
+        _RatingFilterChoice.atLeast4 => 4,
+        _ => 0,
+      };
+
+  bool get isActive => this != _RatingFilterChoice.any;
+
+  String get menuLabel => switch (this) {
+        _RatingFilterChoice.any => 'Any rating',
+        _RatingFilterChoice.exact1 => 'Exactly 1★',
+        _RatingFilterChoice.exact2 => 'Exactly 2★',
+        _RatingFilterChoice.exact3 => 'Exactly 3★',
+        _RatingFilterChoice.exact4 => 'Exactly 4★',
+        _RatingFilterChoice.exact5 => 'Exactly 5★',
+        _RatingFilterChoice.atLeast1 => '1★ or better',
+        _RatingFilterChoice.atLeast2 => '2★ or better',
+        _RatingFilterChoice.atLeast3 => '3★ or better',
+        _RatingFilterChoice.atLeast4 => '4★ or better',
+      };
+
+  String get compactLabel => switch (this) {
+        _RatingFilterChoice.any => 'Any rating',
+        _RatingFilterChoice.exact1 => '1★',
+        _RatingFilterChoice.exact2 => '2★',
+        _RatingFilterChoice.exact3 => '3★',
+        _RatingFilterChoice.exact4 => '4★',
+        _RatingFilterChoice.exact5 => '5★',
+        _RatingFilterChoice.atLeast1 => '1★+',
+        _RatingFilterChoice.atLeast2 => '2★+',
+        _RatingFilterChoice.atLeast3 => '3★+',
+        _RatingFilterChoice.atLeast4 => '4★+',
+      };
+}
 
 enum _ProjectMenuAction { create, rename, delete }
 
@@ -68,8 +130,10 @@ class ExplorerPage extends StatefulWidget {
     required this.initialized,
     required this.version,
     required this.onOpenMedia,
+    required this.projectCatalogService,
     required this.projectMediaMetadataService,
     required this.onActiveProjectChanged,
+    this.playerSettings,
     this.startupError,
     this.active = true,
   });
@@ -78,7 +142,9 @@ class ExplorerPage extends StatefulWidget {
   final String version;
   final String? startupError;
   final ValueChanged<String> onOpenMedia;
+  final ProjectCatalogService projectCatalogService;
   final ProjectMediaMetadataService projectMediaMetadataService;
+  final PlayerSettingsService? playerSettings;
   final ValueChanged<String> onActiveProjectChanged;
   final bool active;
 
@@ -95,9 +161,11 @@ class _ExplorerPageState extends State<ExplorerPage> {
       ExplorerNavigationService();
   final ExplorerViewPreferencesService _viewPreferencesService =
       ExplorerViewPreferencesService();
-  final ProjectCatalogService _projectCatalogService = ProjectCatalogService();
   final RedleafLinkService _redleafLinkService = RedleafLinkService();
   final ThumbnailService _thumbnailService = ThumbnailService();
+
+  ProjectCatalogService get _projectCatalogService =>
+      widget.projectCatalogService;
 
   final FocusNode _focusNode = FocusNode(debugLabel: 'mlt-explorer');
   final FocusNode _filterFocusNode =
@@ -115,7 +183,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
   String? _selectedPath;
 
   String _filterQuery = '';
-  int _minimumRatingFilter = 0;
+  _RatingFilterChoice _ratingFilter = _RatingFilterChoice.any;
   String? _tagFilter;
   String? _colorFilter;
 
@@ -177,7 +245,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
   }
 
   bool get _hasAnnotationFilter =>
-      _minimumRatingFilter > 0 ||
+      _ratingFilter.isActive ||
       _tagFilter != null ||
       _colorFilter != null;
 
@@ -377,7 +445,8 @@ class _ExplorerPageState extends State<ExplorerPage> {
         return widget.projectMediaMetadataService.matchesFilters(
           _projectCatalogService.activeProjectId,
           item.path,
-          minimumRating: _minimumRatingFilter,
+          minimumRating: _ratingFilter.minimumRating,
+          exactRating: _ratingFilter.exactRating,
           tag: _tagFilter,
           colorHex: _colorFilter,
         );
@@ -557,14 +626,13 @@ class _ExplorerPageState extends State<ExplorerPage> {
     });
   }
 
-  void _setMinimumRatingFilter(int value) {
-    final normalized = value.clamp(0, 5).toInt();
-    if (normalized == _minimumRatingFilter) {
+  void _setRatingFilter(_RatingFilterChoice value) {
+    if (value == _ratingFilter) {
       return;
     }
 
     setState(() {
-      _minimumRatingFilter = normalized;
+      _ratingFilter = value;
       _refreshVisibleItems();
     });
   }
@@ -602,7 +670,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
     _filterController.clear();
     setState(() {
       _filterQuery = '';
-      _minimumRatingFilter = 0;
+      _ratingFilter = _RatingFilterChoice.any;
       _tagFilter = null;
       _colorFilter = null;
       _refreshVisibleItems();
@@ -1073,6 +1141,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
 
       widget.onActiveProjectChanged(projectId);
       setState(() {
+        _ratingFilter = _RatingFilterChoice.any;
         _tagFilter = null;
         _colorFilter = null;
         _selectedPath = null;
@@ -1951,6 +2020,16 @@ class _ExplorerPageState extends State<ExplorerPage> {
               icon: const Icon(Icons.folder_open, size: 18),
               label: const Text('OPEN FOLDER'),
             ),
+            if (widget.playerSettings != null) ...[
+              const SizedBox(width: 6),
+              ExcludeFocus(
+                child: MltPlayerSettingsButton(
+                  settings: widget.playerSettings!,
+                  mltVersion: widget.version,
+                  onClosed: _focusNode.requestFocus,
+                ),
+              ),
+            ],
           ],
         ),
       ),
@@ -2013,25 +2092,39 @@ class _ExplorerPageState extends State<ExplorerPage> {
           SizedBox(
             width: 108,
             child: DropdownButtonHideUnderline(
-              child: DropdownButton<int>(
-                value: _minimumRatingFilter,
+              child: DropdownButton<_RatingFilterChoice>(
+                value: _ratingFilter,
                 isExpanded: true,
                 dropdownColor: const Color(0xFF252525),
                 style:
                     const TextStyle(fontSize: 11, color: Colors.white70),
-                items: const <DropdownMenuItem<int>>[
-                  DropdownMenuItem(value: 0, child: Text('Any rating')),
-                  DropdownMenuItem(value: 1, child: Text('1★+')),
-                  DropdownMenuItem(value: 2, child: Text('2★+')),
-                  DropdownMenuItem(value: 3, child: Text('3★+')),
-                  DropdownMenuItem(value: 4, child: Text('4★+')),
-                  DropdownMenuItem(value: 5, child: Text('5★')),
+                selectedItemBuilder: (context) => [
+                  for (final choice in _RatingFilterChoice.values)
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        choice.compactLabel,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                ],
+                items: [
+                  for (final choice in _RatingFilterChoice.values)
+                    DropdownMenuItem<_RatingFilterChoice>(
+                      value: choice,
+                      child: Text(
+                        choice.menuLabel,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
                 ],
                 onChanged: !_annotationsLoaded || _loading
                     ? null
                     : (value) {
                         if (value != null) {
-                          _setMinimumRatingFilter(value);
+                          _setRatingFilter(value);
                         }
                       },
               ),

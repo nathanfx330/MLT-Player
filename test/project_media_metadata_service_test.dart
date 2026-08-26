@@ -162,6 +162,56 @@ void main() {
       );
     });
 
+    test('exact rating and minimum rating use distinct semantics', () {
+      const path = '/tmp/rating-filter.mov';
+
+      metadata.setRating(defaultProjectId, path, 4);
+
+      expect(
+        metadata.matchesFilters(
+          defaultProjectId,
+          path,
+          exactRating: 4,
+        ),
+        isTrue,
+      );
+      expect(
+        metadata.matchesFilters(
+          defaultProjectId,
+          path,
+          exactRating: 5,
+        ),
+        isFalse,
+      );
+      expect(
+        metadata.matchesFilters(
+          defaultProjectId,
+          path,
+          minimumRating: 4,
+        ),
+        isTrue,
+      );
+
+      metadata.setRating(defaultProjectId, path, 5);
+
+      expect(
+        metadata.matchesFilters(
+          defaultProjectId,
+          path,
+          exactRating: 4,
+        ),
+        isFalse,
+      );
+      expect(
+        metadata.matchesFilters(
+          defaultProjectId,
+          path,
+          minimumRating: 4,
+        ),
+        isTrue,
+      );
+    });
+
     test('bookmark frames stay sorted and unique', () {
       const path = '/tmp/movie.mov';
 
@@ -318,25 +368,50 @@ void main() {
       expect(reader.tagsFor(defaultProjectId, path), isEmpty);
     });
 
-    test('future Project dashboard counts are already available', () {
+    test('Project dashboard summaries are project scoped and counted', () {
       metadata.setRating(defaultProjectId, '/tmp/a.mov', 5);
       metadata.setTags(
         defaultProjectId,
         '/tmp/a.mov',
+        <String>['Select', 'Interview'],
+      );
+      metadata.setRating(defaultProjectId, '/tmp/b.mov', 4);
+      metadata.setTags(
+        defaultProjectId,
+        '/tmp/b.mov',
         <String>['select'],
       );
       metadata.setColorHex(
         defaultProjectId,
+        '/tmp/a.mov',
+        '#64B5F6',
+      );
+      metadata.setColorHex(
+        defaultProjectId,
         '/tmp/b.mov',
-        '#112233',
+        '#64B5F6',
       );
       metadata.addBookmark(defaultProjectId, '/tmp/a.mov', 10);
       metadata.addBookmark(defaultProjectId, '/tmp/a.mov', 20);
+      metadata.addBookmark(defaultProjectId, '/tmp/b.mov', 30);
 
-      expect(metadata.ratedMediaCount(defaultProjectId), 1);
-      expect(metadata.taggedMediaCount(defaultProjectId), 1);
-      expect(metadata.colorLabeledMediaCount(defaultProjectId), 1);
-      expect(metadata.bookmarkCount(defaultProjectId), 2);
+      expect(metadata.ratedMediaCount(defaultProjectId), 2);
+      expect(metadata.taggedMediaCount(defaultProjectId), 2);
+      expect(metadata.colorLabeledMediaCount(defaultProjectId), 2);
+      expect(metadata.bookmarkCount(defaultProjectId), 3);
+      expect(metadata.bookmarkedMediaCount(defaultProjectId), 2);
+      expect(
+        metadata.ratingCountsForProject(defaultProjectId),
+        <int, int>{1: 0, 2: 0, 3: 0, 4: 1, 5: 1},
+      );
+      expect(
+        metadata.tagCountsForProject(defaultProjectId),
+        <String, int>{'Select': 2, 'Interview': 1},
+      );
+      expect(
+        metadata.colorCountsForProject(defaultProjectId),
+        <String, int>{'#64B5F6': 2},
+      );
     });
 
     test('malformed new state fails open and does not revive legacy data',

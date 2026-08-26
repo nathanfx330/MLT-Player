@@ -55,13 +55,19 @@ class ProjectMediaMetadataService {
     String projectId,
     String mediaPath, {
     int minimumRating = 0,
+    int? exactRating,
     String? tag,
     String? colorHex,
   }) {
     final metadata = metadataFor(projectId, mediaPath);
     final normalizedMinimum = minimumRating.clamp(0, 5).toInt();
+    final normalizedExact = exactRating?.clamp(0, 5).toInt();
 
-    if (metadata.rating < normalizedMinimum) {
+    if (normalizedExact != null) {
+      if (metadata.rating != normalizedExact) {
+        return false;
+      }
+    } else if (metadata.rating < normalizedMinimum) {
       return false;
     }
 
@@ -250,6 +256,72 @@ class ProjectMediaMetadataService {
         0,
         (total, item) => total + item.bookmarkFrames.length,
       );
+
+  int bookmarkedMediaCount(String projectId) => _recordsFor(projectId)
+      .where((item) => item.bookmarkFrames.isNotEmpty)
+      .length;
+
+  Map<int, int> ratingCountsForProject(String projectId) {
+    final counts = <int, int>{
+      for (var rating = 1; rating <= 5; rating++) rating: 0,
+    };
+
+    for (final metadata in _recordsFor(projectId)) {
+      if (metadata.rating > 0) {
+        counts[metadata.rating] = (counts[metadata.rating] ?? 0) + 1;
+      }
+    }
+
+    return Map<int, int>.unmodifiable(counts);
+  }
+
+  Map<String, int> tagCountsForProject(String projectId) {
+    final displayByKey = <String, String>{};
+    final countsByKey = <String, int>{};
+
+    for (final metadata in _recordsFor(projectId)) {
+      for (final tag in metadata.tags) {
+        final key = tag.toLowerCase();
+        displayByKey.putIfAbsent(key, () => tag);
+        countsByKey[key] = (countsByKey[key] ?? 0) + 1;
+      }
+    }
+
+    final keys = countsByKey.keys.toList(growable: false)
+      ..sort((a, b) {
+        final byCount = countsByKey[b]!.compareTo(countsByKey[a]!);
+        if (byCount != 0) {
+          return byCount;
+        }
+        return displayByKey[a]!
+            .toLowerCase()
+            .compareTo(displayByKey[b]!.toLowerCase());
+      });
+
+    return Map<String, int>.unmodifiable(
+      <String, int>{
+        for (final key in keys) displayByKey[key]!: countsByKey[key]!,
+      },
+    );
+  }
+
+  Map<String, int> colorCountsForProject(String projectId) {
+    final counts = <String, int>{};
+
+    for (final metadata in _recordsFor(projectId)) {
+      final colorHex = metadata.colorHex;
+      if (colorHex != null) {
+        counts[colorHex] = (counts[colorHex] ?? 0) + 1;
+      }
+    }
+
+    final colors = counts.keys.toList(growable: false)..sort();
+    return Map<String, int>.unmodifiable(
+      <String, int>{
+        for (final color in colors) color: counts[color]!,
+      },
+    );
+  }
 
   void deleteProjectData(String projectId) {
     _requireProjectId(projectId);

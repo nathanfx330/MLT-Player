@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'models/media_info.dart';
+import 'services/project_catalog_service.dart';
 import 'services/project_media_metadata_service.dart';
 import 'services/host_channel.dart';
 import 'services/mlt_bridge.dart';
@@ -22,6 +23,7 @@ import 'ui/widgets/player_settings_button.dart';
 import 'ui/widgets/bookmark_view.dart';
 import 'ui/widgets/media_inspector.dart';
 import 'ui/explorer_page.dart';
+import 'ui/project_page.dart';
 import 'ui/widgets/layers_inspector.dart';
 import 'ui/widgets/storyboard_view.dart';
 import 'ui/widgets/subtitle_overlay.dart';
@@ -130,17 +132,25 @@ class _MltExplorerShell extends StatefulWidget {
   State<_MltExplorerShell> createState() => _MltExplorerShellState();
 }
 
+enum _WorkspaceSection {
+  explorer,
+  project,
+}
+
 class _MltExplorerShellState extends State<_MltExplorerShell> {
+  late final ProjectCatalogService _projectCatalogService;
   late final ProjectMediaMetadataService _projectMediaMetadataService;
 
   String? _playerPath;
   String? _activeProjectId;
   int _playerOpenRequest = 0;
   bool _showPlayer = false;
+  _WorkspaceSection _workspaceSection = _WorkspaceSection.explorer;
 
   @override
   void initState() {
     super.initState();
+    _projectCatalogService = ProjectCatalogService();
     _projectMediaMetadataService = ProjectMediaMetadataService();
   }
 
@@ -160,22 +170,60 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
   }
 
   void _returnToExplorer() {
-    setState(() => _showPlayer = false);
+    setState(() {
+      _showPlayer = false;
+      _workspaceSection = _WorkspaceSection.explorer;
+    });
+  }
+
+  void _setWorkspaceSection(_WorkspaceSection section) {
+    if (_workspaceSection == section) {
+      return;
+    }
+    setState(() => _workspaceSection = section);
   }
 
   @override
   Widget build(BuildContext context) {
+    final workspaceIndex =
+        _workspaceSection == _WorkspaceSection.explorer ? 0 : 1;
+
     return IndexedStack(
       index: _showPlayer ? 1 : 0,
       children: [
-        ExplorerPage(
-          initialized: widget.initialized,
-          version: widget.version,
-          startupError: widget.startupError,
-          onOpenMedia: _openInPlayer,
-          projectMediaMetadataService: _projectMediaMetadataService,
-          onActiveProjectChanged: _setActiveProject,
-          active: !_showPlayer,
+        Column(
+          children: [
+            _WorkspaceTabs(
+              selected: _workspaceSection,
+              onSelected: _setWorkspaceSection,
+            ),
+            Expanded(
+              child: IndexedStack(
+                index: workspaceIndex,
+                children: [
+                  ExplorerPage(
+                    initialized: widget.initialized,
+                    version: widget.version,
+                    startupError: widget.startupError,
+                    onOpenMedia: _openInPlayer,
+                    projectCatalogService: _projectCatalogService,
+                    projectMediaMetadataService:
+                        _projectMediaMetadataService,
+                    playerSettings: widget.playerSettings,
+                    onActiveProjectChanged: _setActiveProject,
+                    active: !_showPlayer &&
+                        _workspaceSection == _WorkspaceSection.explorer,
+                  ),
+                  ProjectPage(
+                    projectCatalogService: _projectCatalogService,
+                    projectMediaMetadataService:
+                        _projectMediaMetadataService,
+                    activeProjectId: _activeProjectId,
+                  ),
+                ],
+              ),
+            ),
+          ],
         ),
         PlayerPage(
           bridge: widget.bridge,
@@ -190,6 +238,139 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
           onBack: _returnToExplorer,
         ),
       ],
+    );
+  }
+}
+
+class _WorkspaceTabs extends StatelessWidget {
+  const _WorkspaceTabs({
+    required this.selected,
+    required this.onSelected,
+  });
+
+  final _WorkspaceSection selected;
+  final ValueChanged<_WorkspaceSection> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 42,
+      child: Row(
+        children: [
+          Expanded(
+            child: Container(
+              decoration: const BoxDecoration(
+                color: Color(0xFF0D0D0D),
+                border: Border(
+                  bottom: BorderSide(color: Colors.white12),
+                ),
+              ),
+              child: Row(
+                children: [
+                  const SizedBox(width: 10),
+                  _WorkspaceTab(
+                    label: 'EXPLORER',
+                    icon: Icons.collections_outlined,
+                    selected: selected == _WorkspaceSection.explorer,
+                    onTap: () => onSelected(_WorkspaceSection.explorer),
+                  ),
+                  const SizedBox(width: 2),
+                  _WorkspaceTab(
+                    label: 'PROJECT',
+                    icon: Icons.dashboard_outlined,
+                    selected: selected == _WorkspaceSection.project,
+                    onTap: () => onSelected(_WorkspaceSection.project),
+                  ),
+                  const Spacer(),
+                ],
+              ),
+            ),
+          ),
+          const ColoredBox(
+            color: Color(0xFF0D0D0D),
+            child: SizedBox(
+              width: 126,
+              height: 42,
+              child: Padding(
+                padding: EdgeInsets.only(right: 14),
+                child: Align(
+                  alignment: Alignment.centerRight,
+                  child: Text(
+                    'MLT PLAYER',
+                    style: TextStyle(
+                      inherit: false,
+                      decoration: TextDecoration.none,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 1.2,
+                      color: Colors.white38,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _WorkspaceTab extends StatelessWidget {
+  const _WorkspaceTab({
+    required this.label,
+    required this.icon,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String label;
+  final IconData icon;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        child: Container(
+          height: 42,
+          padding: const EdgeInsets.symmetric(horizontal: 14),
+          decoration: BoxDecoration(
+            border: Border(
+              bottom: BorderSide(
+                color: selected
+                    ? const Color(0xFFE8A33D)
+                    : Colors.transparent,
+                width: 2,
+              ),
+            ),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                icon,
+                size: 15,
+                color: selected
+                    ? const Color(0xFFE8A33D)
+                    : Colors.white38,
+              ),
+              const SizedBox(width: 7),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 0.9,
+                  color: selected ? Colors.white70 : Colors.white38,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
