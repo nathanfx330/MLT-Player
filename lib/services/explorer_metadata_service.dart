@@ -10,9 +10,14 @@ class ExplorerMetadataService {
   final Map<String, _CachedMetadata> _cache = <String, _CachedMetadata>{};
 
   Future<ExplorerMetadata> metadataFor(ExplorerItem item) async {
-    final entity = item.isDirectory
-        ? Directory(item.path)
-        : File(item.path);
+    final isRedleafLink =
+        item.isDirectory && item.path.toLowerCase().endsWith('.rlink');
+
+    final entity = isRedleafLink
+        ? File(item.path)
+        : item.isDirectory
+            ? Directory(item.path)
+            : File(item.path);
     final stat = await entity.stat();
 
     if (stat.type == FileSystemEntityType.notFound) {

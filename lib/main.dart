@@ -9,7 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'models/media_info.dart';
-import 'services/bookmark_service.dart';
+import 'services/project_media_metadata_service.dart';
 import 'services/host_channel.dart';
 import 'services/mlt_bridge.dart';
 import 'services/mlt_export_frame_rate_bridge.dart';
@@ -131,9 +131,25 @@ class _MltExplorerShell extends StatefulWidget {
 }
 
 class _MltExplorerShellState extends State<_MltExplorerShell> {
+  late final ProjectMediaMetadataService _projectMediaMetadataService;
+
   String? _playerPath;
+  String? _activeProjectId;
   int _playerOpenRequest = 0;
   bool _showPlayer = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _projectMediaMetadataService = ProjectMediaMetadataService();
+  }
+
+  void _setActiveProject(String projectId) {
+    if (_activeProjectId == projectId) {
+      return;
+    }
+    setState(() => _activeProjectId = projectId);
+  }
 
   void _openInPlayer(String path) {
     setState(() {
@@ -157,6 +173,8 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
           version: widget.version,
           startupError: widget.startupError,
           onOpenMedia: _openInPlayer,
+          projectMediaMetadataService: _projectMediaMetadataService,
+          onActiveProjectChanged: _setActiveProject,
           active: !_showPlayer,
         ),
         PlayerPage(
@@ -165,6 +183,8 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
           version: widget.version,
           startupError: widget.startupError,
           playerSettings: widget.playerSettings,
+          projectMediaMetadataService: _projectMediaMetadataService,
+          activeProjectId: _activeProjectId,
           initialPath: _playerPath,
           openRequestSerial: _playerOpenRequest,
           onBack: _returnToExplorer,
@@ -206,6 +226,8 @@ class PlayerPage extends StatefulWidget {
     required this.initialized,
     required this.version,
     required this.playerSettings,
+    required this.projectMediaMetadataService,
+    required this.activeProjectId,
     this.startupError,
     this.initialPath,
     this.openRequestSerial = 0,
@@ -216,6 +238,8 @@ class PlayerPage extends StatefulWidget {
   final bool initialized;
   final String version;
   final PlayerSettingsService playerSettings;
+  final ProjectMediaMetadataService projectMediaMetadataService;
+  final String? activeProjectId;
   final String? startupError;
   final String? initialPath;
   final int openRequestSerial;
@@ -237,7 +261,6 @@ class _PlayerPageState extends State<PlayerPage>
   late final MltExportPresetBridge _exportPresetBridge;
   late final MltExportFrameRateBridge _exportFrameRateBridge;
   late final StoryboardThumbnailService _storyboardThumbnailService;
-  late final BookmarkService _bookmarkService;
 
   SubtitleTrack? _subtitleTrack;
   int _subtitleLoadSerial = 0;
@@ -279,8 +302,6 @@ class _PlayerPageState extends State<PlayerPage>
     _exportFrameRateBridge = MltExportFrameRateBridge();
     _exportFrameRateBridge.setVideoExportFrameRate(_videoExportFrameRate);
     _storyboardThumbnailService = StoryboardThumbnailService();
-    _bookmarkService = BookmarkService();
-    unawaited(_loadBookmarks());
 
     _overlayController = AnimationController(
       vsync: this,
@@ -724,54 +745,76 @@ class _PlayerPageState extends State<PlayerPage>
     _showOverlay();
   }
 
-  Future<void> _loadBookmarks() async {
-    await _bookmarkService.load();
-    if (mounted) {
-      setState(() {});
-    }
-  }
-
-  Future<void> _saveBookmarks() async {
+  Future<void> _saveProjectMetadata() async {
     try {
-      await _bookmarkService.save();
+      await widget.projectMediaMetadataService.save();
     } on FileSystemException {
       if (!mounted) {
         return;
       }
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Could not save bookmarks.')),
+        const SnackBar(content: Text('Could not save Project bookmarks.')),
       );
     }
   }
 
+  List<int> _bookmarkFramesFor(MediaInfo media) {
+    final projectId = widget.activeProjectId;
+    if (projectId == null ||
+        !widget.projectMediaMetadataService.loaded) {
+      return const <int>[];
+    }
+
+    return widget.projectMediaMetadataService.bookmarkFramesFor(
+      projectId,
+      media.path,
+    );
+  }
+
   void _toggleBookmarkFrame(int sourceFrame) {
     final media = _engine.media;
-    if (media == null || media.isStill || !media.hasVideo || sourceFrame < 0) {
+    final projectId = widget.activeProjectId;
+    if (media == null ||
+        projectId == null ||
+        media.isStill ||
+        !media.hasVideo ||
+        sourceFrame < 0) {
       return;
     }
 
-    _bookmarkService.toggle(media.path, sourceFrame);
+    widget.projectMediaMetadataService.toggleBookmark(
+      projectId,
+      media.path,
+      sourceFrame,
+    );
     setState(() {});
-    unawaited(_saveBookmarks());
+    unawaited(_saveProjectMetadata());
     _showOverlay();
   }
 
   void _removeBookmarkFrame(int sourceFrame) {
     final media = _engine.media;
-    if (media == null) {
+    final projectId = widget.activeProjectId;
+    if (media == null || projectId == null) {
       return;
     }
 
-    if (_bookmarkService.remove(media.path, sourceFrame)) {
+    if (widget.projectMediaMetadataService.removeBookmark(
+      projectId,
+      media.path,
+      sourceFrame,
+    )) {
       setState(() {});
-      unawaited(_saveBookmarks());
+      unawaited(_saveProjectMetadata());
     }
     _showOverlay();
   }
 
   void _addCurrentBookmark() {
     final media = _engine.media;
+    final projectId = widget.activeProjectId;
     if (media == null ||
+        projectId == null ||
         media.isStill ||
         !media.hasVideo ||
         _engine.opening ||
@@ -787,9 +830,13 @@ class _PlayerPageState extends State<PlayerPage>
       return;
     }
 
-    if (_bookmarkService.add(media.path, sourceFrame)) {
+    if (widget.projectMediaMetadataService.addBookmark(
+      projectId,
+      media.path,
+      sourceFrame,
+    )) {
       setState(() {});
-      unawaited(_saveBookmarks());
+      unawaited(_saveProjectMetadata());
     }
     _showOverlay();
   }
@@ -1740,8 +1787,7 @@ class _PlayerPageState extends State<PlayerPage>
         sourceFrameForPositionMs: _engine.sourceFrameForClipPositionMs,
         onSeek: _seekStoryboardMoment,
         onOpenVideo: _openStoryboardMoment,
-        bookmarkedFrames:
-            _bookmarkService.framesFor(media.path).toSet(),
+        bookmarkedFrames: _bookmarkFramesFor(media).toSet(),
         onToggleBookmark: _toggleBookmarkFrame,
       );
     }
@@ -1749,7 +1795,7 @@ class _PlayerPageState extends State<PlayerPage>
     if (_viewMode == PlayerViewMode.bookmarks && !media.isStill) {
       return BookmarkView(
         sourcePath: media.path,
-        sourceFrames: _bookmarkService.framesFor(media.path),
+        sourceFrames: _bookmarkFramesFor(media),
         currentSourceFrame:
             _engine.sourceFrameForClipPositionMs(_engine.positionMs),
         thumbnailService: _storyboardThumbnailService,

@@ -11,14 +11,33 @@ import '../models/explorer_asset_annotation.dart';
 import '../models/explorer_item.dart';
 import '../models/explorer_metadata.dart';
 import '../models/project_catalog.dart';
-import '../services/explorer_annotation_service.dart';
 import '../services/explorer_metadata_service.dart';
 import '../services/explorer_navigation_service.dart';
 import '../services/explorer_service.dart';
 import '../services/explorer_sort_filter_service.dart';
 import '../services/explorer_view_preferences_service.dart';
 import '../services/project_catalog_service.dart';
+import '../services/project_media_metadata_service.dart';
+import '../services/redleaf_link_service.dart';
 import '../services/thumbnail_service.dart';
+
+const List<String> _explorerColorLabelPalette = <String>[
+  '#E57373',
+  '#FFB74D',
+  '#FFF176',
+  '#81C784',
+  '#64B5F6',
+  '#BA68C8',
+];
+
+const Map<String, String> _explorerColorLabelNames = <String, String>{
+  '#E57373': 'Red',
+  '#FFB74D': 'Orange',
+  '#FFF176': 'Yellow',
+  '#81C784': 'Green',
+  '#64B5F6': 'Blue',
+  '#BA68C8': 'Purple',
+};
 
 enum _ExplorerHistoryMove { none, back, forward }
 
@@ -32,6 +51,7 @@ enum _MediaMenuAction {
   favorite,
   assignCatalogs,
   createCatalog,
+  colorLabel,
   removeFromCurrent,
 }
 
@@ -48,6 +68,8 @@ class ExplorerPage extends StatefulWidget {
     required this.initialized,
     required this.version,
     required this.onOpenMedia,
+    required this.projectMediaMetadataService,
+    required this.onActiveProjectChanged,
     this.startupError,
     this.active = true,
   });
@@ -56,6 +78,8 @@ class ExplorerPage extends StatefulWidget {
   final String version;
   final String? startupError;
   final ValueChanged<String> onOpenMedia;
+  final ProjectMediaMetadataService projectMediaMetadataService;
+  final ValueChanged<String> onActiveProjectChanged;
   final bool active;
 
   @override
@@ -67,13 +91,12 @@ class _ExplorerPageState extends State<ExplorerPage> {
   final ExplorerSortFilterService _sortFilterService =
       ExplorerSortFilterService();
   final ExplorerMetadataService _metadataService = ExplorerMetadataService();
-  final ExplorerAnnotationService _annotationService =
-      ExplorerAnnotationService();
   final ExplorerNavigationService _navigationService =
       ExplorerNavigationService();
   final ExplorerViewPreferencesService _viewPreferencesService =
       ExplorerViewPreferencesService();
   final ProjectCatalogService _projectCatalogService = ProjectCatalogService();
+  final RedleafLinkService _redleafLinkService = RedleafLinkService();
   final ThumbnailService _thumbnailService = ThumbnailService();
 
   final FocusNode _focusNode = FocusNode(debugLabel: 'mlt-explorer');
@@ -83,6 +106,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
 
   _ExplorerSourceMode _sourceMode = _ExplorerSourceMode.directory;
   String? _directoryPath;
+  RedleafLink? _activeRedleafLink;
   String? _selectedCatalogId;
   final Set<String> _expandedCatalogIds = <String>{};
 
@@ -93,6 +117,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
   String _filterQuery = '';
   int _minimumRatingFilter = 0;
   String? _tagFilter;
+  String? _colorFilter;
 
   bool _loading = false;
   String? _error;
@@ -141,11 +166,20 @@ class _ExplorerPageState extends State<ExplorerPage> {
       final breadcrumb = _projectCatalogService.catalogBreadcrumb(catalog.id);
       return breadcrumb.isEmpty ? 'Catalogs' : 'Catalogs / $breadcrumb';
     }
-    return _directoryPath ?? 'No folder open';
+
+    final directoryPath = _directoryPath;
+    final redleafLink = _activeRedleafLink;
+    if (directoryPath != null && redleafLink != null) {
+      return redleafLink.virtualPathFor(directoryPath);
+    }
+
+    return directoryPath ?? 'No folder open';
   }
 
   bool get _hasAnnotationFilter =>
-      _minimumRatingFilter > 0 || _tagFilter != null;
+      _minimumRatingFilter > 0 ||
+      _tagFilter != null ||
+      _colorFilter != null;
 
   bool get _hasAnyFilter =>
       _filterQuery.trim().isNotEmpty || _hasAnnotationFilter;
@@ -155,7 +189,12 @@ class _ExplorerPageState extends State<ExplorerPage> {
       return const <String>[];
     }
 
-    return _annotationService.tagsForPaths(
+    if (!_projectCatalogsLoaded) {
+      return const <String>[];
+    }
+
+    return widget.projectMediaMetadataService.tagsForPaths(
+      _projectCatalogService.activeProjectId,
       _items.where((item) => !item.isDirectory).map((item) => item.path),
     );
   }
@@ -165,7 +204,6 @@ class _ExplorerPageState extends State<ExplorerPage> {
     super.initState();
     unawaited(_initializeNavigation());
     unawaited(_initializeViewPreferences());
-    unawaited(_initializeAnnotations());
     unawaited(_initializeProjectCatalogs());
   }
 
@@ -229,28 +267,26 @@ class _ExplorerPageState extends State<ExplorerPage> {
     });
   }
 
-  Future<void> _initializeAnnotations() async {
-    try {
-      await _annotationService.load();
-    } catch (_) {
-      // Existing ratings/tags remain untouched during the catalog foundation.
-    }
-
-    if (!mounted) {
-      return;
-    }
-
-    setState(() {
-      _annotationsLoaded = true;
-      _refreshVisibleItems();
-    });
-  }
-
   Future<void> _initializeProjectCatalogs() async {
     try {
       await _projectCatalogService.load();
+
+      var migrationProjectId = _projectCatalogService.activeProjectId;
+      for (final project in _projectCatalogService.projects) {
+        if (project.name == ProjectCatalogService.defaultProjectName) {
+          migrationProjectId = project.id;
+          break;
+        }
+      }
+
+      if (!widget.projectMediaMetadataService.loaded) {
+        await widget.projectMediaMetadataService.load(
+          defaultProjectId: migrationProjectId,
+        );
+      }
     } catch (_) {
-      // The service repairs or recreates its own default state when possible.
+      // Project organization and metadata are convenience state and must
+      // never block Explorer startup.
     }
 
     if (!mounted) {
@@ -259,7 +295,11 @@ class _ExplorerPageState extends State<ExplorerPage> {
 
     setState(() {
       _projectCatalogsLoaded = true;
+      _annotationsLoaded = widget.projectMediaMetadataService.loaded;
+      _refreshVisibleItems();
     });
+
+    widget.onActiveProjectChanged(_projectCatalogService.activeProjectId);
   }
 
   Future<void> _persistNavigation() async {
@@ -290,16 +330,16 @@ class _ExplorerPageState extends State<ExplorerPage> {
     }
   }
 
-  Future<void> _persistAnnotations() async {
+  Future<void> _persistProjectMetadata() async {
     try {
-      await _annotationService.save();
+      await widget.projectMediaMetadataService.save();
     } catch (_) {
       if (!mounted) {
         return;
       }
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Could not save Explorer ratings and tags.'),
+          content: Text('Could not save Project media metadata.'),
         ),
       );
     }
@@ -334,10 +374,12 @@ class _ExplorerPageState extends State<ExplorerPage> {
           return false;
         }
 
-        return _annotationService.matchesFilters(
+        return widget.projectMediaMetadataService.matchesFilters(
+          _projectCatalogService.activeProjectId,
           item.path,
           minimumRating: _minimumRatingFilter,
           tag: _tagFilter,
+          colorHex: _colorFilter,
         );
       }).toList(growable: false);
     }
@@ -351,10 +393,14 @@ class _ExplorerPageState extends State<ExplorerPage> {
     }
 
     setState(() {
-      _annotationService.setRating(item.path, rating);
+      widget.projectMediaMetadataService.setRating(
+        _projectCatalogService.activeProjectId,
+        item.path,
+        rating,
+      );
       _refreshVisibleItems();
     });
-    unawaited(_persistAnnotations());
+    unawaited(_persistProjectMetadata());
   }
 
   void _addAssetTag(ExplorerItem item, String tag) {
@@ -363,10 +409,14 @@ class _ExplorerPageState extends State<ExplorerPage> {
     }
 
     setState(() {
-      _annotationService.addTag(item.path, tag);
+      widget.projectMediaMetadataService.addTag(
+        _projectCatalogService.activeProjectId,
+        item.path,
+        tag,
+      );
       _refreshVisibleItems();
     });
-    unawaited(_persistAnnotations());
+    unawaited(_persistProjectMetadata());
   }
 
   void _removeAssetTag(ExplorerItem item, String tag) {
@@ -375,10 +425,97 @@ class _ExplorerPageState extends State<ExplorerPage> {
     }
 
     setState(() {
-      _annotationService.removeTag(item.path, tag);
+      widget.projectMediaMetadataService.removeTag(
+        _projectCatalogService.activeProjectId,
+        item.path,
+        tag,
+      );
       _refreshVisibleItems();
     });
-    unawaited(_persistAnnotations());
+    unawaited(_persistProjectMetadata());
+  }
+
+  void _setAssetColorHex(ExplorerItem item, String? colorHex) {
+    if (item.isDirectory || !_projectCatalogsLoaded || !_annotationsLoaded) {
+      return;
+    }
+
+    setState(() {
+      widget.projectMediaMetadataService.setColorHex(
+        _projectCatalogService.activeProjectId,
+        item.path,
+        colorHex,
+      );
+      _refreshVisibleItems();
+    });
+    unawaited(_persistProjectMetadata());
+  }
+
+  Future<void> _chooseAssetColor(ExplorerItem item) async {
+    if (item.isDirectory || !_projectCatalogsLoaded || !_annotationsLoaded) {
+      return;
+    }
+
+    final current = widget.projectMediaMetadataService.colorHexFor(
+      _projectCatalogService.activeProjectId,
+      item.path,
+    );
+
+    final selected = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text('Color Label'),
+          content: Wrap(
+            spacing: 12,
+            runSpacing: 12,
+            children: [
+              for (final colorHex in _explorerColorLabelPalette)
+                Tooltip(
+                  message: colorHex,
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(18),
+                    onTap: () => Navigator.of(dialogContext).pop(colorHex),
+                    child: Container(
+                      width: 34,
+                      height: 34,
+                      decoration: BoxDecoration(
+                        color: _colorFromHex(colorHex),
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: current == colorHex
+                              ? Colors.white
+                              : Colors.white24,
+                          width: current == colorHex ? 3 : 1,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('CANCEL'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(''),
+              child: const Text('CLEAR'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (!mounted || selected == null) {
+      return;
+    }
+
+    _setAssetColorHex(
+      item,
+      selected.isEmpty ? null : selected,
+    );
   }
 
   void _setThumbnailDensity(double value) {
@@ -445,12 +582,29 @@ class _ExplorerPageState extends State<ExplorerPage> {
     });
   }
 
+  void _setColorFilter(String? value) {
+    final normalized = value?.trim();
+    final next = normalized == null || normalized.isEmpty
+        ? null
+        : ProjectMediaMetadataService.normalizeColorHex(normalized);
+
+    if (next == _colorFilter) {
+      return;
+    }
+
+    setState(() {
+      _colorFilter = next;
+      _refreshVisibleItems();
+    });
+  }
+
   void _clearAllFilters({bool returnFocus = false}) {
     _filterController.clear();
     setState(() {
       _filterQuery = '';
       _minimumRatingFilter = 0;
       _tagFilter = null;
+      _colorFilter = null;
       _refreshVisibleItems();
     });
     if (returnFocus) {
@@ -512,6 +666,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
   Future<void> _loadDirectory(
     String path, {
     _ExplorerHistoryMove historyMove = _ExplorerHistoryMove.none,
+    RedleafLink? redleafLink,
   }) async {
     final serial = ++_scanSerial;
     setState(() {
@@ -527,28 +682,33 @@ class _ExplorerPageState extends State<ExplorerPage> {
         return;
       }
 
-      switch (historyMove) {
-        case _ExplorerHistoryMove.back:
-          _navigationService.commitBack();
-          break;
-        case _ExplorerHistoryMove.forward:
-          _navigationService.commitForward();
-          break;
-        case _ExplorerHistoryMove.none:
-          _navigationService.recordVisit(resolvedPath);
-          break;
+      if (redleafLink == null) {
+        switch (historyMove) {
+          case _ExplorerHistoryMove.back:
+            _navigationService.commitBack();
+            break;
+          case _ExplorerHistoryMove.forward:
+            _navigationService.commitForward();
+            break;
+          case _ExplorerHistoryMove.none:
+            _navigationService.recordVisit(resolvedPath);
+            break;
+        }
       }
 
       setState(() {
         _sourceMode = _ExplorerSourceMode.directory;
         _directoryPath = resolvedPath;
+        _activeRedleafLink = redleafLink;
         _selectedCatalogId = null;
         _items = items;
         _refreshVisibleItems();
         _loading = false;
       });
 
-      unawaited(_persistNavigation());
+      if (redleafLink == null) {
+        unawaited(_persistNavigation());
+      }
     } on FileSystemException catch (error) {
       if (!mounted || serial != _scanSerial) {
         return;
@@ -621,6 +781,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
 
       setState(() {
         _sourceMode = _ExplorerSourceMode.catalog;
+        _activeRedleafLink = null;
         _selectedCatalogId = catalog.id;
         _expandedCatalogIds.addAll(catalogPath.map((entry) => entry.id));
         _items = items;
@@ -651,7 +812,8 @@ class _ExplorerPageState extends State<ExplorerPage> {
   }
 
   Future<void> _goBack() async {
-    if (_sourceMode != _ExplorerSourceMode.directory) {
+    if (_sourceMode != _ExplorerSourceMode.directory ||
+        _activeRedleafLink != null) {
       return;
     }
 
@@ -663,7 +825,8 @@ class _ExplorerPageState extends State<ExplorerPage> {
   }
 
   Future<void> _goForward() async {
-    if (_sourceMode != _ExplorerSourceMode.directory) {
+    if (_sourceMode != _ExplorerSourceMode.directory ||
+        _activeRedleafLink != null) {
       return;
     }
 
@@ -695,7 +858,28 @@ class _ExplorerPageState extends State<ExplorerPage> {
       return;
     }
 
+    final redleafLink = _activeRedleafLink;
     final current = Directory(path).absolute;
+
+    if (redleafLink != null) {
+      final targetRoot = Directory(redleafLink.targetPath).absolute.path;
+      if (current.path == targetRoot) {
+        await _loadDirectory(File(redleafLink.linkPath).parent.path);
+        return;
+      }
+
+      final parent = current.parent;
+      if (redleafLink.containsPhysicalPath(parent.path)) {
+        await _loadDirectory(
+          parent.path,
+          redleafLink: redleafLink,
+        );
+      } else {
+        await _loadDirectory(File(redleafLink.linkPath).parent.path);
+      }
+      return;
+    }
+
     final parent = current.parent;
     if (parent.path == current.path) {
       return;
@@ -719,7 +903,57 @@ class _ExplorerPageState extends State<ExplorerPage> {
 
   Future<void> _activate(ExplorerItem item) async {
     if (item.isDirectory) {
-      await _loadDirectory(item.path);
+      if (_redleafLinkService.isRlinkPath(item.path)) {
+        try {
+          final link = await _redleafLinkService.readLink(item.path);
+          if (!link.targetExists) {
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                    'R.link target is disconnected or missing: '
+                    '${link.targetPath}',
+                  ),
+                ),
+              );
+            }
+            return;
+          }
+
+          await _loadDirectory(
+            link.targetPath,
+            redleafLink: link,
+          );
+        } on FileSystemException catch (error) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  error.message.isEmpty
+                      ? 'Could not open this R.link virtual folder.'
+                      : error.message,
+                ),
+              ),
+            );
+          }
+        } on FormatException catch (error) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text(error.message)),
+            );
+          }
+        }
+        return;
+      }
+
+      final redleafLink = _activeRedleafLink;
+      await _loadDirectory(
+        item.path,
+        redleafLink: redleafLink != null &&
+                redleafLink.containsPhysicalPath(item.path)
+            ? redleafLink
+            : null,
+      );
       return;
     }
     await _openMediaInPlayer(item.path);
@@ -837,6 +1071,14 @@ class _ExplorerPageState extends State<ExplorerPage> {
         return;
       }
 
+      widget.onActiveProjectChanged(projectId);
+      setState(() {
+        _tagFilter = null;
+        _colorFilter = null;
+        _selectedPath = null;
+        _refreshVisibleItems();
+      });
+
       if (_sourceMode == _ExplorerSourceMode.catalog) {
         final favorites =
             _projectCatalogService.favoritesCatalogForProject(projectId);
@@ -869,6 +1111,14 @@ class _ExplorerPageState extends State<ExplorerPage> {
       if (!mounted) {
         return;
       }
+
+      widget.onActiveProjectChanged(project.id);
+      setState(() {
+        _tagFilter = null;
+        _colorFilter = null;
+        _selectedPath = null;
+        _refreshVisibleItems();
+      });
 
       final favorites =
           _projectCatalogService.favoritesCatalogForProject(project.id);
@@ -920,21 +1170,32 @@ class _ExplorerPageState extends State<ExplorerPage> {
     final confirmed = await _confirm(
       title: 'Delete Project?',
       message:
-          'Delete "${project.name}" and all of its Catalog memberships? '
-          'Source files will not be moved or deleted.',
+          'Delete "${project.name}" and all of its Catalogs, ratings, tags, '
+          'color labels, Favorites, and bookmarks? Source files will not be '
+          'moved or deleted.',
     );
     if (!confirmed) {
       return;
     }
 
     try {
+      widget.projectMediaMetadataService.deleteProjectData(project.id);
       _projectCatalogService.deleteProject(project.id);
       _expandedCatalogIds.clear();
       await _persistProjectCatalogs();
+      await _persistProjectMetadata();
 
       if (!mounted) {
         return;
       }
+
+      widget.onActiveProjectChanged(_projectCatalogService.activeProjectId);
+      setState(() {
+        _tagFilter = null;
+        _colorFilter = null;
+        _selectedPath = null;
+        _refreshVisibleItems();
+      });
 
       if (_sourceMode == _ExplorerSourceMode.catalog) {
         final favorites =
@@ -1349,6 +1610,10 @@ class _ExplorerPageState extends State<ExplorerPage> {
           value: _MediaMenuAction.createCatalog,
           child: Text('New Catalog for This Media…'),
         ),
+        const PopupMenuItem(
+          value: _MediaMenuAction.colorLabel,
+          child: Text('Color Label…'),
+        ),
         if (canRemoveFromCurrent) ...[
           const PopupMenuDivider(),
           PopupMenuItem(
@@ -1372,6 +1637,9 @@ class _ExplorerPageState extends State<ExplorerPage> {
         break;
       case _MediaMenuAction.createCatalog:
         await _newCatalogForMedia(item);
+        break;
+      case _MediaMenuAction.colorLabel:
+        await _chooseAssetColor(item);
         break;
       case _MediaMenuAction.removeFromCurrent:
         await _removeMediaFromCurrentCatalog(item);
@@ -1510,8 +1778,9 @@ class _ExplorerPageState extends State<ExplorerPage> {
   Widget _buildToolbar() {
     final directoryCanGoUp = _sourceMode == _ExplorerSourceMode.directory &&
         _directoryPath != null &&
-        Directory(_directoryPath!).absolute.parent.path !=
-            Directory(_directoryPath!).absolute.path;
+        (_activeRedleafLink != null ||
+            Directory(_directoryPath!).absolute.parent.path !=
+                Directory(_directoryPath!).absolute.path);
     final catalogCanGoUp = _sourceMode == _ExplorerSourceMode.catalog &&
         _selectedCatalog?.parentId != null;
     final canGoUp = directoryCanGoUp || catalogCanGoUp;
@@ -1591,6 +1860,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
             IconButton(
               tooltip: 'Back (Alt+Left)',
               onPressed: _sourceMode == _ExplorerSourceMode.directory &&
+                      _activeRedleafLink == null &&
                       _navigationService.canGoBack &&
                       !_loading
                   ? _goBack
@@ -1600,6 +1870,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
             IconButton(
               tooltip: 'Forward (Alt+Right)',
               onPressed: _sourceMode == _ExplorerSourceMode.directory &&
+                      _activeRedleafLink == null &&
                       _navigationService.canGoForward &&
                       !_loading
                   ? _goForward
@@ -1642,12 +1913,29 @@ class _ExplorerPageState extends State<ExplorerPage> {
                   borderRadius: BorderRadius.circular(6),
                   border: Border.all(color: Colors.white12),
                 ),
-                child: Text(
-                  _sourceLabel,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style:
-                      const TextStyle(fontSize: 12, color: Colors.white70),
+                child: Row(
+                  children: [
+                    if (_activeRedleafLink != null &&
+                        _sourceMode == _ExplorerSourceMode.directory) ...[
+                      const Icon(
+                        Icons.link,
+                        size: 14,
+                        color: Color(0xFFE8A33D),
+                      ),
+                      const SizedBox(width: 7),
+                    ],
+                    Expanded(
+                      child: Text(
+                        _sourceLabel,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: Colors.white70,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ),
@@ -1779,6 +2067,54 @@ class _ExplorerPageState extends State<ExplorerPage> {
               ),
             ),
           ),
+          const SizedBox(width: 8),
+          SizedBox(
+            width: 132,
+            child: DropdownButtonHideUnderline(
+              child: DropdownButton<String>(
+                value: _colorFilter ?? '',
+                isExpanded: true,
+                dropdownColor: const Color(0xFF252525),
+                style:
+                    const TextStyle(fontSize: 11, color: Colors.white70),
+                items: <DropdownMenuItem<String>>[
+                  const DropdownMenuItem<String>(
+                    value: '',
+                    child: Text('Any color'),
+                  ),
+                  for (final colorHex in _explorerColorLabelPalette)
+                    DropdownMenuItem<String>(
+                      value: colorHex,
+                      child: Row(
+                        children: [
+                          Container(
+                            width: 12,
+                            height: 12,
+                            decoration: BoxDecoration(
+                              color: _colorFromHex(colorHex),
+                              shape: BoxShape.circle,
+                              border: Border.all(
+                                color: Colors.white24,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 7),
+                          Expanded(
+                            child: Text(
+                              _explorerColorLabelNames[colorHex] ?? colorHex,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                ],
+                onChanged:
+                    !_annotationsLoaded || _loading ? null : _setColorFilter,
+              ),
+            ),
+          ),
           if (hasAnyFilter) ...[
             const SizedBox(width: 4),
             TextButton(
@@ -1853,6 +2189,17 @@ class _ExplorerPageState extends State<ExplorerPage> {
   }
 
   Widget _buildBody() {
+    // Catalogs are virtual views whose media metadata can change while the
+    // source membership itself stays unchanged. Re-evaluate the filtered
+    // Catalog view at render time so rating/tag edits cannot leave the
+    // cached visible list stale. Directory browsing keeps the normal cached
+    // refresh path.
+    if (_sourceMode == _ExplorerSourceMode.catalog &&
+        _projectCatalogsLoaded &&
+        _annotationsLoaded) {
+      _refreshVisibleItems();
+    }
+
     if (!widget.initialized) {
       return _buildUnavailable();
     }
@@ -1925,8 +2272,17 @@ class _ExplorerPageState extends State<ExplorerPage> {
                           active: widget.active,
                           selected: _selectedPath == item.path,
                           rating: _annotationsLoaded
-                              ? _annotationService.ratingFor(item.path)
+                              ? widget.projectMediaMetadataService.ratingFor(
+                                  _projectCatalogService.activeProjectId,
+                                  item.path,
+                                )
                               : 0,
+                          colorHex: _annotationsLoaded
+                              ? widget.projectMediaMetadataService.colorHexFor(
+                                  _projectCatalogService.activeProjectId,
+                                  item.path,
+                                )
+                              : null,
                           favorite: favorite,
                           onTap: () {
                             _focusNode.requestFocus();
@@ -1959,7 +2315,22 @@ class _ExplorerPageState extends State<ExplorerPage> {
                   thumbnailService: _thumbnailService,
                   annotation: selected == null || !_annotationsLoaded
                       ? ExplorerAssetAnnotation.empty
-                      : _annotationService.annotationFor(selected.path),
+                      : ExplorerAssetAnnotation(
+                          rating: widget.projectMediaMetadataService.ratingFor(
+                            _projectCatalogService.activeProjectId,
+                            selected.path,
+                          ),
+                          tags: widget.projectMediaMetadataService.tagsFor(
+                            _projectCatalogService.activeProjectId,
+                            selected.path,
+                          ),
+                        ),
+                  colorHex: selected == null || !_annotationsLoaded
+                      ? null
+                      : widget.projectMediaMetadataService.colorHexFor(
+                          _projectCatalogService.activeProjectId,
+                          selected.path,
+                        ),
                   active: widget.active,
                   favorite: selected != null &&
                           !selected.isDirectory &&
@@ -1981,6 +2352,14 @@ class _ExplorerPageState extends State<ExplorerPage> {
                           !_annotationsLoaded
                       ? null
                       : (tag) => _removeAssetTag(selected, tag),
+                  onColorChanged: selected == null ||
+                          selected.isDirectory ||
+                          !_annotationsLoaded
+                      ? null
+                      : (colorHex) => _setAssetColorHex(
+                            selected,
+                            colorHex,
+                          ),
                   onToggleFavorite: selected == null ||
                           selected.isDirectory ||
                           !_projectCatalogsLoaded
@@ -2573,6 +2952,7 @@ class _ExplorerCard extends StatelessWidget {
     required this.active,
     required this.selected,
     required this.rating,
+    required this.colorHex,
     required this.favorite,
     required this.onTap,
     required this.onDoubleTap,
@@ -2583,13 +2963,19 @@ class _ExplorerCard extends StatelessWidget {
   final bool active;
   final bool selected;
   final int rating;
+  final String? colorHex;
   final bool favorite;
   final VoidCallback onTap;
   final VoidCallback onDoubleTap;
 
   @override
   Widget build(BuildContext context) {
-    final icon = switch (item.kind) {
+    final isRedleafLink =
+        item.isDirectory && item.path.toLowerCase().endsWith('.rlink');
+
+    final icon = isRedleafLink
+        ? Icons.link
+        : switch (item.kind) {
       ExplorerItemKind.directory => Icons.folder,
       ExplorerItemKind.video => Icons.movie_outlined,
       ExplorerItemKind.audio => Icons.graphic_eq,
@@ -2653,6 +3039,11 @@ class _ExplorerCard extends StatelessWidget {
                   ],
                 ),
               ),
+              if (colorHex != null)
+                Container(
+                  height: 4,
+                  color: _colorFromHex(colorHex!),
+                ),
               Padding(
                 padding: const EdgeInsets.fromLTRB(9, 8, 9, 3),
                 child: Text(
@@ -2666,9 +3057,11 @@ class _ExplorerCard extends StatelessWidget {
               Padding(
                 padding: const EdgeInsets.fromLTRB(9, 0, 9, 8),
                 child: Text(
-                  item.isDirectory
-                      ? 'Folder'
-                      : item.extension.toUpperCase(),
+                  isRedleafLink
+                      ? 'R.LINK VIRTUAL FOLDER'
+                      : item.isDirectory
+                          ? 'Folder'
+                          : item.extension.toUpperCase(),
                   style:
                       const TextStyle(fontSize: 9, color: Colors.white30),
                 ),
@@ -2725,11 +3118,13 @@ class _ExplorerSelectionPane extends StatefulWidget {
     required this.metadataService,
     required this.thumbnailService,
     required this.annotation,
+    required this.colorHex,
     required this.active,
     required this.favorite,
     required this.onRatingChanged,
     required this.onAddTag,
     required this.onRemoveTag,
+    required this.onColorChanged,
     required this.onToggleFavorite,
     required this.onAssignCatalogs,
     required this.onOpen,
@@ -2739,11 +3134,13 @@ class _ExplorerSelectionPane extends StatefulWidget {
   final ExplorerMetadataService metadataService;
   final ThumbnailService thumbnailService;
   final ExplorerAssetAnnotation annotation;
+  final String? colorHex;
   final bool active;
   final bool favorite;
   final ValueChanged<int>? onRatingChanged;
   final ValueChanged<String>? onAddTag;
   final ValueChanged<String>? onRemoveTag;
+  final ValueChanged<String?>? onColorChanged;
   final VoidCallback? onToggleFavorite;
   final VoidCallback? onAssignCatalogs;
   final VoidCallback? onOpen;
@@ -2942,11 +3339,14 @@ class _ExplorerSelectionPaneState
                     const SizedBox(height: 10),
                     _ExplorerAnnotationEditor(
                       annotation: widget.annotation,
+                      colorHex: widget.colorHex,
+                      colorPalette: _explorerColorLabelPalette,
                       tagController: _tagController,
                       onRatingChanged:
                           widget.onRatingChanged,
                       onAddTag: widget.onAddTag,
                       onRemoveTag: widget.onRemoveTag,
+                      onColorChanged: widget.onColorChanged,
                     ),
                     const SizedBox(height: 14),
                     const Divider(
@@ -3012,17 +3412,23 @@ class _ExplorerSelectionPaneState
 class _ExplorerAnnotationEditor extends StatelessWidget {
   const _ExplorerAnnotationEditor({
     required this.annotation,
+    required this.colorHex,
+    required this.colorPalette,
     required this.tagController,
     required this.onRatingChanged,
     required this.onAddTag,
     required this.onRemoveTag,
+    required this.onColorChanged,
   });
 
   final ExplorerAssetAnnotation annotation;
+  final String? colorHex;
+  final List<String> colorPalette;
   final TextEditingController tagController;
   final ValueChanged<int>? onRatingChanged;
   final ValueChanged<String>? onAddTag;
   final ValueChanged<String>? onRemoveTag;
+  final ValueChanged<String?>? onColorChanged;
 
   void _submitTag() {
     final tag = tagController.text.trim();
@@ -3064,6 +3470,61 @@ class _ExplorerAnnotationEditor extends StatelessWidget {
                 visualDensity: VisualDensity.compact,
                 padding:
                     const EdgeInsets.symmetric(horizontal: 6),
+                minimumSize: const Size(0, 28),
+              ),
+              child: const Text(
+                'Clear',
+                style: TextStyle(fontSize: 9),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        Row(
+          children: [
+            const SizedBox(
+              width: 58,
+              child: Text(
+                'Color',
+                style: TextStyle(fontSize: 10, color: Colors.white38),
+              ),
+            ),
+            Expanded(
+              child: Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  for (final value in colorPalette)
+                    InkWell(
+                      borderRadius: BorderRadius.circular(10),
+                      onTap: onColorChanged == null
+                          ? null
+                          : () => onColorChanged!(value),
+                      child: Container(
+                        width: 18,
+                        height: 18,
+                        decoration: BoxDecoration(
+                          color: _colorFromHex(value),
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                            color: colorHex == value
+                                ? Colors.white
+                                : Colors.white24,
+                            width: colorHex == value ? 2 : 1,
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            TextButton(
+              onPressed: colorHex != null && onColorChanged != null
+                  ? () => onColorChanged!(null)
+                  : null,
+              style: TextButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                padding: const EdgeInsets.symmetric(horizontal: 6),
                 minimumSize: const Size(0, 28),
               ),
               child: const Text(
@@ -3178,6 +3639,11 @@ class _ExplorerStarRating extends StatelessWidget {
   }
 }
 
+Color _colorFromHex(String colorHex) {
+  final normalized = colorHex.replaceFirst('#', '');
+  return Color(int.parse('FF$normalized', radix: 16));
+}
+
 class _ExplorerMetadataTable extends StatelessWidget {
   const _ExplorerMetadataTable({
     required this.item,
@@ -3189,8 +3655,14 @@ class _ExplorerMetadataTable extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isRedleafLink =
+        item.isDirectory && item.path.toLowerCase().endsWith('.rlink');
+
     final rows = <MapEntry<String, String>>[
-      MapEntry('Type', _kindLabel(item.kind)),
+      MapEntry(
+        'Type',
+        isRedleafLink ? 'Redleaf Virtual Folder' : _kindLabel(item.kind),
+      ),
     ];
 
     if (!item.isDirectory && item.extension.isNotEmpty) {

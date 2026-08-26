@@ -17,6 +17,8 @@ void main() {
 
       await Directory('${root.path}/Z Folder').create();
       await Directory('${root.path}/a folder').create();
+      await File('${root.path}/Archive_Drive.rlink')
+          .writeAsString('/mnt/archive');
       await File('${root.path}/clip.MP4').writeAsString('video');
       await File('${root.path}/sound.wav').writeAsString('audio');
       await File('${root.path}/still.PNG').writeAsString('image');
@@ -30,13 +32,14 @@ void main() {
       }
     });
 
-    test('lists folders first and only supported media files', () async {
+    test('lists folders, Redleaf links, and supported media files', () async {
       final items = await service.scanDirectory(root.path);
 
       expect(
         items.map((item) => item.name).toList(),
         <String>[
           'a folder',
+          'Archive_Drive.rlink',
           'Z Folder',
           'clip.MP4',
           'project.mlt',
@@ -47,21 +50,27 @@ void main() {
 
       expect(items[0].kind, ExplorerItemKind.directory);
       expect(items[1].kind, ExplorerItemKind.directory);
-      expect(items[2].kind, ExplorerItemKind.video);
-      expect(items[3].kind, ExplorerItemKind.project);
-      expect(items[4].kind, ExplorerItemKind.audio);
-      expect(items[5].kind, ExplorerItemKind.image);
+      expect(items[2].kind, ExplorerItemKind.directory);
+      expect(items[3].kind, ExplorerItemKind.video);
+      expect(items[4].kind, ExplorerItemKind.project);
+      expect(items[5].kind, ExplorerItemKind.audio);
+      expect(items[6].kind, ExplorerItemKind.image);
+      expect(service.isRedleafLinkPath(items[1].path), isTrue);
     });
 
     test('scan captures lightweight stat data for sorting', () async {
       final items = await service.scanDirectory(root.path);
       final clip = items.firstWhere((item) => item.name == 'clip.MP4');
       final folder = items.firstWhere((item) => item.name == 'a folder');
+      final rlink =
+          items.firstWhere((item) => item.name == 'Archive_Drive.rlink');
 
       expect(clip.sizeBytes, 5);
       expect(clip.modified, isNotNull);
       expect(folder.sizeBytes, isNull);
       expect(folder.modified, isNotNull);
+      expect(rlink.sizeBytes, isNull);
+      expect(rlink.modified, isNotNull);
     });
 
     test('extension matching is case insensitive', () {
@@ -70,6 +79,7 @@ void main() {
       expect(service.kindForPath('/tmp/A.JPEG'), ExplorerItemKind.image);
       expect(service.kindForPath('/tmp/A.XML'), ExplorerItemKind.project);
       expect(service.kindForPath('/tmp/A.TXT'), isNull);
+      expect(service.isRedleafLinkPath('/tmp/Archive.RLINK'), isTrue);
     });
   });
 }

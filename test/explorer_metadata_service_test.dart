@@ -69,6 +69,24 @@ void main() {
       expect(metadata.hasDimensions, isFalse);
     });
 
+    test('reads .rlink file metadata while presenting it as a folder', () async {
+      final linkFile = File('${root.path}/Archive.rlink');
+      await linkFile.writeAsString('/media/archive');
+
+      final item = ExplorerItem(
+        path: linkFile.path,
+        name: 'Archive.rlink',
+        kind: ExplorerItemKind.directory,
+        modified: (await linkFile.stat()).modified,
+      );
+
+      final metadata = await service.metadataFor(item);
+
+      expect(metadata.byteSize, isNull);
+      expect(metadata.modified.year, greaterThanOrEqualTo(2020));
+      expect(metadata.hasDimensions, isFalse);
+    });
+
     test('cache invalidates when file size changes', () async {
       final file = File('${root.path}/sound.wav');
       await file.writeAsString('a');

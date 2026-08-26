@@ -13,6 +13,8 @@ class ExplorerService {
     'mlt', 'xml',
   ];
 
+  static const String redleafLinkExtension = 'rlink';
+
   static const Set<String> _videoExtensions = <String>{
     'mp4', 'mov', 'mkv', 'avi', 'webm', 'm4v', 'mxf', 'mpg', 'mpeg',
     'wmv', 'ts', 'm2ts', 'dv', 'flv', 'ogv',
@@ -63,6 +65,27 @@ class ExplorerService {
       return null;
     }
 
+    final extension = extensionForPath(entity.path);
+
+    // Redleaf .rlink files are virtual folders. Keep the link file itself as
+    // the Explorer item's path; ExplorerPage resolves it only when activated.
+    // This lets disconnected links remain visible just like Redleaf does.
+    if (extension == redleafLinkExtension) {
+      FileStat? stat;
+      try {
+        stat = await entity.stat();
+      } on FileSystemException {
+        // Keep the virtual folder visible even if stat information raced away.
+      }
+
+      return ExplorerItem(
+        path: entity.path,
+        name: ExplorerItem.basename(entity.path),
+        kind: ExplorerItemKind.directory,
+        modified: stat?.modified,
+      );
+    }
+
     final kind = kindForPath(entity.path);
     if (kind == null) {
       return null;
@@ -96,6 +119,9 @@ class ExplorerService {
   }
 
   bool isSupportedMediaPath(String path) => kindForPath(path) != null;
+
+  bool isRedleafLinkPath(String path) =>
+      extensionForPath(path) == redleafLinkExtension;
 
   String extensionForPath(String path) {
     final name = ExplorerItem.basename(path);
