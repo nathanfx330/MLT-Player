@@ -228,6 +228,9 @@ class PlayerPage extends StatefulWidget {
 class _PlayerPageState extends State<PlayerPage>
     with TickerProviderStateMixin {
   static const Duration _overlayLinger = Duration(milliseconds: 2600);
+  static const Duration _textureReadyPollInterval =
+      Duration(milliseconds: 50);
+  static const Duration _textureReadyTimeout = Duration(seconds: 10);
 
   late final PlayerEngine _engine;
   late final HostChannel _host;
@@ -389,6 +392,45 @@ class _PlayerPageState extends State<PlayerPage>
     }
 
     await attempt();
+  }
+
+  /// Media open is allowed to cross into MLT only after the Linux runner has
+  /// actually registered the external Flutter texture. The old fixed delay
+  /// reduced a cold-start race without proving readiness; this gate uses the
+  /// runner's real texture id as the condition and keeps a timeout only as a
+  /// fail-safe so a broken registration cannot hang the UI forever.
+  Future<bool> _waitForTextureReady() async {
+    if (_engine.textureId > 0) {
+      return true;
+    }
+
+    final stopwatch = Stopwatch()..start();
+
+    while (mounted && stopwatch.elapsed < _textureReadyTimeout) {
+      final id = await _host.textureId();
+      if (!mounted) {
+        return false;
+      }
+
+      if (id > 0) {
+        _textureRetry?.cancel();
+        _textureRetry = null;
+        _engine.textureId = id;
+        debugPrint(
+          'MLT Player: texture ready before media open '
+          '(id=$id, waited=${stopwatch.elapsedMilliseconds}ms)',
+        );
+        return true;
+      }
+
+      await Future<void>.delayed(_textureReadyPollInterval);
+    }
+
+    debugPrint(
+      'MLT Player: texture was not ready after '
+      '${stopwatch.elapsedMilliseconds}ms; media open was blocked.',
+    );
+    return false;
   }
 
   // -------------------------------------------------------------------------
@@ -783,6 +825,24 @@ class _PlayerPageState extends State<PlayerPage>
     // window before any player/native media work begins.
     await Future<void>.delayed(const Duration(milliseconds: 200));
     if (!mounted) {
+      return;
+    }
+
+    // A cold Linux launch can reach media open before the runner has finished
+    // registering Flutter's external texture. Do not let MLT construct/start
+    // its preview consumer until the runner reports a real texture id.
+    final textureReady = await _waitForTextureReady();
+    if (!mounted) {
+      return;
+    }
+    if (!textureReady) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Video output did not finish initializing. Media was not opened.',
+          ),
+        ),
+      );
       return;
     }
 

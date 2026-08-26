@@ -475,6 +475,28 @@ static void invalidate_frames(void)
 
 static void notify_flutter_frame_available(void);
 
+/*
+ * Flutter Linux expects a failed FlTextureGL populate callback to provide a
+ * GError. A transient "not ready yet" state is normal during startup, but
+ * returning FALSE with a NULL error can make the engine dereference
+ * error->message while resolving the external texture.
+ */
+static gboolean mlt_video_texture_fail(
+    GError **error,
+    const char *message)
+{
+    if (error != NULL && *error == NULL) {
+        g_set_error_literal(
+            error,
+            g_quark_from_static_string("mlt-player-texture-error"),
+            1,
+            message != NULL ? message : "MLT preview texture is not ready."
+        );
+    }
+
+    return FALSE;
+}
+
 static gboolean mlt_video_texture_populate(
     FlTextureGL *texture,
     uint32_t *target,
@@ -483,8 +505,6 @@ static gboolean mlt_video_texture_populate(
     uint32_t *height,
     GError **error)
 {
-    (void)error;
-
     MltVideoTexture *self =
         (MltVideoTexture *)texture;
 
@@ -517,7 +537,10 @@ static gboolean mlt_video_texture_populate(
 
     if (engine == NULL) {
         g_mutex_unlock(&texture_mutex);
-        return FALSE;
+        return mlt_video_texture_fail(
+            error,
+            "MLT preview texture has no active engine."
+        );
     }
 
     activate_engine_local(engine);
@@ -596,7 +619,10 @@ static gboolean mlt_video_texture_populate(
 
         g_mutex_unlock(&current_engine()->e_frame_mutex);
 
-        return FALSE;
+        return mlt_video_texture_fail(
+            error,
+            "MLT preview frame is not ready."
+        );
     }
 
     /*
@@ -630,7 +656,10 @@ static gboolean mlt_video_texture_populate(
 
         g_mutex_unlock(&current_engine()->e_frame_mutex);
 
-        return FALSE;
+        return mlt_video_texture_fail(
+            error,
+            "MLT preview texture has not received its first frame."
+        );
     }
 
     if (consumed_ready_frame) {
@@ -804,7 +833,10 @@ static gboolean mlt_video_texture_populate(
 
         g_mutex_unlock(&current_engine()->e_frame_mutex);
 
-        return FALSE;
+        return mlt_video_texture_fail(
+            error,
+            "MLT preview texture has no valid front buffer."
+        );
     }
 
     *target = GL_TEXTURE_2D;
