@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 
 import '../services/redleaf_catalog_service.dart';
 import '../services/redleaf_connection_service.dart';
+import '../services/redleaf_media_resource_service.dart';
 import '../services/redleaf_srt_service.dart';
 
 class RedleafPage extends StatefulWidget {
@@ -13,10 +14,12 @@ class RedleafPage extends StatefulWidget {
     super.key,
     required this.active,
     this.connection,
+    this.onOpenVerifiedMedia,
   });
 
   final bool active;
   final RedleafConnectionService? connection;
+  final ValueChanged<String>? onOpenVerifiedMedia;
 
   @override
   State<RedleafPage> createState() => _RedleafPageState();
@@ -26,6 +29,7 @@ class _RedleafPageState extends State<RedleafPage> {
   late final RedleafConnectionService _connection;
   late final RedleafSrtDiscoveryService _discovery;
   late final RedleafCatalogService _catalogs;
+  late final RedleafMediaResourceService _mediaResources;
   final TextEditingController _searchController = TextEditingController();
 
   String _query = '';
@@ -35,6 +39,10 @@ class _RedleafPageState extends State<RedleafPage> {
   bool _catalogMembershipLoading = false;
   String? _catalogMembershipError;
   String _loadedInstanceId = '';
+  RedleafMediaResourceResolution? _selectedMediaResolution;
+  bool _mediaResolutionLoading = false;
+  String? _selectedMediaSignature;
+  int _mediaResolutionSerial = 0;
 
   @override
   void initState() {
@@ -43,6 +51,7 @@ class _RedleafPageState extends State<RedleafPage> {
     _connection = widget.connection ?? RedleafConnectionService.instance;
     _discovery = RedleafSrtDiscoveryService(connection: _connection);
     _catalogs = RedleafCatalogService(connection: _connection);
+    _mediaResources = RedleafMediaResourceService(connection: _connection);
 
     _connection.addListener(_onConnectionChanged);
     _discovery.addListener(_onDiscoveryChanged);
@@ -82,12 +91,14 @@ class _RedleafPageState extends State<RedleafPage> {
     if (!_connection.isConnected) {
       _loadedInstanceId = '';
       _selectedDocId = null;
+      _resetMediaResolution();
       _resetCatalogFilter();
       _discovery.clear();
     } else if (_loadedInstanceId.isNotEmpty &&
         _loadedInstanceId != _connection.instanceId) {
       _loadedInstanceId = '';
       _selectedDocId = null;
+      _resetMediaResolution();
       _resetCatalogFilter();
       _discovery.clear();
     }
@@ -117,8 +128,20 @@ class _RedleafPageState extends State<RedleafPage> {
   }
 
   void _onDiscoveryChanged() {
-    if (mounted) {
-      setState(() {});
+    if (!mounted) {
+      return;
+    }
+
+    final selected = _selectedDocument;
+    final signature = selected == null ? null : _mediaSignature(selected);
+    final shouldResolve = selected != null &&
+        signature != _selectedMediaSignature &&
+        !_mediaResolutionLoading;
+
+    setState(() {});
+
+    if (shouldResolve) {
+      unawaited(_resolveSelectedMedia(selected));
     }
   }
 
@@ -135,6 +158,7 @@ class _RedleafPageState extends State<RedleafPage> {
             (document) => document.docId == _selectedDocId,
           )) {
         _selectedDocId = null;
+        _resetMediaResolution();
       }
     });
   }
@@ -148,6 +172,7 @@ class _RedleafPageState extends State<RedleafPage> {
     if (_loadedInstanceId != instanceId) {
       _loadedInstanceId = instanceId;
       _selectedDocId = null;
+      _resetMediaResolution();
       _resetCatalogFilter();
     }
 
@@ -253,6 +278,7 @@ class _RedleafPageState extends State<RedleafPage> {
               (document) => document.docId == _selectedDocId,
             )) {
           _selectedDocId = null;
+          _resetMediaResolution();
         }
       });
       return;
@@ -264,6 +290,7 @@ class _RedleafPageState extends State<RedleafPage> {
       _catalogMembershipLoading = true;
       _catalogMembershipError = null;
       _selectedDocId = null;
+      _resetMediaResolution();
     });
 
     await _loadCatalogMembership(catalog.id);
@@ -299,6 +326,76 @@ class _RedleafPageState extends State<RedleafPage> {
         _catalogMembershipError = error.toString();
       });
     }
+  }
+
+  void _resetMediaResolution() {
+    _mediaResolutionSerial += 1;
+    _selectedMediaResolution = null;
+    _mediaResolutionLoading = false;
+    _selectedMediaSignature = null;
+  }
+
+  String _mediaSignature(RedleafSrtDocument document) {
+    final media = document.media;
+    return <Object?>[
+      document.docId,
+      media.state,
+      media.path,
+      media.type,
+      media.source,
+      media.positionSeconds,
+      media.offsetSeconds,
+    ].join('|');
+  }
+
+  Future<void> _selectDocument(RedleafSrtDocument document) async {
+    setState(() {
+      _selectedDocId = document.docId;
+      _resetMediaResolution();
+    });
+
+    await _resolveSelectedMedia(document);
+  }
+
+  Future<void> _resolveSelectedMedia(RedleafSrtDocument document) async {
+    if (_selectedDocId != document.docId) {
+      return;
+    }
+
+    final serial = ++_mediaResolutionSerial;
+    final signature = _mediaSignature(document);
+
+    setState(() {
+      _mediaResolutionLoading = true;
+      _selectedMediaResolution = null;
+      _selectedMediaSignature = signature;
+    });
+
+    final resolution = await _mediaResources.resolve(document);
+
+    if (!mounted ||
+        serial != _mediaResolutionSerial ||
+        _selectedDocId != document.docId) {
+      return;
+    }
+
+    final current = _selectedDocument;
+    final currentSignature =
+        current == null ? null : _mediaSignature(current);
+
+    if (current != null && currentSignature != signature) {
+      setState(() {
+        _mediaResolutionLoading = false;
+      });
+      unawaited(_resolveSelectedMedia(current));
+      return;
+    }
+
+    setState(() {
+      _selectedMediaResolution = resolution;
+      _mediaResolutionLoading = false;
+      _selectedMediaSignature = signature;
+    });
   }
 
   RedleafSrtDocument? get _selectedDocument {
@@ -444,7 +541,9 @@ class _RedleafPageState extends State<RedleafPage> {
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        final showInspector = constraints.maxWidth >= 1180;
+        final showHandoffPanel = constraints.maxWidth >= 980;
+        final handoffPanelWidth =
+            constraints.maxWidth >= 1320 ? 370.0 : 330.0;
 
         return Column(
           children: [
@@ -467,16 +566,21 @@ class _RedleafPageState extends State<RedleafPage> {
                   Expanded(
                     child: _buildDocumentTable(context),
                   ),
-                  if (showInspector) ...[
+                  if (showHandoffPanel) ...[
                     const VerticalDivider(
                       width: 1,
                       thickness: 1,
                       color: Colors.white10,
                     ),
                     SizedBox(
-                      width: 330,
-                      child: _RedleafInspector(
+                      width: handoffPanelWidth,
+                      child: _RedleafHandoffPanel(
                         document: _selectedDocument,
+                        catalogName: _selectedCatalog?.name,
+                        mediaScanInProgress: _discovery.scanningMedia,
+                        resolution: _selectedMediaResolution,
+                        resolutionLoading: _mediaResolutionLoading,
+                        onOpenVerifiedMedia: widget.onOpenVerifiedMedia,
                       ),
                     ),
                   ],
@@ -749,11 +853,7 @@ class _RedleafPageState extends State<RedleafPage> {
               return _DocumentRow(
                 document: document,
                 selected: document.docId == _selectedDocId,
-                onTap: () {
-                  setState(() {
-                    _selectedDocId = document.docId;
-                  });
-                },
+                onTap: () => unawaited(_selectDocument(document)),
               );
             },
           ),
@@ -1168,12 +1268,36 @@ class _MediaStateLabel extends StatelessWidget {
   }
 }
 
-class _RedleafInspector extends StatelessWidget {
-  const _RedleafInspector({
+class _RedleafHandoffPanel extends StatelessWidget {
+  const _RedleafHandoffPanel({
     required this.document,
+    required this.catalogName,
+    required this.mediaScanInProgress,
+    required this.resolution,
+    required this.resolutionLoading,
+    required this.onOpenVerifiedMedia,
   });
 
   final RedleafSrtDocument? document;
+  final String? catalogName;
+  final bool mediaScanInProgress;
+  final RedleafMediaResourceResolution? resolution;
+  final bool resolutionLoading;
+  final ValueChanged<String>? onOpenVerifiedMedia;
+
+  VoidCallback? get _openVerifiedLocalFile {
+    final resolution = this.resolution;
+    final callback = onOpenVerifiedMedia;
+    final resource = resolution?.resolvedResource?.trim() ?? '';
+
+    if (resolution?.isLocalFileReady != true ||
+        callback == null ||
+        resource.isEmpty) {
+      return null;
+    }
+
+    return () => callback(resource);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1182,27 +1306,14 @@ class _RedleafInspector extends StatelessWidget {
     return Container(
       color: const Color(0xFF131313),
       child: document == null
-          ? const Center(
-              child: Padding(
-                padding: EdgeInsets.all(24),
-                child: Text(
-                  'Select an SRT to inspect its Redleaf identity and media relationship.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: 11,
-                    height: 1.45,
-                    color: Colors.white30,
-                  ),
-                ),
-              ),
-            )
+          ? const _EmptyHandoffState()
           : SingleChildScrollView(
               padding: const EdgeInsets.fromLTRB(18, 18, 18, 24),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   const Text(
-                    'REDLEAF DOCUMENT',
+                    'PLAYER HANDOFF',
                     style: TextStyle(
                       fontSize: 8.5,
                       fontWeight: FontWeight.w800,
@@ -1210,7 +1321,14 @@ class _RedleafInspector extends StatelessWidget {
                       color: Colors.white38,
                     ),
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 10),
+                  _HandoffMediaStatus(
+                    media: document.media,
+                    mediaScanInProgress: mediaScanInProgress,
+                    resolution: resolution,
+                    resolutionLoading: resolutionLoading,
+                  ),
+                  const SizedBox(height: 14),
                   Text(
                     document.fileName,
                     style: const TextStyle(
@@ -1226,6 +1344,10 @@ class _RedleafInspector extends StatelessWidget {
                     value: '${document.docId}',
                   ),
                   _InspectorRow(
+                    label: 'Catalog',
+                    value: catalogName ?? 'All SRTs',
+                  ),
+                  _InspectorRow(
                     label: 'Status',
                     value: document.status.isEmpty
                         ? 'Unknown'
@@ -1239,44 +1361,198 @@ class _RedleafInspector extends StatelessWidget {
                     label: 'Color',
                     value: document.color ?? '—',
                   ),
+                  _InspectorRow(
+                    label: 'Duration',
+                    value: _formatDuration(document.durationSeconds),
+                  ),
+                  _InspectorRow(
+                    label: 'SRT size',
+                    value: _formatByteCount(document.fileSizeBytes),
+                  ),
+                  if (document.processedAt != null)
+                    _InspectorRow(
+                      label: 'Processed',
+                      value: document.processedAt!,
+                    ),
+                  if (document.statusMessage != null) ...[
+                    const SizedBox(height: 4),
+                    _InfoBlock(
+                      heading: 'REDLEAF STATUS MESSAGE',
+                      child: Text(
+                        document.statusMessage!,
+                        style: const TextStyle(
+                          fontSize: 10.5,
+                          height: 1.45,
+                          color: Colors.white54,
+                        ),
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: 14),
                   const Divider(height: 1, color: Colors.white10),
                   const SizedBox(height: 14),
-                  const Text(
-                    'PATH',
-                    style: TextStyle(
-                      fontSize: 8.5,
-                      fontWeight: FontWeight.w800,
-                      letterSpacing: 1.0,
-                      color: Colors.white38,
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  SelectableText(
-                    document.relativePath,
-                    style: const TextStyle(
-                      fontSize: 10.5,
-                      height: 1.4,
-                      color: Colors.white60,
+                  _InfoBlock(
+                    heading: 'SRT REFERENCE',
+                    child: SelectableText(
+                      document.relativePath,
+                      style: const TextStyle(
+                        fontSize: 10.5,
+                        height: 1.4,
+                        color: Colors.white60,
+                      ),
                     ),
                   ),
                   const SizedBox(height: 16),
-                  const Text(
-                    'MEDIA RELATIONSHIP',
-                    style: TextStyle(
-                      fontSize: 8.5,
-                      fontWeight: FontWeight.w800,
-                      letterSpacing: 1.0,
-                      color: Colors.white38,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
+                  const Divider(height: 1, color: Colors.white10),
+                  const SizedBox(height: 14),
                   _MediaRelationshipBlock(
                     media: document.media,
+                    mediaScanInProgress: mediaScanInProgress,
+                  ),
+                  const SizedBox(height: 16),
+                  const Divider(height: 1, color: Colors.white10),
+                  const SizedBox(height: 14),
+                  _ResourceResolutionBlock(
+                    resolution: resolution,
+                    loading: resolutionLoading,
+                    media: document.media,
+                  ),
+                  const SizedBox(height: 16),
+                  const Divider(height: 1, color: Colors.white10),
+                  const SizedBox(height: 14),
+                  _PlayerBoundaryBlock(
+                    canOpenVerifiedLocalFile:
+                        resolution?.isLocalFileReady == true &&
+                            onOpenVerifiedMedia != null,
+                  ),
+                  const SizedBox(height: 14),
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      onPressed: _openVerifiedLocalFile,
+                      icon: const Icon(Icons.play_arrow, size: 16),
+                      label: Text(
+                        _handoffButtonLabel(
+                          document.media,
+                          resolution,
+                          resolutionLoading,
+                          onOpenVerifiedMedia != null,
+                        ),
+                        style: const TextStyle(
+                          fontSize: 9.5,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0.35,
+                        ),
+                      ),
+                    ),
                   ),
                 ],
               ),
             ),
+    );
+  }
+}
+
+class _EmptyHandoffState extends StatelessWidget {
+  const _EmptyHandoffState();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Center(
+      child: Padding(
+        padding: EdgeInsets.all(26),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.playlist_play,
+              size: 30,
+              color: Colors.white24,
+            ),
+            SizedBox(height: 12),
+            Text(
+              'Select an SRT',
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+                color: Colors.white54,
+              ),
+            ),
+            SizedBox(height: 7),
+            Text(
+              'This panel will queue the Redleaf identity and media relationship for inspection before anything is handed to MLT Player.',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 10.5,
+                height: 1.45,
+                color: Colors.white30,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _HandoffMediaStatus extends StatelessWidget {
+  const _HandoffMediaStatus({
+    required this.media,
+    required this.mediaScanInProgress,
+    required this.resolution,
+    required this.resolutionLoading,
+  });
+
+  final RedleafMediaLink media;
+  final bool mediaScanInProgress;
+  final RedleafMediaResourceResolution? resolution;
+  final bool resolutionLoading;
+
+  @override
+  Widget build(BuildContext context) {
+    final (icon, label, color) = resolutionLoading
+        ? (
+            Icons.sync,
+            'RESOLVING RESOURCE',
+            Colors.lightBlueAccent,
+          )
+        : _resolutionStatusPresentation(
+            media,
+            resolution,
+            mediaScanInProgress,
+          );
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.07),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(
+          color: color.withValues(alpha: 0.22),
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            icon,
+            size: 16,
+            color: color,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              label,
+              style: TextStyle(
+                fontSize: 9.5,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 0.55,
+                color: color,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -1298,7 +1574,7 @@ class _InspectorRow extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           SizedBox(
-            width: 76,
+            width: 82,
             child: Text(
               label,
               style: const TextStyle(
@@ -1323,40 +1599,92 @@ class _InspectorRow extends StatelessWidget {
   }
 }
 
+class _InfoBlock extends StatelessWidget {
+  const _InfoBlock({
+    required this.heading,
+    required this.child,
+  });
+
+  final String heading;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          heading,
+          style: const TextStyle(
+            fontSize: 8.5,
+            fontWeight: FontWeight.w800,
+            letterSpacing: 1.0,
+            color: Colors.white38,
+          ),
+        ),
+        const SizedBox(height: 7),
+        child,
+      ],
+    );
+  }
+}
+
 class _MediaRelationshipBlock extends StatelessWidget {
   const _MediaRelationshipBlock({
     required this.media,
+    required this.mediaScanInProgress,
   });
 
   final RedleafMediaLink media;
+  final bool mediaScanInProgress;
 
   @override
   Widget build(BuildContext context) {
     if (media.state == RedleafMediaLinkState.unknown) {
-      return const Text(
-        'MLT could not verify Redleaf’s media status for this SRT.',
-        style: TextStyle(
-          fontSize: 10.5,
-          height: 1.45,
-          color: Colors.orangeAccent,
+      return _InfoBlock(
+        heading: 'MEDIA RELATIONSHIP',
+        child: Text(
+          mediaScanInProgress
+              ? 'Redleaf media status is still being checked. No Player resource has been inferred.'
+              : 'MLT Player could not verify Redleaf’s media status for this SRT. Unknown is not treated as transcript-only.',
+          style: const TextStyle(
+            fontSize: 10.5,
+            height: 1.45,
+            color: Colors.orangeAccent,
+          ),
         ),
       );
     }
 
     if (!media.isLinked) {
-      return const Text(
-        'Redleaf reports no upstream media attached. This remains a valid transcript-only document.',
-        style: TextStyle(
-          fontSize: 10.5,
-          height: 1.45,
-          color: Colors.white54,
+      return const _InfoBlock(
+        heading: 'MEDIA RELATIONSHIP',
+        child: Text(
+          'Redleaf explicitly reports no upstream media attached. This is a valid transcript-only SRT and there is no media resource to hand to the Player.',
+          style: TextStyle(
+            fontSize: 10.5,
+            height: 1.45,
+            color: Colors.white54,
+          ),
         ),
       );
     }
 
+    final path = media.path?.trim() ?? '';
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        const Text(
+          'MEDIA RELATIONSHIP',
+          style: TextStyle(
+            fontSize: 8.5,
+            fontWeight: FontWeight.w800,
+            letterSpacing: 1.0,
+            color: Colors.white38,
+          ),
+        ),
+        const SizedBox(height: 8),
         _InspectorRow(
           label: 'Type',
           value: media.type?.toUpperCase() ?? 'MEDIA',
@@ -1365,20 +1693,424 @@ class _MediaRelationshipBlock extends StatelessWidget {
           label: 'Source',
           value: media.source ?? 'Unknown',
         ),
-        if (media.path != null) ...[
-          const SizedBox(height: 4),
+        _InspectorRow(
+          label: 'Position',
+          value: _formatSeconds(media.positionSeconds),
+        ),
+        _InspectorRow(
+          label: 'Offset',
+          value: _formatSignedSeconds(media.offsetSeconds),
+        ),
+        const SizedBox(height: 6),
+        const Text(
+          'RESOURCE REFERENCE',
+          style: TextStyle(
+            fontSize: 8.5,
+            fontWeight: FontWeight.w800,
+            letterSpacing: 1.0,
+            color: Colors.white38,
+          ),
+        ),
+        const SizedBox(height: 7),
+        if (path.isEmpty)
+          const Text(
+            'Redleaf reports linked media but did not provide a path or URL reference.',
+            style: TextStyle(
+              fontSize: 10.5,
+              height: 1.45,
+              color: Colors.orangeAccent,
+            ),
+          )
+        else
           SelectableText(
-            media.path!,
+            path,
             style: const TextStyle(
               fontSize: 10.5,
               height: 1.4,
-              color: Colors.white60,
+              color: Colors.white70,
             ),
           ),
-        ],
       ],
     );
   }
+}
+
+class _ResourceResolutionBlock extends StatelessWidget {
+  const _ResourceResolutionBlock({
+    required this.resolution,
+    required this.loading,
+    required this.media,
+  });
+
+  final RedleafMediaResourceResolution? resolution;
+  final bool loading;
+  final RedleafMediaLink media;
+
+  @override
+  Widget build(BuildContext context) {
+    if (loading) {
+      return const _InfoBlock(
+        heading: 'RESOURCE RESOLUTION',
+        child: Row(
+          children: [
+            SizedBox(
+              width: 14,
+              height: 14,
+              child: CircularProgressIndicator(strokeWidth: 1.5),
+            ),
+            SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'Resolving Redleaf’s media reference without opening the Player…',
+                style: TextStyle(
+                  fontSize: 10.5,
+                  height: 1.4,
+                  color: Colors.white54,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    final resolution = this.resolution;
+    if (resolution == null) {
+      return _InfoBlock(
+        heading: 'RESOURCE RESOLUTION',
+        child: Text(
+          media.state == RedleafMediaLinkState.unknown
+              ? 'Waiting for Redleaf media status before resolving a resource.'
+              : 'No resource-resolution result is available yet.',
+          style: const TextStyle(
+            fontSize: 10.5,
+            height: 1.45,
+            color: Colors.white38,
+          ),
+        ),
+      );
+    }
+
+    final (label, color) = switch (resolution.state) {
+      RedleafMediaResourceState.localFileReady => (
+          'VERIFIED LOCAL FILE',
+          Colors.greenAccent,
+        ),
+      RedleafMediaResourceState.webUrlCandidate => (
+          'WEB CANDIDATE',
+          Colors.lightBlueAccent,
+        ),
+      RedleafMediaResourceState.transcriptOnly => (
+          'TRANSCRIPT ONLY',
+          Colors.white54,
+        ),
+      RedleafMediaResourceState.unknown => (
+          'UNKNOWN',
+          Colors.orangeAccent,
+        ),
+      RedleafMediaResourceState.unavailable => (
+          'UNAVAILABLE',
+          Colors.redAccent,
+        ),
+    };
+
+    final resource = resolution.resolvedResource?.trim() ?? '';
+    final virtualPath = resolution.virtualPath?.trim() ?? '';
+    final message = resolution.message?.trim() ?? '';
+
+    return _InfoBlock(
+      heading: 'RESOURCE RESOLUTION',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: 0.07),
+              borderRadius: BorderRadius.circular(5),
+              border: Border.all(
+                color: color.withValues(alpha: 0.22),
+              ),
+            ),
+            child: Text(
+              label,
+              style: TextStyle(
+                fontSize: 8.5,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 0.55,
+                color: color,
+              ),
+            ),
+          ),
+          if (virtualPath.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            const Text(
+              'REDLEAF VIRTUAL PATH',
+              style: TextStyle(
+                fontSize: 8,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 0.8,
+                color: Colors.white30,
+              ),
+            ),
+            const SizedBox(height: 5),
+            SelectableText(
+              virtualPath,
+              style: const TextStyle(
+                fontSize: 10.5,
+                height: 1.4,
+                color: Colors.white60,
+              ),
+            ),
+          ],
+          if (resource.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Text(
+              resolution.isLocalFileReady
+                  ? 'VERIFIED PHYSICAL RESOURCE'
+                  : 'PRESERVED WEB RESOURCE',
+              style: const TextStyle(
+                fontSize: 8,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 0.8,
+                color: Colors.white30,
+              ),
+            ),
+            const SizedBox(height: 5),
+            SelectableText(
+              resource,
+              style: const TextStyle(
+                fontSize: 10.5,
+                height: 1.4,
+                color: Colors.white70,
+              ),
+            ),
+          ],
+          if (message.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Text(
+              message,
+              style: TextStyle(
+                fontSize: 10,
+                height: 1.4,
+                color: resolution.state == RedleafMediaResourceState.unavailable
+                    ? Colors.redAccent
+                    : Colors.white38,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _PlayerBoundaryBlock extends StatelessWidget {
+  const _PlayerBoundaryBlock({
+    required this.canOpenVerifiedLocalFile,
+  });
+
+  final bool canOpenVerifiedLocalFile;
+
+  @override
+  Widget build(BuildContext context) {
+    final heading =
+        canOpenVerifiedLocalFile ? 'VERIFIED FOR PLAYER' : 'PLAYER GATE CLOSED';
+    final message = canOpenVerifiedLocalFile
+        ? 'Only this verified local filesystem resource may be handed to MLT Player.'
+        : 'MLT Player remains blocked unless Redleaf media resolves to a verified local filesystem resource.';
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(11),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.025),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: Colors.white10),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(
+            canOpenVerifiedLocalFile
+                ? Icons.verified_user_outlined
+                : Icons.shield_outlined,
+            size: 15,
+            color: canOpenVerifiedLocalFile
+                ? Colors.greenAccent
+                : Colors.white38,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  heading,
+                  style: TextStyle(
+                    fontSize: 8.5,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 0.6,
+                    color: canOpenVerifiedLocalFile
+                        ? Colors.greenAccent
+                        : Colors.white54,
+                  ),
+                ),
+                const SizedBox(height: 5),
+                Text(
+                  message,
+                  style: const TextStyle(
+                    fontSize: 10,
+                    height: 1.4,
+                    color: Colors.white38,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+(IconData, String, Color) _resolutionStatusPresentation(
+  RedleafMediaLink media,
+  RedleafMediaResourceResolution? resolution,
+  bool mediaScanInProgress,
+) {
+  if (resolution != null) {
+    return switch (resolution.state) {
+      RedleafMediaResourceState.localFileReady => (
+          Icons.verified_outlined,
+          'VERIFIED LOCAL FILE',
+          Colors.greenAccent,
+        ),
+      RedleafMediaResourceState.webUrlCandidate => (
+          Icons.language,
+          'WEB CANDIDATE',
+          Colors.lightBlueAccent,
+        ),
+      RedleafMediaResourceState.transcriptOnly => (
+          Icons.notes_outlined,
+          'TRANSCRIPT ONLY',
+          Colors.white54,
+        ),
+      RedleafMediaResourceState.unknown => (
+          Icons.help_outline,
+          mediaScanInProgress ? 'MEDIA STATUS PENDING' : 'UNKNOWN',
+          Colors.orangeAccent,
+        ),
+      RedleafMediaResourceState.unavailable => (
+          Icons.error_outline,
+          'RESOURCE UNAVAILABLE',
+          Colors.redAccent,
+        ),
+    };
+  }
+
+  return switch (media.state) {
+    RedleafMediaLinkState.linked => (
+        media.isVideo ? Icons.movie_outlined : Icons.audiotrack,
+        media.isVideo ? 'LINKED VIDEO' : 'LINKED AUDIO',
+        Colors.greenAccent,
+      ),
+    RedleafMediaLinkState.notLinked => (
+        Icons.notes_outlined,
+        'TRANSCRIPT ONLY',
+        Colors.white54,
+      ),
+    RedleafMediaLinkState.unknown => (
+        Icons.help_outline,
+        mediaScanInProgress ? 'MEDIA STATUS PENDING' : 'MEDIA STATUS UNKNOWN',
+        Colors.orangeAccent,
+      ),
+  };
+}
+
+String _handoffButtonLabel(
+  RedleafMediaLink media,
+  RedleafMediaResourceResolution? resolution,
+  bool loading,
+  bool hasOpenCallback,
+) {
+  if (loading) {
+    return 'RESOLVING RESOURCE';
+  }
+
+  if (resolution != null) {
+    return switch (resolution.state) {
+      RedleafMediaResourceState.localFileReady => hasOpenCallback
+          ? 'OPEN VERIFIED FILE IN PLAYER'
+          : 'PLAYER HANDOFF NOT CONNECTED',
+      RedleafMediaResourceState.webUrlCandidate =>
+        'WEB PLAYBACK NOT VERIFIED',
+      RedleafMediaResourceState.transcriptOnly =>
+        'NO LINKED MEDIA TO OPEN',
+      RedleafMediaResourceState.unknown =>
+        'WAITING FOR MEDIA STATUS',
+      RedleafMediaResourceState.unavailable =>
+        'RESOURCE NOT AVAILABLE',
+    };
+  }
+
+  return switch (media.state) {
+    RedleafMediaLinkState.linked => 'RESOLUTION PENDING',
+    RedleafMediaLinkState.notLinked => 'NO LINKED MEDIA TO OPEN',
+    RedleafMediaLinkState.unknown => 'WAITING FOR MEDIA STATUS',
+  };
+}
+
+String _formatDuration(double? seconds) {
+  if (seconds == null || !seconds.isFinite || seconds < 0) {
+    return '—';
+  }
+
+  final totalSeconds = seconds.round();
+  final hours = totalSeconds ~/ 3600;
+  final minutes = (totalSeconds % 3600) ~/ 60;
+  final remainingSeconds = totalSeconds % 60;
+
+  if (hours > 0) {
+    return '$hours:${minutes.toString().padLeft(2, '0')}:'
+        '${remainingSeconds.toString().padLeft(2, '0')}';
+  }
+
+  return '$minutes:${remainingSeconds.toString().padLeft(2, '0')}';
+}
+
+String _formatByteCount(int? bytes) {
+  if (bytes == null || bytes < 0) {
+    return '—';
+  }
+
+  if (bytes < 1024) {
+    return '$bytes B';
+  }
+
+  final kib = bytes / 1024;
+  if (kib < 1024) {
+    return '${kib.toStringAsFixed(kib >= 100 ? 0 : 1)} KiB';
+  }
+
+  final mib = kib / 1024;
+  return '${mib.toStringAsFixed(mib >= 100 ? 0 : 1)} MiB';
+}
+
+String _formatSeconds(double? seconds) {
+  if (seconds == null || !seconds.isFinite) {
+    return '—';
+  }
+  return '${seconds.toStringAsFixed(3)} s';
+}
+
+String _formatSignedSeconds(double? seconds) {
+  if (seconds == null || !seconds.isFinite) {
+    return '—';
+  }
+
+  final prefix = seconds > 0 ? '+' : '';
+  return '$prefix${seconds.toStringAsFixed(3)} s';
 }
 
 class _ConnectionChip extends StatelessWidget {

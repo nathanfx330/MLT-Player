@@ -2156,6 +2156,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
             Expanded(
               child: RedleafPage(
                 active: widget.active,
+                onOpenVerifiedMedia: widget.onOpenMedia,
               ),
             ),
           ],
