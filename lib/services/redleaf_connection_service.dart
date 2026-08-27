@@ -21,6 +21,8 @@ class RedleafConnectionService extends ChangeNotifier {
 
   static const String defaultServerUrl = 'http://127.0.0.1:5000';
   static const Duration _requestTimeout = Duration(seconds: 10);
+  static const String _inventoryNullProbeType =
+      '__MLT_PLAYER_INVENTORY_NULL_PROBE__';
 
   final Directory _configDirectory;
 
@@ -32,6 +34,11 @@ class RedleafConnectionService extends ChangeNotifier {
   String _instanceId = '';
   String _projectName = '';
   String _baseDirectory = '';
+  int _totalDocumentCount = 0;
+  int _unknownFileTypeCount = 0;
+  Map<String, int> _fileTypeCounts = <String, int>{};
+  bool _inventoryLoaded = false;
+  String? _inventoryError;
   String? _lastError;
   RedleafConnectionStatus _status = RedleafConnectionStatus.disconnected;
 
@@ -42,6 +49,12 @@ class RedleafConnectionService extends ChangeNotifier {
   String get instanceId => _instanceId;
   String get projectName => _projectName;
   String get baseDirectory => _baseDirectory;
+  int get totalDocumentCount => _totalDocumentCount;
+  int get unknownFileTypeCount => _unknownFileTypeCount;
+  Map<String, int> get fileTypeCounts =>
+      Map<String, int>.unmodifiable(_fileTypeCounts);
+  bool get inventoryLoaded => _inventoryLoaded;
+  String? get inventoryError => _inventoryError;
   String? get lastError => _lastError;
   RedleafConnectionStatus get status => _status;
 
@@ -122,6 +135,7 @@ class RedleafConnectionService extends ChangeNotifier {
     _instanceId = '';
     _projectName = '';
     _baseDirectory = '';
+    _clearInventory();
     _lastError = null;
     _status = RedleafConnectionStatus.signingIn;
     notifyListeners();
@@ -200,6 +214,11 @@ class RedleafConnectionService extends ChangeNotifier {
       _instanceId = instanceId;
       _projectName = (info['project_name'] ?? 'Redleaf').toString().trim();
       _baseDirectory = (info['base_dir'] ?? '').toString().trim();
+
+      // Inventory is intentionally best-effort. A Redleaf connection is still
+      // valid if an older server cannot provide dashboard inventory yet.
+      await _fetchInventory(client);
+
       _lastError = null;
       _status = RedleafConnectionStatus.connected;
       notifyListeners();
@@ -231,12 +250,27 @@ class RedleafConnectionService extends ChangeNotifier {
     }
   }
 
+  Future<void> refreshInventory() async {
+    if (!isConnected) {
+      return;
+    }
+
+    final client = HttpClient()..connectionTimeout = _requestTimeout;
+    try {
+      await _fetchInventory(client);
+      notifyListeners();
+    } finally {
+      client.close(force: true);
+    }
+  }
+
   void disconnect() {
     _sessionCookie = '';
     _csrfToken = '';
     _instanceId = '';
     _projectName = '';
     _baseDirectory = '';
+    _clearInventory();
     _lastError = null;
     _status = RedleafConnectionStatus.disconnected;
     notifyListeners();
@@ -295,6 +329,164 @@ class RedleafConnectionService extends ChangeNotifier {
       throw const FormatException('system-info response was not a JSON object');
     }
     return decoded;
+  }
+
+  Future<void> _fetchInventory(HttpClient client) async {
+    try {
+      final summary = await _fetchDashboardStatus(
+        client,
+        const <String, String>{
+          'page': '1',
+          'per_page': '1',
+        },
+      );
+
+      if (summary == null) {
+        _inventoryLoaded = false;
+        _inventoryError =
+            'Connected, but Redleaf did not provide file inventory.';
+        return;
+      }
+
+      final totalDocuments = _readInteger(summary['total_documents']);
+      if (totalDocuments == null) {
+        throw const FormatException(
+          'dashboard inventory did not include total_documents',
+        );
+      }
+
+      final rawTypes = summary['all_types'];
+      if (rawTypes is! List) {
+        throw const FormatException(
+          'dashboard inventory did not include all_types',
+        );
+      }
+
+      final fileTypes = rawTypes
+          .map((value) => value?.toString() ?? '')
+          .where((value) => value != _inventoryNullProbeType)
+          .toSet()
+          .toList()
+        ..sort((a, b) => a.toUpperCase().compareTo(b.toUpperCase()));
+
+      final nullProbe = await _fetchDashboardStatus(
+        client,
+        const <String, String>{
+          'page': '1',
+          'per_page': '1',
+          'filtered': '1',
+          'type': _inventoryNullProbeType,
+        },
+      );
+      final nullTypeCount =
+          _readInteger(nullProbe?['total_documents']) ?? 0;
+
+      final counts = <String, int>{};
+      var blankTypeCount = 0;
+
+      for (final fileType in fileTypes) {
+        final typeSummary = await _fetchDashboardStatus(
+          client,
+          <String, String>{
+            'page': '1',
+            'per_page': '1',
+            'filtered': '1',
+            'type': fileType,
+          },
+        );
+
+        final filteredTotal = _readInteger(typeSummary?['total_documents']);
+        if (filteredTotal == null) {
+          throw FormatException(
+            'dashboard inventory did not return a count for ${fileType.isEmpty ? 'files without an extension' : fileType}',
+          );
+        }
+
+        final actualCount = filteredTotal > nullTypeCount
+            ? filteredTotal - nullTypeCount
+            : 0;
+
+        if (fileType.trim().isEmpty) {
+          blankTypeCount += actualCount;
+        } else {
+          counts[fileType] = actualCount;
+        }
+      }
+
+      _totalDocumentCount = totalDocuments;
+      _unknownFileTypeCount = nullTypeCount + blankTypeCount;
+      _fileTypeCounts = counts;
+      _inventoryLoaded = true;
+      _inventoryError = null;
+    } on TimeoutException {
+      _inventoryLoaded = false;
+      _inventoryError = 'Timed out while reading Redleaf file inventory.';
+    } on SocketException catch (error) {
+      final detail = error.message.trim();
+      _inventoryLoaded = false;
+      _inventoryError = detail.isEmpty
+          ? 'Could not read Redleaf file inventory.'
+          : 'Could not read Redleaf file inventory: $detail';
+    } on FormatException catch (error) {
+      _inventoryLoaded = false;
+      _inventoryError = 'Could not read Redleaf file inventory: ${error.message}';
+    } catch (error) {
+      _inventoryLoaded = false;
+      _inventoryError = 'Could not read Redleaf file inventory: $error';
+    }
+  }
+
+  Future<Map<String, dynamic>?> _fetchDashboardStatus(
+    HttpClient client,
+    Map<String, String> queryParameters,
+  ) async {
+    final uri = Uri.parse('$_serverUrl/api/dashboard/status').replace(
+      queryParameters: queryParameters,
+    );
+
+    final request = await client.getUrl(uri).timeout(_requestTimeout);
+    request.followRedirects = false;
+    if (_sessionCookie.isNotEmpty) {
+      request.headers.set(HttpHeaders.cookieHeader, _sessionCookie);
+    }
+
+    final response = await request.close().timeout(_requestTimeout);
+    _captureSessionCookie(response);
+    final body = await _readBody(response).timeout(_requestTimeout);
+
+    if (response.statusCode != HttpStatus.ok) {
+      return null;
+    }
+
+    if (body.trimLeft().startsWith('<')) {
+      return null;
+    }
+
+    final decoded = jsonDecode(body);
+    if (decoded is! Map<String, dynamic>) {
+      throw const FormatException(
+        'dashboard inventory response was not a JSON object',
+      );
+    }
+    return decoded;
+  }
+
+  static int? _readInteger(dynamic value) {
+    if (value is int) {
+      return value;
+    }
+    if (value is num) {
+      return value.toInt();
+    }
+    return int.tryParse(value?.toString() ?? '');
+  }
+
+  void _clearInventory() {
+    _totalDocumentCount = 0;
+    _unknownFileTypeCount = 0;
+    _fileTypeCounts = <String, int>{};
+    _inventoryLoaded = false;
+    _inventoryError = null;
   }
 
   void _captureSessionCookie(HttpClientResponse response) {
@@ -373,6 +565,7 @@ class RedleafConnectionService extends ChangeNotifier {
     _instanceId = '';
     _projectName = '';
     _baseDirectory = '';
+    _clearInventory();
     _lastError = message;
     _status = RedleafConnectionStatus.error;
     notifyListeners();

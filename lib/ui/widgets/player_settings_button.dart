@@ -468,6 +468,80 @@ class _RedleafStatusBlock extends StatelessWidget {
                         color: Colors.white60,
                       ),
                     ),
+                  const SizedBox(height: 10),
+                  const Divider(height: 1, color: Colors.white12),
+                  const SizedBox(height: 9),
+                  Row(
+                    children: [
+                      const Expanded(
+                        child: Text(
+                          'INDEXED FILES',
+                          style: TextStyle(
+                            fontSize: 9.5,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 0.8,
+                            color: Colors.white54,
+                          ),
+                        ),
+                      ),
+                      TextButton.icon(
+                        onPressed: () {
+                          unawaited(redleaf.refreshInventory());
+                        },
+                        style: TextButton.styleFrom(
+                          visualDensity: VisualDensity.compact,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 5,
+                            vertical: 1,
+                          ),
+                          minimumSize: const Size(0, 24),
+                        ),
+                        icon: const Icon(Icons.refresh, size: 13),
+                        label: const Text(
+                          'REFRESH',
+                          style: TextStyle(fontSize: 9.5),
+                        ),
+                      ),
+                    ],
+                  ),
+                  if (redleaf.inventoryLoaded) ...[
+                    Text(
+                      '${_formatCount(redleaf.totalDocumentCount)} total indexed files',
+                      style: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                        color: Colors.white70,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    _InventoryTypeWrap(redleaf: redleaf),
+                  ] else if (redleaf.inventoryError != null) ...[
+                    Text(
+                      'File inventory unavailable',
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w700,
+                        color: Theme.of(context).colorScheme.primary,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      redleaf.inventoryError!,
+                      style: const TextStyle(
+                        fontSize: 10.5,
+                        height: 1.35,
+                        color: Colors.white54,
+                      ),
+                    ),
+                  ] else ...[
+                    const Text(
+                      'No file inventory has been read yet.',
+                      style: TextStyle(
+                        fontSize: 10.5,
+                        color: Colors.white54,
+                      ),
+                    ),
+                  ],
                 ],
                 if (redleaf.status == RedleafConnectionStatus.error &&
                     redleaf.lastError != null) ...[
@@ -495,6 +569,122 @@ class _RedleafStatusBlock extends StatelessWidget {
       return trimmed;
     }
     return '${trimmed.substring(0, 12)}…';
+  }
+
+  static String _formatCount(int value) {
+    final digits = value.abs().toString();
+    final buffer = StringBuffer();
+
+    for (var i = 0; i < digits.length; i++) {
+      if (i > 0 && (digits.length - i) % 3 == 0) {
+        buffer.write(',');
+      }
+      buffer.write(digits[i]);
+    }
+
+    return value < 0 ? '-$buffer' : buffer.toString();
+  }
+}
+
+class _InventoryTypeWrap extends StatelessWidget {
+  const _InventoryTypeWrap({required this.redleaf});
+
+  final RedleafConnectionService redleaf;
+
+  @override
+  Widget build(BuildContext context) {
+    final entries = redleaf.fileTypeCounts.entries.toList()
+      ..sort(
+        (a, b) => a.key.toUpperCase().compareTo(b.key.toUpperCase()),
+      );
+
+    final items = <Widget>[
+      for (final entry in entries)
+        _InventoryTypePill(
+          label: entry.key,
+          count: entry.value,
+        ),
+      if (redleaf.unknownFileTypeCount > 0)
+        _InventoryTypePill(
+          label: 'UNKNOWN',
+          count: redleaf.unknownFileTypeCount,
+        ),
+    ];
+
+    if (items.isEmpty) {
+      return const Text(
+        'No indexed file types reported.',
+        style: TextStyle(
+          fontSize: 10.5,
+          color: Colors.white54,
+        ),
+      );
+    }
+
+    return Wrap(
+      spacing: 6,
+      runSpacing: 6,
+      children: items,
+    );
+  }
+}
+
+class _InventoryTypePill extends StatelessWidget {
+  const _InventoryTypePill({
+    required this.label,
+    required this.count,
+  });
+
+  final String label;
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+      decoration: BoxDecoration(
+        color: const Color(0x0AFFFFFF),
+        borderRadius: BorderRadius.circular(5),
+        border: Border.all(color: Colors.white12),
+      ),
+      child: Text.rich(
+        TextSpan(
+          children: [
+            TextSpan(
+              text: label.toUpperCase(),
+              style: const TextStyle(
+                fontSize: 10,
+                fontWeight: FontWeight.w700,
+                color: Colors.white60,
+              ),
+            ),
+            const TextSpan(text: '  '),
+            TextSpan(
+              text: _formatCount(count),
+              style: TextStyle(
+                fontSize: 10.5,
+                fontWeight: FontWeight.w800,
+                color: Theme.of(context).colorScheme.primary,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  static String _formatCount(int value) {
+    final digits = value.abs().toString();
+    final buffer = StringBuffer();
+
+    for (var i = 0; i < digits.length; i++) {
+      if (i > 0 && (digits.length - i) % 3 == 0) {
+        buffer.write(',');
+      }
+      buffer.write(digits[i]);
+    }
+
+    return value < 0 ? '-$buffer' : buffer.toString();
   }
 }
 
