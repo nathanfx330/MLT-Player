@@ -225,6 +225,40 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
     setState(() => _workspaceSection = section);
   }
 
+  Future<void> _renameActiveRedleafProject(String name) async {
+    final current = _activeWorkspaceProject;
+    final instanceId = current?.redleafInstanceId;
+
+    if (current == null || !current.isRedleaf || instanceId == null) {
+      throw StateError('No Redleaf project is currently active.');
+    }
+
+    await _workspaceProjectService.renameRedleafProject(
+      instanceId,
+      name,
+    );
+
+    if (!mounted) {
+      return;
+    }
+
+    WorkspaceProject? updated;
+    for (final project in _workspaceProjectService.projects) {
+      if (project.key == current.key) {
+        updated = project;
+        break;
+      }
+    }
+
+    if (updated == null) {
+      throw StateError('The renamed Redleaf project could not be reloaded.');
+    }
+
+    setState(() {
+      _activeWorkspaceProject = updated;
+    });
+  }
+
   void _openExplorerProjectView({
     String? catalogId,
     int? exactRating,
@@ -287,6 +321,7 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
                       activeWorkspaceProject.isRedleaf)
                     _RedleafProjectSyncView(
                       project: activeWorkspaceProject,
+                      onRename: _renameActiveRedleafProject,
                     )
                   else
                     ProjectPage(
@@ -464,9 +499,111 @@ class _WorkspaceTab extends StatelessWidget {
 class _RedleafProjectSyncView extends StatelessWidget {
   const _RedleafProjectSyncView({
     required this.project,
+    required this.onRename,
   });
 
   final WorkspaceProject project;
+  final Future<void> Function(String name) onRename;
+
+  Future<void> _showRenameDialog(BuildContext context) async {
+    final controller = TextEditingController(text: project.name);
+
+    try {
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) {
+          var saving = false;
+          String? errorText;
+
+          return StatefulBuilder(
+            builder: (context, setDialogState) {
+              Future<void> save() async {
+                final name = controller.text.trim();
+
+                if (name.isEmpty) {
+                  setDialogState(() {
+                    errorText = 'Project name cannot be empty.';
+                  });
+                  return;
+                }
+
+                setDialogState(() {
+                  saving = true;
+                  errorText = null;
+                });
+
+                try {
+                  await onRename(name);
+
+                  if (dialogContext.mounted) {
+                    Navigator.of(dialogContext).pop();
+                  }
+                } catch (error) {
+                  if (!dialogContext.mounted) {
+                    return;
+                  }
+
+                  setDialogState(() {
+                    saving = false;
+                    errorText = error is ArgumentError
+                        ? (error.message?.toString() ??
+                            'Could not rename the project.')
+                        : 'Could not rename the Redleaf project.';
+                  });
+                }
+              }
+
+              return AlertDialog(
+                title: const Text('Rename Redleaf Project'),
+                content: SizedBox(
+                  width: 420,
+                  child: TextField(
+                    controller: controller,
+                    autofocus: true,
+                    enabled: !saving,
+                    textInputAction: TextInputAction.done,
+                    onSubmitted: (_) {
+                      if (!saving) {
+                        unawaited(save());
+                      }
+                    },
+                    decoration: InputDecoration(
+                      labelText: 'Project name',
+                      errorText: errorText,
+                      helperText:
+                          'This name is stored only in MLT Player.',
+                    ),
+                  ),
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: saving
+                        ? null
+                        : () => Navigator.of(dialogContext).pop(),
+                    child: const Text('CANCEL'),
+                  ),
+                  FilledButton(
+                    onPressed: saving ? null : save,
+                    child: saving
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                            ),
+                          )
+                        : const Text('RENAME'),
+                  ),
+                ],
+              );
+            },
+          );
+        },
+      );
+    } finally {
+      controller.dispose();
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -533,6 +670,15 @@ class _RedleafProjectSyncView extends StatelessWidget {
                             color: Color(0xFFE8A33D),
                           ),
                         ),
+                      ),
+                      const SizedBox(width: 10),
+                      OutlinedButton.icon(
+                        onPressed: () => _showRenameDialog(context),
+                        icon: const Icon(
+                          Icons.edit_outlined,
+                          size: 15,
+                        ),
+                        label: const Text('RENAME PROJECT'),
                       ),
                     ],
                   ),
