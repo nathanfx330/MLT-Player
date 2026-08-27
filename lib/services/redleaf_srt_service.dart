@@ -139,6 +139,7 @@ class RedleafSrtDiscoveryService extends ChangeNotifier {
   String? _lastError;
   int _expectedSrtCount = 0;
   int _mediaCheckedCount = 0;
+  String _loadedInstanceId = '';
 
   List<RedleafSrtDocument> get documents =>
       List<RedleafSrtDocument>.unmodifiable(_documents);
@@ -148,6 +149,7 @@ class RedleafSrtDiscoveryService extends ChangeNotifier {
   String? get lastError => _lastError;
   int get expectedSrtCount => _expectedSrtCount;
   int get mediaCheckedCount => _mediaCheckedCount;
+  String get loadedInstanceId => _loadedInstanceId;
 
   int get documentCount => _documents.length;
 
@@ -176,6 +178,7 @@ class RedleafSrtDiscoveryService extends ChangeNotifier {
       _documents = const <RedleafSrtDocument>[];
       _expectedSrtCount = 0;
       _mediaCheckedCount = 0;
+      _loadedInstanceId = '';
       _lastError = 'Connect to Redleaf in Settings before loading SRTs.';
       notifyListeners();
       return false;
@@ -201,6 +204,7 @@ class RedleafSrtDiscoveryService extends ChangeNotifier {
       }
 
       _documents = fetched;
+      _loadedInstanceId = _connection.instanceId;
       _loading = false;
       _scanningMedia = fetched.isNotEmpty;
       notifyListeners();
@@ -234,6 +238,47 @@ class RedleafSrtDiscoveryService extends ChangeNotifier {
     return false;
   }
 
+  void loadCachedDocuments({
+    required String instanceId,
+    required Iterable<RedleafSrtDocument> documents,
+  }) {
+    final normalizedInstanceId = instanceId.trim();
+    if (normalizedInstanceId.isEmpty) {
+      throw ArgumentError.value(
+        instanceId,
+        'instanceId',
+        'Redleaf instance ID cannot be empty.',
+      );
+    }
+
+    if (_loading || _scanningMedia) {
+      throw StateError(
+        'Cannot replace Redleaf discovery state while a live refresh is running.',
+      );
+    }
+
+    final byId = <int, RedleafSrtDocument>{
+      for (final document in documents) document.docId: document,
+    };
+
+    final cached = byId.values.toList(growable: false)
+      ..sort(
+        (a, b) => a.relativePath.toLowerCase().compareTo(
+              b.relativePath.toLowerCase(),
+            ),
+      );
+
+    _documents = List<RedleafSrtDocument>.unmodifiable(cached);
+    _loadedInstanceId = normalizedInstanceId;
+    _loading = false;
+    _scanningMedia = false;
+    _lastError = null;
+    _expectedSrtCount = cached.length;
+    _mediaCheckedCount =
+        cached.where((document) => document.media.isKnown).length;
+    notifyListeners();
+  }
+
   void clear() {
     _documents = const <RedleafSrtDocument>[];
     _loading = false;
@@ -241,6 +286,7 @@ class RedleafSrtDiscoveryService extends ChangeNotifier {
     _lastError = null;
     _expectedSrtCount = 0;
     _mediaCheckedCount = 0;
+    _loadedInstanceId = '';
     notifyListeners();
   }
 

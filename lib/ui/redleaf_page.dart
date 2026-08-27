@@ -5,9 +5,11 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../models/redleaf_player_handoff.dart';
+import '../models/workspace_project.dart';
 import '../services/redleaf_catalog_service.dart';
 import '../services/redleaf_connection_service.dart';
 import '../services/redleaf_media_resource_service.dart';
+import '../services/redleaf_project_snapshot_service.dart';
 import '../services/redleaf_srt_service.dart';
 import '../services/redleaf_transcript_service.dart';
 
@@ -15,12 +17,20 @@ class RedleafPage extends StatefulWidget {
   const RedleafPage({
     super.key,
     required this.active,
+    this.workspaceProject,
     this.connection,
     this.onOpenVerifiedMedia,
     this.onOpenRedleafHandoff,
   });
 
   final bool active;
+
+  /// Saved MLT Player workspace identity for this Redleaf instance.
+  ///
+  /// This is deliberately separate from the live Redleaf connection so the
+  /// page can later reopen a cached project even while Redleaf is disconnected.
+  final WorkspaceProject? workspaceProject;
+
   final RedleafConnectionService? connection;
 
   /// Legacy D3 verified-media callback. Kept so the currently wired Explorer
@@ -42,6 +52,7 @@ class _RedleafPageState extends State<RedleafPage> {
   late final RedleafCatalogService _catalogs;
   late final RedleafMediaResourceService _mediaResources;
   late final RedleafTranscriptService _transcripts;
+  late final RedleafProjectSnapshotService _snapshots;
   final TextEditingController _searchController = TextEditingController();
 
   String _query = '';
@@ -51,6 +62,12 @@ class _RedleafPageState extends State<RedleafPage> {
   bool _catalogMembershipLoading = false;
   String? _catalogMembershipError;
   String _loadedInstanceId = '';
+  RedleafProjectSnapshot? _snapshot;
+  bool _snapshotLoading = false;
+  String? _snapshotError;
+  int _snapshotLoadSerial = 0;
+  bool _syncing = false;
+  String? _syncError;
   RedleafMediaResourceResolution? _selectedMediaResolution;
   bool _mediaResolutionLoading = false;
   String? _selectedMediaSignature;
@@ -68,17 +85,20 @@ class _RedleafPageState extends State<RedleafPage> {
     _catalogs = RedleafCatalogService(connection: _connection);
     _mediaResources = RedleafMediaResourceService(connection: _connection);
     _transcripts = RedleafTranscriptService(connection: _connection);
+    _snapshots = RedleafProjectSnapshotService();
 
     _connection.addListener(_onConnectionChanged);
     _discovery.addListener(_onDiscoveryChanged);
     _catalogs.addListener(_onCatalogsChanged);
     _searchController.addListener(_onSearchChanged);
 
+    _maybeLoad();
+
     unawaited(_connection.load().then((_) {
       if (!mounted) {
         return;
       }
-      _maybeLoad();
+      _onConnectionChanged();
     }));
   }
 
@@ -86,7 +106,23 @@ class _RedleafPageState extends State<RedleafPage> {
   void didUpdateWidget(covariant RedleafPage oldWidget) {
     super.didUpdateWidget(oldWidget);
 
-    if (!oldWidget.active && widget.active) {
+    final oldKey = oldWidget.workspaceProject?.key;
+    final newKey = widget.workspaceProject?.key;
+
+    if (oldKey != newKey) {
+      _snapshotLoadSerial += 1;
+      _loadedInstanceId = '';
+      _snapshot = null;
+      _snapshotError = null;
+      _syncError = null;
+      _selectedDocId = null;
+      _resetMediaResolution();
+      _resetCatalogFilter();
+      _discovery.clear();
+      _catalogs.clear();
+    }
+
+    if (widget.active && (!oldWidget.active || oldKey != newKey)) {
       _maybeLoad();
     }
   }
@@ -103,24 +139,37 @@ class _RedleafPageState extends State<RedleafPage> {
     super.dispose();
   }
 
-  void _onConnectionChanged() {
-    if (!_connection.isConnected) {
-      _loadedInstanceId = '';
-      _selectedDocId = null;
-      _resetMediaResolution();
-      _resetCatalogFilter();
-      _discovery.clear();
-    } else if (_loadedInstanceId.isNotEmpty &&
-        _loadedInstanceId != _connection.instanceId) {
-      _loadedInstanceId = '';
-      _selectedDocId = null;
-      _resetMediaResolution();
-      _resetCatalogFilter();
-      _discovery.clear();
+  WorkspaceProject? get _redleafWorkspaceProject {
+    final project = widget.workspaceProject;
+    if (project == null || !project.isRedleaf) {
+      return null;
     }
+    return project;
+  }
+
+  String get _workspaceInstanceId =>
+      _redleafWorkspaceProject?.redleafInstanceId?.trim() ?? '';
+
+  bool get _connectionMatchesWorkspace {
+    final instanceId = _workspaceInstanceId;
+    return instanceId.isNotEmpty &&
+        _connection.isConnected &&
+        _connection.instanceId == instanceId;
+  }
+
+  void _onConnectionChanged() {
+    final selected = _selectedDocument;
+
+    _resetMediaResolution();
 
     if (mounted) {
-      setState(() {});
+      setState(() {
+        _syncError = null;
+      });
+    }
+
+    if (_connectionMatchesWorkspace && selected != null) {
+      unawaited(_resolveSelectedMedia(selected));
     }
 
     _maybeLoad();
@@ -133,7 +182,8 @@ class _RedleafPageState extends State<RedleafPage> {
 
     final selectedCatalogId = _selectedCatalogId;
     if (selectedCatalogId != null &&
-        _catalogs.loaded &&
+        _loadedInstanceId.isNotEmpty &&
+        _catalogs.loadedFor(_loadedInstanceId) &&
         !_visibleCatalogs.any(
           (catalog) => catalog.id == selectedCatalogId,
         )) {
@@ -151,6 +201,7 @@ class _RedleafPageState extends State<RedleafPage> {
     final selected = _selectedDocument;
     final signature = selected == null ? null : _mediaSignature(selected);
     final shouldResolve = selected != null &&
+        _connectionMatchesWorkspace &&
         signature != _selectedMediaSignature &&
         !_mediaResolutionLoading;
 
@@ -180,56 +231,215 @@ class _RedleafPageState extends State<RedleafPage> {
   }
 
   void _maybeLoad() {
-    if (!mounted || !widget.active || !_connection.isConnected) {
+    if (!mounted || !widget.active) {
       return;
     }
 
-    final instanceId = _connection.instanceId;
-    if (_loadedInstanceId != instanceId) {
-      _loadedInstanceId = instanceId;
+    final instanceId = _workspaceInstanceId;
+    if (instanceId.isEmpty) {
+      return;
+    }
+
+    final servicesHydrated =
+        _discovery.loadedInstanceId == instanceId &&
+        _catalogs.loadedFor(instanceId);
+
+    final alreadyLoaded =
+        _loadedInstanceId == instanceId &&
+        (_snapshot != null
+            ? servicesHydrated
+            : (!_snapshotLoading &&
+                _discovery.documents.isEmpty &&
+                _catalogs.catalogs.isEmpty));
+
+    if (alreadyLoaded || _snapshotLoading) {
+      return;
+    }
+
+    unawaited(_loadSnapshot(instanceId));
+  }
+
+  Future<void> _loadSnapshot(String instanceId) async {
+    final serial = ++_snapshotLoadSerial;
+
+    setState(() {
+      _snapshotLoading = true;
+      _snapshotError = null;
+    });
+
+    try {
+      final snapshot = await _snapshots.load(instanceId);
+
+      if (!mounted ||
+          serial != _snapshotLoadSerial ||
+          _workspaceInstanceId != instanceId) {
+        return;
+      }
+
       _selectedDocId = null;
       _resetMediaResolution();
       _resetCatalogFilter();
-    }
 
-    if (!_catalogs.loaded && !_catalogs.loading) {
-      unawaited(_catalogs.refreshCatalogs());
-    }
+      if (snapshot == null) {
+        _discovery.clear();
+        _catalogs.clear();
 
-    if (!_discovery.loading &&
-        !_discovery.scanningMedia &&
-        _discovery.documents.isEmpty) {
-      unawaited(_discovery.refresh());
+        setState(() {
+          _loadedInstanceId = instanceId;
+          _snapshot = null;
+          _snapshotLoading = false;
+          _snapshotError = null;
+        });
+        return;
+      }
+
+      _hydrateSnapshot(snapshot);
+
+      setState(() {
+        _loadedInstanceId = instanceId;
+        _snapshot = snapshot;
+        _snapshotLoading = false;
+        _snapshotError = null;
+      });
+    } catch (error) {
+      if (!mounted ||
+          serial != _snapshotLoadSerial ||
+          _workspaceInstanceId != instanceId) {
+        return;
+      }
+
+      setState(() {
+        _loadedInstanceId = instanceId;
+        _snapshot = null;
+        _snapshotLoading = false;
+        _snapshotError = 'Could not load the saved Redleaf snapshot: $error';
+      });
     }
   }
 
-  Future<void> _refresh() async {
-    if (!_connection.isConnected) {
+  void _hydrateSnapshot(RedleafProjectSnapshot snapshot) {
+    _discovery.loadCachedDocuments(
+      instanceId: snapshot.instanceId,
+      documents: snapshot.documents,
+    );
+    _catalogs.loadCachedCatalogs(
+      instanceId: snapshot.instanceId,
+      catalogs: snapshot.catalogs,
+      catalogMemberships: snapshot.catalogMemberships,
+    );
+  }
+
+  Future<void> _syncNow() async {
+    final instanceId = _workspaceInstanceId;
+
+    if (instanceId.isEmpty || _syncing) {
       return;
     }
 
-    _loadedInstanceId = _connection.instanceId;
+    if (!_connectionMatchesWorkspace) {
+      setState(() {
+        _syncError = _connection.isConnected
+            ? 'The connected Redleaf instance does not match this saved project.'
+            : 'Connect this Redleaf project in Settings before syncing.';
+      });
+      return;
+    }
 
+    final previousSnapshot = _snapshot;
     final previousCatalogId = _selectedCatalogId;
-    await _catalogs.refreshCatalogs();
 
-    if (!mounted) {
-      return;
-    }
+    setState(() {
+      _syncing = true;
+      _syncError = null;
+      _snapshotError = null;
+    });
 
-    if (previousCatalogId != null &&
-        _visibleCatalogs.any(
-          (catalog) => catalog.id == previousCatalogId,
-        )) {
-      await _loadCatalogMembership(
-        previousCatalogId,
-        forceRefresh: true,
+    try {
+      await _connection.refreshInventory();
+
+      final catalogsLoaded = await _catalogs.refreshCatalogs();
+      if (!catalogsLoaded) {
+        throw StateError(
+          _catalogs.lastError ?? 'Could not refresh Redleaf catalogs.',
+        );
+      }
+
+      final memberships = <int, Set<int>>{};
+      for (final catalog in _visibleCatalogs) {
+        memberships[catalog.id] =
+            await _catalogs.srtDocumentIdsForCatalog(
+          catalog.id,
+          forceRefresh: true,
+        );
+      }
+
+      final documentsLoaded = await _discovery.refresh();
+      if (!documentsLoaded) {
+        throw StateError(
+          _discovery.lastError ?? 'Could not refresh Redleaf SRTs.',
+        );
+      }
+
+      final syncedAt = DateTime.now().toUtc();
+
+      await _snapshots.save(
+        instanceId: instanceId,
+        documents: _discovery.documents,
+        catalogs: _catalogs.catalogs,
+        catalogMemberships: memberships,
+        syncedAt: syncedAt,
       );
-    } else if (previousCatalogId != null) {
-      setState(_resetCatalogFilter);
-    }
 
-    await _discovery.refresh();
+      final snapshot = RedleafProjectSnapshot(
+        instanceId: instanceId,
+        syncedAt: syncedAt,
+        documents: _discovery.documents,
+        catalogs: _catalogs.catalogs,
+        catalogMemberships: memberships,
+      );
+
+      if (!mounted || _workspaceInstanceId != instanceId) {
+        return;
+      }
+
+      setState(() {
+        _loadedInstanceId = instanceId;
+        _snapshot = snapshot;
+        _syncing = false;
+        _syncError = null;
+
+        if (previousCatalogId != null &&
+            _visibleCatalogs.any(
+              (catalog) => catalog.id == previousCatalogId,
+            )) {
+          _selectedCatalogId = previousCatalogId;
+          _selectedCatalogDocumentIds =
+              snapshot.documentIdsForCatalog(previousCatalogId);
+          _catalogMembershipLoading = false;
+          _catalogMembershipError = null;
+        } else if (previousCatalogId != null) {
+          _resetCatalogFilter();
+        }
+      });
+    } catch (error) {
+      if (!mounted || _workspaceInstanceId != instanceId) {
+        return;
+      }
+
+      if (previousSnapshot != null) {
+        _hydrateSnapshot(previousSnapshot);
+      } else {
+        _discovery.clear();
+        _catalogs.clear();
+      }
+
+      setState(() {
+        _loadedInstanceId = instanceId;
+        _snapshot = previousSnapshot;
+        _syncing = false;
+        _syncError = error.toString();
+      });
+    }
   }
 
   List<RedleafCatalog> get _visibleCatalogs {
@@ -381,7 +591,7 @@ class _RedleafPageState extends State<RedleafPage> {
   }
 
   Future<void> _resolveSelectedMedia(RedleafSrtDocument document) async {
-    if (_selectedDocId != document.docId) {
+    if (_selectedDocId != document.docId || !_connectionMatchesWorkspace) {
       return;
     }
 
@@ -422,6 +632,14 @@ class _RedleafPageState extends State<RedleafPage> {
   }
 
   Future<void> _openSelectedVerifiedMedia(String mediaPath) async {
+    if (!_connectionMatchesWorkspace) {
+      setState(() {
+        _handoffError =
+            'Connect this Redleaf project before opening its media in Player.';
+      });
+      return;
+    }
+
     final document = _selectedDocument;
     final resolution = _selectedMediaResolution;
     final resource = mediaPath.trim();
@@ -503,6 +721,16 @@ class _RedleafPageState extends State<RedleafPage> {
     return null;
   }
 
+  String _formatSnapshotTime(DateTime value) {
+    final local = value.toLocal();
+    final month = local.month.toString().padLeft(2, '0');
+    final day = local.day.toString().padLeft(2, '0');
+    final hour = local.hour.toString().padLeft(2, '0');
+    final minute = local.minute.toString().padLeft(2, '0');
+
+    return '$month/$day ${local.year} $hour:$minute';
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -523,6 +751,23 @@ class _RedleafPageState extends State<RedleafPage> {
 
   Widget _buildToolbar(BuildContext context) {
     final primary = Theme.of(context).colorScheme.primary;
+    final project = _redleafWorkspaceProject;
+    final connectedHere = _connectionMatchesWorkspace;
+    final connectedElsewhere =
+        _connection.isConnected && !connectedHere;
+    final busy = _syncing ||
+        _discovery.loading ||
+        _discovery.scanningMedia ||
+        _catalogs.loading ||
+        _catalogMembershipLoading;
+
+    final subtitle = connectedHere
+        ? _connection.projectName
+        : connectedElsewhere
+            ? 'Connected to a different Redleaf instance'
+            : project == null
+                ? 'No saved Redleaf project selected'
+                : 'Cached project · ${project.name}';
 
     return Container(
       height: 58,
@@ -560,9 +805,7 @@ class _RedleafPageState extends State<RedleafPage> {
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  _connection.isConnected
-                      ? _connection.projectName
-                      : 'Connect in Settings to browse indexed SRTs',
+                  subtitle,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
@@ -573,33 +816,36 @@ class _RedleafPageState extends State<RedleafPage> {
               ],
             ),
           ),
-          if (_connection.isConnected) ...[
+          if (connectedHere) ...[
             const _ConnectionChip(
               label: 'CONNECTED',
               color: Colors.greenAccent,
             ),
             const SizedBox(width: 8),
-            IconButton(
-              tooltip: 'Refresh Redleaf SRTs',
-              visualDensity: VisualDensity.compact,
-              onPressed: _discovery.loading ||
-                      _discovery.scanningMedia ||
-                      _catalogs.loading ||
-                      _catalogMembershipLoading
-                  ? null
-                  : () => unawaited(_refresh()),
-              icon: _discovery.loading ||
-                      _discovery.scanningMedia ||
-                      _catalogs.loading ||
-                      _catalogMembershipLoading
+            OutlinedButton.icon(
+              onPressed: busy ? null : () => unawaited(_syncNow()),
+              icon: busy
                   ? const SizedBox(
-                      width: 16,
-                      height: 16,
+                      width: 14,
+                      height: 14,
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
-                  : const Icon(Icons.refresh, size: 18),
+                  : const Icon(Icons.sync, size: 16),
+              label: const Text(
+                'SYNC NOW',
+                style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.6,
+                ),
+              ),
             ),
-          ] else
+          ] else if (connectedElsewhere)
+            const _ConnectionChip(
+              label: 'OTHER INSTANCE',
+              color: Colors.orangeAccent,
+            )
+          else
             const _ConnectionChip(
               label: 'DISCONNECTED',
               color: Colors.white38,
@@ -610,22 +856,42 @@ class _RedleafPageState extends State<RedleafPage> {
   }
 
   Widget _buildBody(BuildContext context) {
-    if (!_connection.isConnected) {
-      return _DisconnectedState(
-        serverUrl: _connection.serverUrl,
-      );
-    }
+    final workspaceProject = _redleafWorkspaceProject;
 
-    if (_discovery.loading && _discovery.documents.isEmpty) {
+    if (workspaceProject == null) {
       return const _LoadingState(
-        label: 'Loading Redleaf SRT documents…',
+        label: 'Waiting for a saved Redleaf project…',
       );
     }
 
-    if (_discovery.lastError != null && _discovery.documents.isEmpty) {
+    if (_snapshotLoading && _discovery.documents.isEmpty) {
+      return const _LoadingState(
+        label: 'Opening saved Redleaf snapshot…',
+      );
+    }
+
+    if (_snapshotError != null && _discovery.documents.isEmpty) {
       return _ErrorState(
-        message: _discovery.lastError!,
-        onRetry: () => unawaited(_refresh()),
+        message: _snapshotError!,
+        onRetry: () => unawaited(
+          _loadSnapshot(_workspaceInstanceId),
+        ),
+      );
+    }
+
+    if (_snapshot == null && _discovery.documents.isEmpty) {
+      if (_connectionMatchesWorkspace) {
+        return _ErrorState(
+          message:
+              'This Redleaf project does not have a saved snapshot yet. '
+              'Use SYNC NOW to create its local browse cache.',
+          onRetry: () => unawaited(_syncNow()),
+        );
+      }
+
+      return _DisconnectedState(
+        serverUrl: workspaceProject.redleafServerUrl ??
+            _connection.serverUrl,
       );
     }
 
@@ -738,11 +1004,24 @@ class _RedleafPageState extends State<RedleafPage> {
                 color: Colors.white38,
               ),
             )
+          else if (_syncError != null)
+            Flexible(
+              child: Text(
+                _syncError!,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.right,
+                style: const TextStyle(
+                  fontSize: 10.5,
+                  color: Colors.orangeAccent,
+                ),
+              ),
+            )
           else
             Text(
-              _discovery.hasCompleteMediaScan
-                  ? 'Media scan complete'
-                  : 'Read-only Redleaf view',
+              _snapshot == null
+                  ? 'No saved snapshot'
+                  : 'Cached snapshot · ${_formatSnapshotTime(_snapshot!.syncedAt)}',
               style: const TextStyle(
                 fontSize: 10.5,
                 color: Colors.white38,

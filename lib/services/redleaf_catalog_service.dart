@@ -48,9 +48,80 @@ class RedleafCatalogService extends ChangeNotifier {
 
   bool get loading => _loading;
   String? get lastError => _lastError;
+  String get loadedInstanceId => _loadedInstanceId;
+
   bool get loaded =>
       _loadedInstanceId.isNotEmpty &&
+      _connection.isConnected &&
       _loadedInstanceId == _connection.instanceId;
+
+  bool loadedFor(String instanceId) {
+    final normalized = instanceId.trim();
+    return normalized.isNotEmpty &&
+        _loadedInstanceId == normalized;
+  }
+
+  Map<int, Set<int>> get cachedSrtMemberships {
+    return Map<int, Set<int>>.unmodifiable(
+      <int, Set<int>>{
+        for (final entry in _srtMembershipCache.entries)
+          entry.key: Set<int>.unmodifiable(entry.value),
+      },
+    );
+  }
+
+  void loadCachedCatalogs({
+    required String instanceId,
+    required Iterable<RedleafCatalog> catalogs,
+    required Map<int, Set<int>> catalogMemberships,
+  }) {
+    final normalizedInstanceId = instanceId.trim();
+    if (normalizedInstanceId.isEmpty) {
+      throw ArgumentError.value(
+        instanceId,
+        'instanceId',
+        'Redleaf instance ID cannot be empty.',
+      );
+    }
+
+    if (_loading) {
+      throw StateError(
+        'Cannot replace Redleaf catalog state while a live refresh is running.',
+      );
+    }
+
+    final byId = <int, RedleafCatalog>{
+      for (final catalog in catalogs) catalog.id: catalog,
+    };
+
+    final cachedCatalogs = byId.values.toList(growable: false)
+      ..sort(
+        (a, b) => a.name.toLowerCase().compareTo(
+              b.name.toLowerCase(),
+            ),
+      );
+
+    final knownCatalogIds =
+        cachedCatalogs.map((catalog) => catalog.id).toSet();
+
+    _catalogs = List<RedleafCatalog>.unmodifiable(
+      cachedCatalogs,
+    );
+    _srtMembershipCache.clear();
+
+    for (final entry in catalogMemberships.entries) {
+      if (!knownCatalogIds.contains(entry.key)) {
+        continue;
+      }
+      _srtMembershipCache[entry.key] =
+          Set<int>.from(entry.value);
+    }
+
+    _loadedInstanceId = normalizedInstanceId;
+    _loading = false;
+    _lastError = null;
+    notifyListeners();
+  }
 
   Future<bool> refreshCatalogs() async {
     if (!_connection.isConnected) {
@@ -147,11 +218,7 @@ class RedleafCatalogService extends ChangeNotifier {
     int catalogId, {
     bool forceRefresh = false,
   }) async {
-    if (!_connection.isConnected) {
-      throw StateError('Connect to Redleaf in Settings.');
-    }
-
-    if (!loaded) {
+    if (_loadedInstanceId.isEmpty) {
       throw StateError(
         'Load Redleaf catalogs before requesting catalog membership.',
       );
@@ -170,6 +237,18 @@ class RedleafCatalogService extends ChangeNotifier {
       if (cached != null) {
         return Set<int>.unmodifiable(cached);
       }
+    }
+
+    if (!_connection.isConnected) {
+      throw StateError(
+        'Connect to Redleaf in Settings to refresh catalog membership.',
+      );
+    }
+
+    if (_loadedInstanceId != _connection.instanceId) {
+      throw StateError(
+        'The loaded Redleaf catalogs belong to a different Redleaf instance.',
+      );
     }
 
     final client = HttpClient()
@@ -307,7 +386,12 @@ class RedleafCatalogService extends ChangeNotifier {
     final currentInstanceId =
         _connection.isConnected ? _connection.instanceId : '';
 
-    if (currentInstanceId != _loadedInstanceId) {
+    // Cached state deliberately survives disconnect. A different connected
+    // Redleaf instance invalidates the in-memory state so data from separate
+    // databases can never be mixed.
+    if (currentInstanceId.isNotEmpty &&
+        _loadedInstanceId.isNotEmpty &&
+        currentInstanceId != _loadedInstanceId) {
       clear();
     }
   }
