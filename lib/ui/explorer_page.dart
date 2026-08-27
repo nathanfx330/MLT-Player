@@ -11,6 +11,7 @@ import '../models/explorer_asset_annotation.dart';
 import '../models/explorer_item.dart';
 import '../models/explorer_metadata.dart';
 import '../models/project_catalog.dart';
+import '../models/redleaf_player_handoff.dart';
 import '../models/workspace_project.dart';
 import '../services/explorer_metadata_service.dart';
 import '../services/explorer_navigation_service.dart';
@@ -163,6 +164,7 @@ class ExplorerPage extends StatefulWidget {
     required this.initialized,
     required this.version,
     required this.onOpenMedia,
+    this.onOpenRedleafMedia,
     required this.projectCatalogService,
     required this.projectMediaMetadataService,
     required this.onActiveProjectChanged,
@@ -178,6 +180,7 @@ class ExplorerPage extends StatefulWidget {
   final String version;
   final String? startupError;
   final ValueChanged<String> onOpenMedia;
+  final ValueChanged<RedleafPlayerHandoff>? onOpenRedleafMedia;
   final ProjectCatalogService projectCatalogService;
   final ProjectMediaMetadataService projectMediaMetadataService;
   final ValueChanged<WorkspaceProject?>? onWorkspaceProjectChanged;
@@ -2157,6 +2160,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
               child: RedleafPage(
                 active: widget.active,
                 onOpenVerifiedMedia: widget.onOpenMedia,
+                onOpenRedleafHandoff: widget.onOpenRedleafMedia,
               ),
             ),
           ],

@@ -4,10 +4,12 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../models/redleaf_player_handoff.dart';
 import '../services/redleaf_catalog_service.dart';
 import '../services/redleaf_connection_service.dart';
 import '../services/redleaf_media_resource_service.dart';
 import '../services/redleaf_srt_service.dart';
+import '../services/redleaf_transcript_service.dart';
 
 class RedleafPage extends StatefulWidget {
   const RedleafPage({
@@ -15,11 +17,20 @@ class RedleafPage extends StatefulWidget {
     required this.active,
     this.connection,
     this.onOpenVerifiedMedia,
+    this.onOpenRedleafHandoff,
   });
 
   final bool active;
   final RedleafConnectionService? connection;
+
+  /// Legacy D3 verified-media callback. Kept so the currently wired Explorer
+  /// path remains functional until the transcript-aware handoff is connected.
   final ValueChanged<String>? onOpenVerifiedMedia;
+
+  /// Transcript-aware Redleaf handoff. When connected, Player open fails
+  /// closed unless the exact Redleaf transcript can be loaded by canonical
+  /// document ID.
+  final ValueChanged<RedleafPlayerHandoff>? onOpenRedleafHandoff;
 
   @override
   State<RedleafPage> createState() => _RedleafPageState();
@@ -30,6 +41,7 @@ class _RedleafPageState extends State<RedleafPage> {
   late final RedleafSrtDiscoveryService _discovery;
   late final RedleafCatalogService _catalogs;
   late final RedleafMediaResourceService _mediaResources;
+  late final RedleafTranscriptService _transcripts;
   final TextEditingController _searchController = TextEditingController();
 
   String _query = '';
@@ -43,6 +55,9 @@ class _RedleafPageState extends State<RedleafPage> {
   bool _mediaResolutionLoading = false;
   String? _selectedMediaSignature;
   int _mediaResolutionSerial = 0;
+  bool _handoffLoading = false;
+  String? _handoffError;
+  int _handoffSerial = 0;
 
   @override
   void initState() {
@@ -52,6 +67,7 @@ class _RedleafPageState extends State<RedleafPage> {
     _discovery = RedleafSrtDiscoveryService(connection: _connection);
     _catalogs = RedleafCatalogService(connection: _connection);
     _mediaResources = RedleafMediaResourceService(connection: _connection);
+    _transcripts = RedleafTranscriptService(connection: _connection);
 
     _connection.addListener(_onConnectionChanged);
     _discovery.addListener(_onDiscoveryChanged);
@@ -333,6 +349,13 @@ class _RedleafPageState extends State<RedleafPage> {
     _selectedMediaResolution = null;
     _mediaResolutionLoading = false;
     _selectedMediaSignature = null;
+    _resetHandoffState();
+  }
+
+  void _resetHandoffState() {
+    _handoffSerial += 1;
+    _handoffLoading = false;
+    _handoffError = null;
   }
 
   String _mediaSignature(RedleafSrtDocument document) {
@@ -396,6 +419,73 @@ class _RedleafPageState extends State<RedleafPage> {
       _mediaResolutionLoading = false;
       _selectedMediaSignature = signature;
     });
+  }
+
+  Future<void> _openSelectedVerifiedMedia(String mediaPath) async {
+    final document = _selectedDocument;
+    final resolution = _selectedMediaResolution;
+    final resource = mediaPath.trim();
+
+    if (document == null ||
+        resolution?.isLocalFileReady != true ||
+        resource.isEmpty ||
+        resolution?.resolvedResource?.trim() != resource) {
+      return;
+    }
+
+    final transcriptAwareCallback = widget.onOpenRedleafHandoff;
+    if (transcriptAwareCallback == null) {
+      widget.onOpenVerifiedMedia?.call(resource);
+      return;
+    }
+
+    final serial = ++_handoffSerial;
+    final docId = document.docId;
+
+    setState(() {
+      _handoffLoading = true;
+      _handoffError = null;
+    });
+
+    try {
+      final transcript = await _transcripts.loadForDocument(document);
+
+      if (!mounted || serial != _handoffSerial || _selectedDocId != docId) {
+        return;
+      }
+
+      final currentResolution = _selectedMediaResolution;
+      if (currentResolution?.isLocalFileReady != true ||
+          currentResolution?.resolvedResource?.trim() != resource) {
+        setState(() {
+          _handoffLoading = false;
+          _handoffError =
+              'The verified media resource changed before Player handoff.';
+        });
+        return;
+      }
+
+      final handoff = RedleafPlayerHandoff.fromTranscript(
+        mediaPath: resource,
+        transcript: transcript,
+      );
+
+      setState(() {
+        _handoffLoading = false;
+        _handoffError = null;
+      });
+
+      transcriptAwareCallback(handoff);
+    } catch (error) {
+      if (!mounted || serial != _handoffSerial || _selectedDocId != docId) {
+        return;
+      }
+
+      setState(() {
+        _handoffLoading = false;
+        _handoffError = error.toString();
+      });
+    }
   }
 
   RedleafSrtDocument? get _selectedDocument {
@@ -580,7 +670,15 @@ class _RedleafPageState extends State<RedleafPage> {
                         mediaScanInProgress: _discovery.scanningMedia,
                         resolution: _selectedMediaResolution,
                         resolutionLoading: _mediaResolutionLoading,
-                        onOpenVerifiedMedia: widget.onOpenVerifiedMedia,
+                        handoffLoading: _handoffLoading,
+                        handoffError: _handoffError,
+                        onOpenVerifiedMedia:
+                            widget.onOpenRedleafHandoff != null ||
+                                    widget.onOpenVerifiedMedia != null
+                                ? (path) => unawaited(
+                                      _openSelectedVerifiedMedia(path),
+                                    )
+                                : null,
                       ),
                     ),
                   ],
@@ -1275,6 +1373,8 @@ class _RedleafHandoffPanel extends StatelessWidget {
     required this.mediaScanInProgress,
     required this.resolution,
     required this.resolutionLoading,
+    required this.handoffLoading,
+    required this.handoffError,
     required this.onOpenVerifiedMedia,
   });
 
@@ -1283,6 +1383,8 @@ class _RedleafHandoffPanel extends StatelessWidget {
   final bool mediaScanInProgress;
   final RedleafMediaResourceResolution? resolution;
   final bool resolutionLoading;
+  final bool handoffLoading;
+  final String? handoffError;
   final ValueChanged<String>? onOpenVerifiedMedia;
 
   VoidCallback? get _openVerifiedLocalFile {
@@ -1292,7 +1394,8 @@ class _RedleafHandoffPanel extends StatelessWidget {
 
     if (resolution?.isLocalFileReady != true ||
         callback == null ||
-        resource.isEmpty) {
+        resource.isEmpty ||
+        handoffLoading) {
       return null;
     }
 
@@ -1417,13 +1520,28 @@ class _RedleafHandoffPanel extends StatelessWidget {
                     loading: resolutionLoading,
                     media: document.media,
                   ),
+                  if (handoffError != null) ...[
+                    const SizedBox(height: 12),
+                    _InfoBlock(
+                      heading: 'TRANSCRIPT HANDOFF ERROR',
+                      child: Text(
+                        handoffError!,
+                        style: const TextStyle(
+                          fontSize: 10.5,
+                          height: 1.45,
+                          color: Colors.redAccent,
+                        ),
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: 16),
                   const Divider(height: 1, color: Colors.white10),
                   const SizedBox(height: 14),
                   _PlayerBoundaryBlock(
                     canOpenVerifiedLocalFile:
                         resolution?.isLocalFileReady == true &&
-                            onOpenVerifiedMedia != null,
+                            onOpenVerifiedMedia != null &&
+                            !handoffLoading,
                   ),
                   const SizedBox(height: 14),
                   SizedBox(
@@ -1435,7 +1553,7 @@ class _RedleafHandoffPanel extends StatelessWidget {
                         _handoffButtonLabel(
                           document.media,
                           resolution,
-                          resolutionLoading,
+                          resolutionLoading || handoffLoading,
                           onOpenVerifiedMedia != null,
                         ),
                         style: const TextStyle(
@@ -2035,7 +2153,7 @@ String _handoffButtonLabel(
   bool hasOpenCallback,
 ) {
   if (loading) {
-    return 'RESOLVING RESOURCE';
+    return 'PREPARING PLAYER HANDOFF';
   }
 
   if (resolution != null) {

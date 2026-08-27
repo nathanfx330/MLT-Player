@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'models/media_info.dart';
+import 'models/redleaf_player_handoff.dart';
 import 'models/workspace_project.dart';
 import 'services/project_catalog_service.dart';
 import 'services/project_media_metadata_service.dart';
@@ -145,6 +146,7 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
   late final WorkspaceProjectService _workspaceProjectService;
 
   String? _playerPath;
+  RedleafPlayerHandoff? _redleafPlayerHandoff;
   String? _activeProjectId;
   WorkspaceProject? _activeWorkspaceProject;
   int _playerOpenRequest = 0;
@@ -193,7 +195,17 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
 
   void _openInPlayer(String path) {
     setState(() {
+      _redleafPlayerHandoff = null;
       _playerPath = path;
+      _playerOpenRequest += 1;
+      _showPlayer = true;
+    });
+  }
+
+  void _openRedleafInPlayer(RedleafPlayerHandoff handoff) {
+    setState(() {
+      _redleafPlayerHandoff = handoff;
+      _playerPath = handoff.mediaPath;
       _playerOpenRequest += 1;
       _showPlayer = true;
     });
@@ -259,6 +271,7 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
                     version: widget.version,
                     startupError: widget.startupError,
                     onOpenMedia: _openInPlayer,
+                    onOpenRedleafMedia: _openRedleafInPlayer,
                     projectCatalogService: _projectCatalogService,
                     projectMediaMetadataService:
                         _projectMediaMetadataService,
@@ -306,6 +319,7 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
           projectMediaMetadataService: _projectMediaMetadataService,
           activeProjectId: _activeProjectId,
           initialPath: _playerPath,
+          redleafHandoff: _redleafPlayerHandoff,
           openRequestSerial: _playerOpenRequest,
           onBack: _returnToExplorer,
         ),
@@ -719,6 +733,7 @@ class PlayerPage extends StatefulWidget {
     required this.activeProjectId,
     this.startupError,
     this.initialPath,
+    this.redleafHandoff,
     this.openRequestSerial = 0,
     this.onBack,
   });
@@ -731,6 +746,7 @@ class PlayerPage extends StatefulWidget {
   final String? activeProjectId;
   final String? startupError;
   final String? initialPath;
+  final RedleafPlayerHandoff? redleafHandoff;
   final int openRequestSerial;
   final VoidCallback? onBack;
 
@@ -830,9 +846,17 @@ class _PlayerPageState extends State<PlayerPage>
     _restartOverlayTimer();
 
     final initialPath = widget.initialPath;
+    final initialRedleafHandoff = widget.redleafHandoff;
     if (initialPath != null && initialPath.isNotEmpty) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) {
+        if (!mounted) {
+          return;
+        }
+
+        if (initialRedleafHandoff != null &&
+            initialRedleafHandoff.mediaPath == initialPath) {
+          unawaited(_openRedleafHandoff(initialRedleafHandoff));
+        } else {
           unawaited(_openPath(initialPath));
         }
       });
@@ -844,12 +868,20 @@ class _PlayerPageState extends State<PlayerPage>
     super.didUpdateWidget(oldWidget);
 
     final path = widget.initialPath;
+    final redleafHandoff = widget.redleafHandoff;
     if (path != null &&
         path.isNotEmpty &&
         (path != oldWidget.initialPath ||
             widget.openRequestSerial != oldWidget.openRequestSerial)) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) {
+        if (!mounted) {
+          return;
+        }
+
+        if (redleafHandoff != null &&
+            redleafHandoff.mediaPath == path) {
+          unawaited(_openRedleafHandoff(redleafHandoff));
+        } else {
           unawaited(_openPath(path));
         }
       });
@@ -1354,7 +1386,23 @@ class _PlayerPageState extends State<PlayerPage>
     return _formatClipTimecode(media, clipFrame);
   }
 
-  Future<void> _openPath(String path) async {
+  Future<void> _openPath(String path) {
+    return _openPathInternal(path);
+  }
+
+  Future<void> _openRedleafHandoff(
+    RedleafPlayerHandoff handoff,
+  ) {
+    return _openPathInternal(
+      handoff.mediaPath,
+      exactSubtitleTrack: handoff.subtitleTrack,
+    );
+  }
+
+  Future<void> _openPathInternal(
+    String path, {
+    SubtitleTrack? exactSubtitleTrack,
+  }) async {
     // On Linux, file_selector can return while the native GTK chooser and its
     // thumbnail work are still unwinding. Starting MLT immediately from that
     // callback can overlap native teardown. Give the chooser one short settle
@@ -1420,7 +1468,13 @@ class _PlayerPageState extends State<PlayerPage>
         _engine.media != null &&
         !_engine.media!.isStill &&
         (_engine.media!.hasVideo || _engine.media!.hasAudio)) {
-      unawaited(_loadSidecarSubtitles(path, subtitleSerial));
+      if (exactSubtitleTrack != null) {
+        if (exactSubtitleTrack.isNotEmpty) {
+          setState(() => _subtitleTrack = exactSubtitleTrack);
+        }
+      } else {
+        unawaited(_loadSidecarSubtitles(path, subtitleSerial));
+      }
     }
 
     _keyboardFocus.requestFocus();
