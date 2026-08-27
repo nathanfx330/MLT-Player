@@ -43,6 +43,15 @@ void main() {
 
         expect(signedIn, isTrue);
         expect(connection.isConnected, isTrue);
+
+        // Sign-in establishes identity/session only. Inventory is refreshed
+        // explicitly by the Redleaf project's SYNC NOW workflow.
+        expect(connection.inventoryLoaded, isFalse);
+        expect(connection.fileTypeCounts, isEmpty);
+
+        await connection.refreshInventory();
+
+        expect(connection.inventoryLoaded, isTrue);
         expect(connection.fileTypeCounts['SRT'], 3);
 
         final discovery = RedleafSrtDiscoveryService(
@@ -436,7 +445,8 @@ Map<String, Object?> _documentRow({
 }
 
 bool _isAuthenticated(HttpRequest request) {
-  final cookie = request.headers.value(HttpHeaders.cookieHeader) ?? '';
+  final cookie =
+      request.headers.value(HttpHeaders.cookieHeader) ?? '';
   return cookie.contains('session=authed');
 }
 

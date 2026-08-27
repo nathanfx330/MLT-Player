@@ -124,9 +124,15 @@ void main() {
     );
 
     test(
-      'disconnect clears catalog state',
+      'disconnect keeps cached catalog state but blocks live refresh',
       () async {
-        unawaited(_serveRedleaf(server));
+        var membershipRequests = 0;
+        unawaited(
+          _serveRedleaf(
+            server,
+            onMembershipRequest: () => membershipRequests += 1,
+          ),
+        );
 
         final connection = RedleafConnectionService(
           configDirectory: tempDirectory,
@@ -151,13 +157,41 @@ void main() {
         expect(catalogs.loaded, isTrue);
         expect(catalogs.catalogs, isNotEmpty);
 
+        final radio = catalogs.catalogs.singleWhere(
+          (catalog) => catalog.name == 'Radio Archive',
+        );
+
+        expect(
+          await catalogs.srtDocumentIdsForCatalog(radio.id),
+          <int>{11, 12},
+        );
+        expect(membershipRequests, 1);
+
         connection.disconnect();
 
         expect(connection.isConnected, isFalse);
+
+        // Cache-first Redleaf Projects deliberately retain the cached
+        // catalog snapshot across disconnect so Explorer can continue
+        // browsing the saved project offline. `loaded` describes a live
+        // matching connection, while `loadedFor` describes retained state
+        // for the saved Redleaf instance.
         expect(catalogs.loaded, isFalse);
-        expect(catalogs.catalogs, isEmpty);
+        expect(
+          catalogs.loadedFor('radio-test-instance'),
+          isTrue,
+        );
+        expect(catalogs.catalogs, isNotEmpty);
         expect(catalogs.lastError, isNull);
 
+        // Cached membership also remains available without another request.
+        expect(
+          await catalogs.srtDocumentIdsForCatalog(radio.id),
+          <int>{11, 12},
+        );
+        expect(membershipRequests, 1);
+
+        // A live catalog refresh still requires an active Redleaf session.
         expect(await catalogs.refreshCatalogs(), isFalse);
         expect(
           catalogs.lastError,
