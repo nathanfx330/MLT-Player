@@ -20,8 +20,11 @@ import '../services/project_catalog_service.dart';
 import '../services/project_media_metadata_service.dart';
 import '../services/player_settings_service.dart';
 import '../services/redleaf_link_service.dart';
-import 'widgets/player_settings_button.dart';
 import '../services/thumbnail_service.dart';
+import '../services/workspace_project_service.dart';
+import 'redleaf_page.dart';
+import 'widgets/player_settings_button.dart';
+import 'widgets/workspace_project_switcher.dart';
 
 const List<String> _explorerColorLabelPalette = <String>[
   '#E57373',
@@ -162,6 +165,7 @@ class ExplorerPage extends StatefulWidget {
     required this.projectCatalogService,
     required this.projectMediaMetadataService,
     required this.onActiveProjectChanged,
+    this.workspaceProjectService,
     this.playerSettings,
     this.projectViewRequest,
     this.startupError,
@@ -174,6 +178,7 @@ class ExplorerPage extends StatefulWidget {
   final ValueChanged<String> onOpenMedia;
   final ProjectCatalogService projectCatalogService;
   final ProjectMediaMetadataService projectMediaMetadataService;
+  final WorkspaceProjectService? workspaceProjectService;
   final PlayerSettingsService? playerSettings;
   final ExplorerProjectViewRequest? projectViewRequest;
   final ValueChanged<String> onActiveProjectChanged;
@@ -194,6 +199,10 @@ class _ExplorerPageState extends State<ExplorerPage> {
       ExplorerViewPreferencesService();
   final RedleafLinkService _redleafLinkService = RedleafLinkService();
   final ThumbnailService _thumbnailService = ThumbnailService();
+
+  late final WorkspaceProjectService _workspaceProjectService;
+  late final bool _ownsWorkspaceProjectService;
+  String? _lastReportedLocalProjectId;
 
   ProjectCatalogService get _projectCatalogService =>
       widget.projectCatalogService;
@@ -310,6 +319,15 @@ class _ExplorerPageState extends State<ExplorerPage> {
   @override
   void initState() {
     super.initState();
+
+    final providedWorkspaceService = widget.workspaceProjectService;
+    _ownsWorkspaceProjectService = providedWorkspaceService == null;
+    _workspaceProjectService = providedWorkspaceService ??
+        WorkspaceProjectService(
+          localProjects: _projectCatalogService,
+        );
+    _workspaceProjectService.addListener(_onWorkspaceProjectChanged);
+
     unawaited(_initializeNavigation());
     unawaited(_initializeViewPreferences());
     unawaited(_initializeProjectCatalogs());
@@ -319,7 +337,9 @@ class _ExplorerPageState extends State<ExplorerPage> {
   void didUpdateWidget(covariant ExplorerPage oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.active && !oldWidget.active) {
-      _thumbnailService.resume();
+      if (!_workspaceProjectService.activeIsRedleaf) {
+        _thumbnailService.resume();
+      }
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
           _focusNode.requestFocus();
@@ -342,10 +362,41 @@ class _ExplorerPageState extends State<ExplorerPage> {
 
   @override
   void dispose() {
+    _workspaceProjectService.removeListener(_onWorkspaceProjectChanged);
+    if (_ownsWorkspaceProjectService) {
+      _workspaceProjectService.dispose();
+    }
     _filterController.dispose();
     _filterFocusNode.dispose();
     _focusNode.dispose();
     super.dispose();
+  }
+
+  void _onWorkspaceProjectChanged() {
+    if (!mounted) {
+      return;
+    }
+
+    final active = _workspaceProjectService.activeProject;
+    if (active != null && active.isLocal) {
+      _reportLocalProject(active.localProjectId!);
+      if (widget.active) {
+        _thumbnailService.resume();
+      }
+    } else if (active != null && active.isRedleaf) {
+      unawaited(_thumbnailService.pauseAndDrain());
+    }
+
+    setState(() {});
+  }
+
+  void _reportLocalProject(String projectId) {
+    if (_lastReportedLocalProjectId == projectId) {
+      return;
+    }
+
+    _lastReportedLocalProjectId = projectId;
+    widget.onActiveProjectChanged(projectId);
   }
 
   Future<void> _initializeNavigation() async {
@@ -387,7 +438,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
 
   Future<void> _initializeProjectCatalogs() async {
     try {
-      await _projectCatalogService.load();
+      await _workspaceProjectService.load();
 
       var migrationProjectId = _projectCatalogService.activeProjectId;
       for (final project in _projectCatalogService.projects) {
@@ -417,7 +468,12 @@ class _ExplorerPageState extends State<ExplorerPage> {
       _refreshVisibleItems();
     });
 
-    widget.onActiveProjectChanged(_projectCatalogService.activeProjectId);
+    final activeWorkspaceProject = _workspaceProjectService.activeProject;
+    if (activeWorkspaceProject != null && activeWorkspaceProject.isLocal) {
+      _reportLocalProject(activeWorkspaceProject.localProjectId!);
+    } else {
+      _reportLocalProject(_projectCatalogService.activeProjectId);
+    }
   }
 
   Future<void> _persistNavigation() async {
@@ -1308,22 +1364,50 @@ class _ExplorerPageState extends State<ExplorerPage> {
     );
   }
 
-  Future<void> _switchProject(String projectId) async {
+  Future<void> _switchWorkspaceProject(
+    String workspaceProjectKey,
+  ) async {
     if (!_projectCatalogsLoaded ||
-        projectId == _projectCatalogService.activeProjectId) {
+        !_workspaceProjectService.loaded ||
+        _loading ||
+        workspaceProjectKey == _workspaceProjectService.activeKey) {
       return;
     }
 
     try {
-      _projectCatalogService.setActiveProject(projectId);
+      _workspaceProjectService.select(workspaceProjectKey);
+      final selected = _workspaceProjectService.activeProject;
+      if (selected == null) {
+        return;
+      }
+
       _expandedCatalogIds.clear();
+
+      if (selected.isRedleaf) {
+        _filterController.clear();
+        setState(() {
+          _filterQuery = '';
+          _ratingFilter = _RatingFilterChoice.any;
+          _tagFilter = null;
+          _colorFilter = null;
+          _selectedPath = null;
+        });
+        await _thumbnailService.pauseAndDrain();
+        return;
+      }
+
       await _persistProjectCatalogs();
 
       if (!mounted) {
         return;
       }
 
-      widget.onActiveProjectChanged(projectId);
+      final projectId = selected.localProjectId!;
+      _reportLocalProject(projectId);
+      if (widget.active) {
+        _thumbnailService.resume();
+      }
+
       setState(() {
         _ratingFilter = _RatingFilterChoice.any;
         _tagFilter = null;
@@ -1360,6 +1444,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
     try {
       final project = _projectCatalogService.createProject(name);
       _projectCatalogService.setActiveProject(project.id);
+      _workspaceProjectService.synchronizeLocalProjects();
       _expandedCatalogIds.clear();
       await _persistProjectCatalogs();
 
@@ -1367,7 +1452,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
         return;
       }
 
-      widget.onActiveProjectChanged(project.id);
+      _reportLocalProject(project.id);
       setState(() {
         _tagFilter = null;
         _colorFilter = null;
@@ -1400,6 +1485,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
 
     try {
       _projectCatalogService.renameProject(project.id, name);
+      _workspaceProjectService.synchronizeLocalProjects();
       await _persistProjectCatalogs();
       if (mounted) {
         setState(() {});
@@ -1436,6 +1522,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
     try {
       widget.projectMediaMetadataService.deleteProjectData(project.id);
       _projectCatalogService.deleteProject(project.id);
+      _workspaceProjectService.synchronizeLocalProjects();
       _expandedCatalogIds.clear();
       await _persistProjectCatalogs();
       await _persistProjectMetadata();
@@ -1444,7 +1531,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
         return;
       }
 
-      widget.onActiveProjectChanged(_projectCatalogService.activeProjectId);
+      _reportLocalProject(_projectCatalogService.activeProjectId);
       setState(() {
         _ratingFilter = _RatingFilterChoice.any;
         _tagFilter = null;
@@ -2014,6 +2101,11 @@ class _ExplorerPageState extends State<ExplorerPage> {
 
   @override
   Widget build(BuildContext context) {
+    if (_projectCatalogsLoaded &&
+        _workspaceProjectService.activeIsRedleaf) {
+      return _buildRedleafWorkspace();
+    }
+
     return Focus(
       focusNode: _focusNode,
       autofocus: widget.active,
@@ -2030,6 +2122,91 @@ class _ExplorerPageState extends State<ExplorerPage> {
               _buildStatusBar(),
             ],
           ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildRedleafWorkspace() {
+    return Scaffold(
+      backgroundColor: const Color(0xFF111111),
+      body: SafeArea(
+        child: Column(
+          children: [
+            _buildRedleafWorkspaceBar(),
+            const Divider(height: 1, color: Colors.white12),
+            Expanded(
+              child: RedleafPage(
+                active: widget.active,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildRedleafWorkspaceBar() {
+    return SizedBox(
+      height: 56,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        child: Row(
+          children: [
+            const Icon(Icons.collections_outlined, size: 22),
+            const SizedBox(width: 9),
+            const Text(
+              'MLT Explorer',
+              style: TextStyle(
+                fontSize: 15,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(width: 12),
+            SizedBox(
+              width: 230,
+              child: WorkspaceProjectSwitcher(
+                service: _workspaceProjectService,
+                enabled: true,
+                onSelected: (workspaceProjectKey) {
+                  unawaited(
+                    _switchWorkspaceProject(workspaceProjectKey),
+                  );
+                },
+              ),
+            ),
+            const SizedBox(width: 10),
+            Container(
+              padding: const EdgeInsets.symmetric(
+                horizontal: 8,
+                vertical: 5,
+              ),
+              decoration: BoxDecoration(
+                color: const Color(0x18E8A33D),
+                borderRadius: BorderRadius.circular(5),
+                border: Border.all(
+                  color: const Color(0x44E8A33D),
+                ),
+              ),
+              child: const Text(
+                'REMOTE PROJECT',
+                style: TextStyle(
+                  fontSize: 8.5,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 0.8,
+                  color: Color(0xFFE8A33D),
+                ),
+              ),
+            ),
+            const Spacer(),
+            if (widget.playerSettings != null)
+              ExcludeFocus(
+                child: MltPlayerSettingsButton(
+                  settings: widget.playerSettings!,
+                  mltVersion: widget.version,
+                ),
+              ),
+          ],
         ),
       ),
     );
@@ -2065,33 +2242,15 @@ class _ExplorerPageState extends State<ExplorerPage> {
             const SizedBox(width: 12),
             if (_projectCatalogsLoaded) ...[
               SizedBox(
-                width: 170,
-                child: DropdownButtonHideUnderline(
-                  child: DropdownButton<String>(
-                    value: _projectCatalogService.activeProjectId,
-                    isExpanded: true,
-                    dropdownColor: const Color(0xFF252525),
-                    style:
-                        const TextStyle(fontSize: 11, color: Colors.white70),
-                    items: [
-                      for (final project in _projectCatalogService.projects)
-                        DropdownMenuItem<String>(
-                          value: project.id,
-                          child: Text(
-                            project.name,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                    ],
-                    onChanged: _loading
-                        ? null
-                        : (value) {
-                            if (value != null) {
-                              unawaited(_switchProject(value));
-                            }
-                          },
-                  ),
+                width: 210,
+                child: WorkspaceProjectSwitcher(
+                  service: _workspaceProjectService,
+                  enabled: !_loading,
+                  onSelected: (workspaceProjectKey) {
+                    unawaited(
+                      _switchWorkspaceProject(workspaceProjectKey),
+                    );
+                  },
                 ),
               ),
               PopupMenuButton<_ProjectMenuAction>(
