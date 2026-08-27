@@ -215,10 +215,8 @@ class RedleafConnectionService extends ChangeNotifier {
       _projectName = (info['project_name'] ?? 'Redleaf').toString().trim();
       _baseDirectory = (info['base_dir'] ?? '').toString().trim();
 
-      // Inventory is intentionally best-effort. A Redleaf connection is still
-      // valid if an older server cannot provide dashboard inventory yet.
-      await _fetchInventory(client);
-
+      // Sign-in establishes identity and session only. Project inventory is
+      // refreshed explicitly by the Redleaf project's SYNC NOW action.
       _lastError = null;
       _status = RedleafConnectionStatus.connected;
       notifyListeners();
