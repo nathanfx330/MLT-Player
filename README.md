@@ -3,19 +3,20 @@
 [![CI](https://github.com/nathanfx330/MLT-Player/actions/workflows/ci.yml/badge.svg)](https://github.com/nathanfx330/MLT-Player/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A fast, frame-exact local media browser, project organizer, and precision player
-for Linux, built on
-[MLT (Media Lovin' Toolkit)](https://www.mltframework.org/).
+A fast, frame-exact media browser, project organizer, and precision player for
+Linux, built on
+[MLT (Media Lovin' Toolkit)](https://www.mltframework.org/), with optional
+Redleaf-backed workspace projects for indexed transcript and media archives.
 
 <!--
 TODO: add screenshots. Suggested:
 (1) Explorer grid with thumbnails and Project/Catalog controls
-(2) Project overview dashboard
+(2) Redleaf Project open from a cached snapshot
 (3) Player with the Layers inspector open
 (4) Storyboard or Bookmarks view
 
 ![Explorer](docs/images/explorer.png)
-![Project](docs/images/project.png)
+![Redleaf Project](docs/images/redleaf-project.png)
 ![Player](docs/images/player.png)
 -->
 
@@ -25,18 +26,39 @@ TODO: add screenshots. Suggested:
 
 MLT Player is built around three connected workspaces:
 
-**Explorer** is a filesystem-first media browser. Open a directory directly,
-browse real media thumbnails, filter and sort, organize files into Catalogs,
-and open an asset without importing it into a media database first.
+**Explorer** is the main browser. For local Projects it is filesystem-first:
+open a directory directly, browse real media thumbnails, filter and sort,
+organize files into Catalogs, and open an asset without importing it into a
+media database first. For Redleaf Projects it browses a saved Redleaf
+catalog/SRT snapshot and can reconnect to Redleaf only when live data or a
+controlled media-link action is needed.
 
-**Project** is the organizational layer. It summarizes Catalogs, ratings, tags,
-color labels, and bookmarks for the active Project and turns those summaries
-into project-wide smart views.
+**Project** is the organizational layer. Local Projects summarize Catalogs,
+ratings, tags, color labels, and bookmarks. Redleaf Projects have their own
+persistent MLT Player identity, name, last-known server, source identity, and
+cached Redleaf snapshot.
 
 **Player** opens a single file for frame-exact inspection, exact-frame
-bookmarks, selection and trim, three-layer composition, and export.
+bookmarks, selection and trim, three-layer composition, transcript navigation,
+and export.
 
-The basic workflow remains deliberately direct:
+The Project switch can select either kind of workspace project:
+
+```text
+Project Switch
+  |
+  +-- Local Project
+  |     -> filesystem media
+  |     -> local Catalogs
+  |     -> local ratings / tags / colors / bookmarks
+  |
+  +-- Redleaf Project
+        -> persistent Redleaf instance identity
+        -> cached Redleaf Catalogs / SRTs / media-link state
+        -> explicit SYNC NOW for refresh
+```
+
+The basic local workflow remains deliberately direct:
 
 ```text
 open a directory or media file
@@ -48,10 +70,22 @@ open a directory or media file
   -> return to the browser
 ```
 
-The filesystem remains primary throughout.
+The Redleaf workflow follows the same principle:
 
-> **The filesystem owns the media. Projects organize it. MLT plays and
-> transforms it.**
+```text
+connect to Redleaf
+  -> save/select the Redleaf Project
+  -> SYNC NOW when a fresh snapshot is wanted
+  -> browse the snapshot immediately afterward or while disconnected
+  -> open a linked local media file with its exact Redleaf transcript
+```
+
+The filesystem remains primary for media playback. Redleaf supplies indexed
+document organization and media relationships; MLT Player never turns those
+relationships into a proprietary media store.
+
+> **The filesystem owns the media. Projects organize it. Redleaf can index and
+> relate it. MLT plays and transforms it.**
 
 ## Why it exists
 
@@ -62,17 +96,23 @@ that require an ingest-and-project workflow before useful work can begin.
 
 MLT Player tries to recover that directness on Linux while adding the pieces
 that become necessary once a media collection grows: visual browsing,
-persistent annotations, lightweight Projects, Catalogs, and precise playback.
+persistent annotations, lightweight Projects, Catalogs, precise playback, and
+optional interoperability with an existing Redleaf archive.
 
-Projects do **not** sit between you and your files. You can still open a
-directory or individual media file directly. A Project scopes organization and
-metadata; it does not take ownership of the media.
+Local Projects do **not** sit between you and your files. You can still open a
+directory or individual media file directly. A Local Project scopes
+organization and metadata; it does not take ownership of the media.
 
 Catalogs are intentionally lightweight. They are bin-like in the useful sense:
 a media file can belong to one or more named collections, including nested
 Catalogs, without being copied, moved, or imported into a proprietary project
 store. Catalog membership and Project metadata are organizational state layered
 over ordinary filesystem paths.
+
+Redleaf Projects follow the same separation. MLT Player stores a lightweight
+workspace identity and cached snapshot keyed to the Redleaf database
+`instance_id`. It does not duplicate the Redleaf database and does not make
+Redleaf a hidden dependency for opening the application.
 
 That distinction is deliberate.
 
@@ -97,29 +137,38 @@ it.
   and saved favorite folders
 - Direct Open File and Open Folder workflows
 - Compact Settings access from Explorer
+- The same top-level Explorer can switch between Local and saved Redleaf
+  workspace Projects
 
 ### Projects and Catalogs
 
-- Multiple Projects with create, rename, switch, and delete
-- Per-Project Favorites
-- Nested Catalogs
-- Many-to-many Catalog membership: one media file may belong to multiple
+- Multiple Local Projects with create, rename, switch, and delete
+- Persistent Redleaf workspace Projects keyed by Redleaf `instance_id`
+- User-defined MLT Player names for Redleaf Projects without renaming the
+  Redleaf source database
+- Redleaf Projects remain selectable after disconnect and application restart
+- Per-Project Favorites for Local Projects
+- Nested local Catalogs
+- Many-to-many local Catalog membership: one media file may belong to multiple
   Catalogs without being duplicated
-- Catalog browsing through the same Explorer grid, thumbnail, filter, and open
-  pipeline used for normal folders
+- Catalog browsing through the same Explorer surface
 - Project-wide dashboard with Catalog and metadata counts
 - Clickable Project dashboard rows that open Explorer directly into the
   corresponding Catalog or smart view
 
-A **Catalog** is intentional membership: you explicitly put media into it.
+A **local Catalog** is intentional membership: you explicitly put media into it.
 
-A **smart view** is computed from Project metadata: ratings, tags, colors, and
-bookmarks can produce a project-wide view without changing Catalog membership.
+A **smart view** is computed from Local Project metadata: ratings, tags, colors,
+and bookmarks can produce a project-wide view without changing Catalog
+membership.
+
+Redleaf Catalog membership is read from Redleaf and cached as part of a Redleaf
+Project snapshot. MLT Player does not write Redleaf Catalog membership.
 
 ### Project metadata and smart views
 
-Project metadata is scoped to the active Project rather than stored as one
-global annotation layer.
+Local Project metadata is scoped to the active Local Project rather than stored
+as one global annotation layer.
 
 - 0–5 star ratings
 - Exact rating filters such as `Exactly 4★`
@@ -136,9 +185,147 @@ global annotation layer.
 Bookmarks are soft screenshots: they store exact source-frame positions rather
 than creating image files.
 
-### Redleaf interoperability
+### Redleaf workspace integration
 
-MLT Player understands Redleaf `.rlink` files as virtual folders.
+Redleaf is a first-class **workspace-project source**, not a separate top-level
+application tab and not a fake Local Project.
+
+A saved Redleaf Project is keyed by:
+
+```text
+redleaf:<instance_id>
+```
+
+MLT Player keeps the local display name separate from Redleaf's own
+`project_name`. The source-side name is informational; renaming a Redleaf
+Project in MLT Player does not rename Redleaf.
+
+#### Persistent project identity
+
+A saved Redleaf Project records:
+
+- Redleaf `instance_id`
+- user-controlled MLT Player display name
+- last-known Redleaf server URL
+- Redleaf source project name for reference
+- created / updated / last-synced timestamps
+
+Saved Redleaf Project records survive Redleaf disconnects and MLT Player
+restarts.
+
+Redleaf sessions are deliberately **not** persisted. A new MLT Player launch
+starts disconnected until the user signs in again. Reconnecting authenticates
+and identifies the Redleaf instance only; it does not silently scan the archive.
+
+#### Cache-first snapshots
+
+`SYNC NOW` is the explicit refresh boundary.
+
+A Redleaf Project snapshot stores:
+
+- SRT document identity and exact relative path
+- document status, color, size, duration, and tag count
+- Redleaf media-link state and reference
+- Redleaf Catalog definitions
+- exact Catalog-to-SRT memberships
+- snapshot synchronization time
+
+The snapshot is persisted locally and is loaded by Redleaf `instance_id`.
+
+That means:
+
+```text
+open saved Redleaf Project
+  -> load cached snapshot immediately
+  -> browse while disconnected
+  -> reconnect only when needed
+  -> press SYNC NOW only when a fresh archive snapshot is wanted
+```
+
+Opening Explorer or reconnecting to Redleaf does **not** perform a hidden full
+SRT/media scan.
+
+The Redleaf Explorer view reports SRT totals including:
+
+- media linked
+- transcript only
+- media status unknown
+
+Catalog filtering works from the cached membership snapshot while disconnected.
+
+#### Exact transcript handoff
+
+When a Redleaf SRT with verified local media is opened in Player, MLT Player
+carries the selected Redleaf document identity into the handoff.
+
+The transcript is loaded from the selected document's **exact Redleaf SRT
+relative path** through Redleaf's authenticated `/serve_doc/...` route and
+parsed by the existing SRT subtitle service.
+
+There is no basename guessing.
+
+The handoff is keyed by the Redleaf `instance_id` and document ID, so Player
+does not accidentally attach a similarly named transcript from another part of
+the archive.
+
+#### Verified media resolution
+
+Redleaf `media_status` is treated as the authority for the relationship.
+
+For local media, MLT Player resolves Redleaf virtual paths using the same model
+Redleaf uses:
+
+- ordinary media under Redleaf's `documents/` tree
+- media reached through root `.rlink` virtual folders
+- exact virtual path preservation
+- physical filesystem resolution only when needed
+- existence verification before a resource is considered Player-ready
+
+A local media relationship is not enough by itself: the final filesystem file
+must exist before MLT Player opens it.
+
+External web media URLs are preserved as Redleaf media candidates, but they are
+not currently treated as native MLT Player-ready resources.
+
+#### Controlled `SCAN FOR MEDIA` write
+
+Redleaf integration is read-only by default with one deliberately narrow write
+operation:
+
+**SCAN FOR MEDIA**
+
+It is available only when Redleaf explicitly reports the selected SRT as
+transcript-only and the matching Redleaf instance is connected.
+
+The current scan policy is intentionally conservative:
+
+```text
+selected transcript-only SRT
+  -> ask Redleaf for exact local .mp4 match
+  -> if none, ask Redleaf for exact local .mp3 match
+  -> Redleaf performs the filesystem / .rlink scan
+  -> Redleaf writes the relationship
+  -> MLT Player refreshes only that document's media_status
+  -> update the local snapshot
+```
+
+MLT Player does **not** run an independent filesystem scanner.
+
+Redleaf's optional fuzzy-name matching is deliberately disabled in MLT Player
+for this action. A scan either finds Redleaf's exact match or reports no match;
+it does not silently guess.
+
+The write uses the authenticated Redleaf session and refreshes CSRF
+authorization from the exact Redleaf document workbench immediately before the
+POST.
+
+MLT Player does not currently write Redleaf tags, Catalog membership, document
+metadata, playback offsets, or other Redleaf state.
+
+### Redleaf `.rlink` interoperability
+
+MLT Player also understands Redleaf `.rlink` files as virtual folders during
+normal filesystem browsing.
 
 An `.rlink` points at an external directory while preserving a virtual browsing
 path inside Explorer. Media stays on the external filesystem; MLT Player does
@@ -156,6 +343,8 @@ Current `.rlink` support includes:
   required
 - disconnected links remaining visible instead of silently disappearing
 - normal Player, thumbnail, and export access to resolved media
+- Redleaf media-resource resolution through `.rlink` paths during Redleaf
+  Player handoff
 
 `.rlink` support is implemented and tested at the application level. Real
 removable-drive workflows are still being field-verified, so portable media
@@ -178,6 +367,7 @@ identity beyond the current path-based model is intentionally not claimed yet.
 - Searchable SRT sidecar subtitles with UTF-8, Windows-1252, and Latin-1
   handling
 - Floating transcript sidebar with search-to-seek behavior
+- Exact Redleaf transcript handoff for verified Redleaf local media
 
 ### Composition
 
@@ -233,6 +423,27 @@ without them.
 output validation. They are not used as the application's runtime media engine.
 
 Flutter with Linux desktop support enabled is also required.
+
+### Optional Redleaf integration
+
+Redleaf workspace support requires a reachable, compatible Redleaf server and a
+normal Redleaf user account.
+
+Configure the Redleaf server and sign in from MLT Player Settings. MLT Player
+may remember connection convenience information, but authenticated sessions are
+not persisted between application launches.
+
+The current integration expects Redleaf support for:
+
+- system identity
+- dashboard inventory
+- Catalog listing and membership lookup
+- per-document `media_status`
+- authenticated document serving
+- exact local `find_video` / `find_audio` media linking
+
+Redleaf itself remains responsible for its database, filesystem discovery,
+`.rlink` resolution, and relationship writes.
 
 ## Build and run
 
@@ -295,17 +506,32 @@ flutter build linux --release
 ```text
 Flutter application
   |
+  +-- WorkspaceProjectService
+  |     |
+  |     +-- local:<uuid>
+  |     |     |
+  |     |     +-- ProjectCatalogService
+  |     |     +-- ProjectMediaMetadataService
+  |     |
+  |     +-- redleaf:<instance_id>
+  |           |
+  |           +-- RedleafProjectRegistryService
+  |           +-- RedleafProjectSnapshotService
+  |           +-- RedleafConnectionService
+  |           +-- RedleafCatalogService
+  |           +-- RedleafSrtDiscoveryService
+  |           +-- RedleafMediaResourceService
+  |           +-- RedleafMediaScanService
+  |           +-- RedleafTranscriptService
+  |
   +-- Explorer workspace
   |     |
-  |     +-- filesystem / .rlink browsing
-  |     +-- Catalog browsing
-  |     +-- Project smart views
+  |     +-- local filesystem / .rlink browsing
+  |     +-- local Catalogs and smart views
+  |     +-- cached Redleaf SRT/Catalog browsing
   |     +-- ThumbnailService ---------------------+
   |                                               |
   +-- Project workspace                           |
-  |     |                                         |
-  |     +-- ProjectCatalogService                 |
-  |     +-- ProjectMediaMetadataService           |
   |                                               |
   +-- Player view -------- PlayerEngine ----------+
   |                                               |
@@ -326,13 +552,24 @@ Flutter application
                     OpenGL texture -> Flutter Texture widget
 ```
 
-Flutter owns the application. MLT owns the media. A small C bridge connects them,
-split into translation units for engine/playback, shared composition policy,
-export, and thumbnail generation.
+Flutter owns the application. MLT owns media playback and transformation. A
+small C bridge connects them, split into translation units for engine/playback,
+shared composition policy, export, and thumbnail generation.
 
-Explorer and Project share the same Project Catalog and metadata services, so
-the Project dashboard is an overview of the same live state Explorer works
-against rather than a separate database or duplicated browser.
+`WorkspaceProjectService` sits above the project-source implementations.
+
+A Local Project continues to use the existing local Catalog and metadata
+services.
+
+A Redleaf Project is deliberately separate. Its identity is the Redleaf
+`instance_id`; its cached snapshot and MLT Player display name are persistent,
+while its authenticated connection remains ephemeral. Redleaf IDs are never
+passed into Local Project metadata services.
+
+Explorer and Project share the same Local Project Catalog and metadata services
+when a Local Project is active. When a Redleaf Project is active, Explorer uses
+the Redleaf snapshot/services instead of pretending the remote archive is a
+Local Project.
 
 Explorer and Player are persistent views rather than native lifecycles that are
 destroyed and rebuilt on every navigation. Thumbnail generation uses independent
@@ -363,7 +600,47 @@ engineering record in [`docs/`](docs/README.md).
 
 ## Data model
 
-MLT Player deliberately separates media from organizational state.
+MLT Player deliberately separates media, organizational state, and remote source
+identity.
+
+```text
+Workspace Project
+  |
+  +-- Local Project
+  |     |
+  |     +-- filesystem media
+  |     +-- Favorites
+  |     +-- Catalogs
+  |     |     +-- nested Catalogs
+  |     |     +-- media memberships
+  |     |
+  |     +-- media metadata
+  |           +-- rating
+  |           +-- tags
+  |           +-- color label
+  |           +-- bookmark frames
+  |
+  +-- Redleaf Project
+        |
+        +-- identity
+        |     +-- instance_id
+        |     +-- MLT Player display name
+        |     +-- last-known server
+        |     +-- source project name
+        |
+        +-- persistent snapshot
+        |     +-- SRT documents
+        |     +-- Catalogs
+        |     +-- Catalog memberships
+        |     +-- media-link state
+        |     +-- synced_at
+        |
+        +-- ephemeral live connection
+              +-- authenticated session
+              +-- CSRF authorization
+```
+
+The local filesystem can also contain:
 
 ```text
 filesystem
@@ -371,27 +648,23 @@ filesystem
   +-- media files
   +-- directories
   +-- Redleaf .rlink pointers
-
-Project
-  |
-  +-- Favorites
-  +-- Catalogs
-  |     +-- nested Catalogs
-  |     +-- media memberships
-  |
-  +-- media metadata
-        +-- rating
-        +-- tags
-        +-- color label
-        +-- bookmark frames
 ```
 
-Deleting a Catalog does not delete the media file. Assigning media to a Catalog
-does not move or copy it. A media file may be represented in more than one
-Catalog while still having one ordinary filesystem location.
+Deleting a Local Catalog does not delete the media file. Assigning media to a
+Local Catalog does not move or copy it. A media file may be represented in more
+than one Catalog while still having one ordinary filesystem location.
 
-That separation is the reason Projects and Catalogs fit the original
-filesystem-first design rather than replacing it.
+A Redleaf snapshot does not copy the media or replace Redleaf's database. It
+stores enough Redleaf document and relationship state for immediate browsing and
+deliberate synchronization.
+
+The persistent Redleaf state currently lives under MLT Player's config
+directory, including the saved project registry and per-instance snapshots.
+Authenticated Redleaf sessions are intentionally excluded from that persistent
+project state.
+
+That separation is the reason both Local and Redleaf Projects fit the original
+file-first design rather than replacing it.
 
 ---
 
@@ -412,6 +685,14 @@ preview/export parity. Parity is checked by comparing derived composition state
 between the two graphs, and the frame-rate conform test goes further: it decodes
 output frames and asserts the color, so a layer that lands on the wrong frame
 after conversion fails rather than passing quietly.
+
+The workspace-project test suite also covers Redleaf identity persistence,
+selection across disconnect, and MLT Player-local Redleaf naming behavior.
+
+Because Redleaf integration crosses the boundary between two applications,
+cache-first reconnect, explicit synchronization, exact transcript handoff,
+verified local-media playback, and `SCAN FOR MEDIA` are also validated against
+a live Redleaf instance during integration development.
 
 Some failures during Explorer development appeared only in standalone release
 builds and not under `flutter run`. Release validation is therefore a
@@ -442,13 +723,24 @@ version containing the fix.
 - Three-layer composition model
 - H.264, ProRes, PNG, PNG-sequence, and WAV export
 - Filesystem Explorer with MLT representative thumbnails
-- Projects and nested Catalogs
+- Local Projects and nested Catalogs
 - Per-Project Favorites
 - Project-scoped ratings, tags, color labels, and bookmarks
 - Exact and minimum rating filters
 - Project dashboard
 - Project-wide rating, tag, color, and bookmark smart views
 - Redleaf `.rlink` virtual-folder support
+- Persistent Redleaf workspace Projects keyed by `instance_id`
+- User-defined MLT Player names for Redleaf Projects
+- Persistent Redleaf catalog/SRT/media snapshots
+- Cache-first Redleaf browsing across disconnect and restart
+- Connection-only Redleaf reconnect with no automatic project scan
+- Explicit Redleaf `SYNC NOW`
+- Cached Redleaf Catalog membership browsing
+- Exact Redleaf transcript handoff to Player
+- Verified Redleaf local-media resolution including `.rlink`
+- Controlled Redleaf `SCAN FOR MEDIA` exact-match write path
+- Targeted post-link `media_status` refresh without a full project sync
 
 ### Next
 
@@ -460,6 +752,8 @@ version containing the fix.
   files
 - Richer layer timing and ordering rules
 - Blend modes and a broader alpha/color policy
+- Redleaf integration polish only where it preserves the current explicit
+  read/sync/write boundaries
 
 The roadmap deliberately favors capabilities that preserve MLT Player's
 file-first character rather than turning it into a conventional NLE.
@@ -471,8 +765,8 @@ file-first character rather than turning it into a conventional NLE.
 MLT Player's own source is MIT licensed. See [`LICENSE`](LICENSE).
 
 That covers code authored for this repository. It does not cover MLT, FFmpeg,
-codec libraries, or other third-party components used at runtime or bundled into
-a binary package.
+codec libraries, Redleaf, or other third-party components used at runtime or
+bundled into a binary package.
 
 MLT Player dynamically links `mlt-framework-7`, which is LGPL-2.1, but
 individual MLT modules carry different licenses and some build configurations
@@ -480,8 +774,8 @@ enable GPL components. FFmpeg is normally LGPL-2.1-or-later and becomes GPL when
 components such as `libx264` are enabled.
 
 Anyone distributing prebuilt binaries should audit the exact MLT modules,
-FFmpeg configuration, and codec libraries being shipped, then satisfy the
-obligations that actually apply. See
+FFmpeg configuration, codec libraries, and any separately distributed Redleaf
+components being shipped, then satisfy the obligations that actually apply. See
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for the distribution
 checklist and upstream references.
 
