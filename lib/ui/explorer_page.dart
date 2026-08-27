@@ -11,6 +11,7 @@ import '../models/explorer_asset_annotation.dart';
 import '../models/explorer_item.dart';
 import '../models/explorer_metadata.dart';
 import '../models/project_catalog.dart';
+import '../models/workspace_project.dart';
 import '../services/explorer_metadata_service.dart';
 import '../services/explorer_navigation_service.dart';
 import '../services/explorer_service.dart';
@@ -165,6 +166,7 @@ class ExplorerPage extends StatefulWidget {
     required this.projectCatalogService,
     required this.projectMediaMetadataService,
     required this.onActiveProjectChanged,
+    this.onWorkspaceProjectChanged,
     this.workspaceProjectService,
     this.playerSettings,
     this.projectViewRequest,
@@ -178,6 +180,7 @@ class ExplorerPage extends StatefulWidget {
   final ValueChanged<String> onOpenMedia;
   final ProjectCatalogService projectCatalogService;
   final ProjectMediaMetadataService projectMediaMetadataService;
+  final ValueChanged<WorkspaceProject?>? onWorkspaceProjectChanged;
   final WorkspaceProjectService? workspaceProjectService;
   final PlayerSettingsService? playerSettings;
   final ExplorerProjectViewRequest? projectViewRequest;
@@ -202,6 +205,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
 
   late final WorkspaceProjectService _workspaceProjectService;
   late final bool _ownsWorkspaceProjectService;
+  String? _lastReportedWorkspaceProjectKey;
   String? _lastReportedLocalProjectId;
 
   ProjectCatalogService get _projectCatalogService =>
@@ -378,6 +382,8 @@ class _ExplorerPageState extends State<ExplorerPage> {
     }
 
     final active = _workspaceProjectService.activeProject;
+    _reportWorkspaceProject(active);
+
     if (active != null && active.isLocal) {
       _reportLocalProject(active.localProjectId!);
       if (widget.active) {
@@ -388,6 +394,16 @@ class _ExplorerPageState extends State<ExplorerPage> {
     }
 
     setState(() {});
+  }
+
+  void _reportWorkspaceProject(WorkspaceProject? project) {
+    final projectKey = project?.key;
+    if (_lastReportedWorkspaceProjectKey == projectKey) {
+      return;
+    }
+
+    _lastReportedWorkspaceProjectKey = projectKey;
+    widget.onWorkspaceProjectChanged?.call(project);
   }
 
   void _reportLocalProject(String projectId) {
@@ -469,6 +485,8 @@ class _ExplorerPageState extends State<ExplorerPage> {
     });
 
     final activeWorkspaceProject = _workspaceProjectService.activeProject;
+    _reportWorkspaceProject(activeWorkspaceProject);
+
     if (activeWorkspaceProject != null && activeWorkspaceProject.isLocal) {
       _reportLocalProject(activeWorkspaceProject.localProjectId!);
     } else {

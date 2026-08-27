@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'models/media_info.dart';
+import 'models/workspace_project.dart';
 import 'services/project_catalog_service.dart';
 import 'services/project_media_metadata_service.dart';
 import 'services/host_channel.dart';
@@ -19,6 +20,7 @@ import 'services/player_engine.dart';
 import 'services/player_settings_service.dart';
 import 'services/storyboard_thumbnail_service.dart';
 import 'services/srt_subtitle_service.dart';
+import 'services/workspace_project_service.dart';
 import 'ui/widgets/player_settings_button.dart';
 import 'ui/widgets/bookmark_view.dart';
 import 'ui/widgets/media_inspector.dart';
@@ -140,9 +142,11 @@ enum _WorkspaceSection {
 class _MltExplorerShellState extends State<_MltExplorerShell> {
   late final ProjectCatalogService _projectCatalogService;
   late final ProjectMediaMetadataService _projectMediaMetadataService;
+  late final WorkspaceProjectService _workspaceProjectService;
 
   String? _playerPath;
   String? _activeProjectId;
+  WorkspaceProject? _activeWorkspaceProject;
   int _playerOpenRequest = 0;
   bool _showPlayer = false;
   _WorkspaceSection _workspaceSection = _WorkspaceSection.explorer;
@@ -154,6 +158,30 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
     super.initState();
     _projectCatalogService = ProjectCatalogService();
     _projectMediaMetadataService = ProjectMediaMetadataService();
+    _workspaceProjectService = WorkspaceProjectService(
+      localProjects: _projectCatalogService,
+    );
+  }
+
+  @override
+  void dispose() {
+    _workspaceProjectService.dispose();
+    super.dispose();
+  }
+
+  void _setWorkspaceProject(WorkspaceProject? project) {
+    final localProjectId =
+        project != null && project.isLocal ? project.localProjectId : null;
+
+    if (_activeWorkspaceProject?.key == project?.key &&
+        _activeProjectId == localProjectId) {
+      return;
+    }
+
+    setState(() {
+      _activeWorkspaceProject = project;
+      _activeProjectId = localProjectId;
+    });
   }
 
   void _setActiveProject(String projectId) {
@@ -209,6 +237,7 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
 
   @override
   Widget build(BuildContext context) {
+    final activeWorkspaceProject = _activeWorkspaceProject;
     final workspaceIndex =
         _workspaceSection == _WorkspaceSection.explorer ? 0 : 1;
 
@@ -233,28 +262,36 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
                     projectCatalogService: _projectCatalogService,
                     projectMediaMetadataService:
                         _projectMediaMetadataService,
+                    workspaceProjectService: _workspaceProjectService,
                     playerSettings: widget.playerSettings,
                     projectViewRequest: _explorerProjectViewRequest,
                     onActiveProjectChanged: _setActiveProject,
+                    onWorkspaceProjectChanged: _setWorkspaceProject,
                     active: !_showPlayer &&
                         _workspaceSection == _WorkspaceSection.explorer,
                   ),
-                  ProjectPage(
-                    projectCatalogService: _projectCatalogService,
-                    projectMediaMetadataService:
-                        _projectMediaMetadataService,
-                    activeProjectId: _activeProjectId,
-                    onOpenCatalog: (catalogId) =>
-                        _openExplorerProjectView(catalogId: catalogId),
-                    onOpenRating: (rating) =>
-                        _openExplorerProjectView(exactRating: rating),
-                    onOpenTag: (tag) =>
-                        _openExplorerProjectView(tag: tag),
-                    onOpenColor: (colorHex) =>
-                        _openExplorerProjectView(colorHex: colorHex),
-                    onOpenBookmarks: () =>
-                        _openExplorerProjectView(bookmarkedOnly: true),
-                  ),
+                  if (activeWorkspaceProject != null &&
+                      activeWorkspaceProject.isRedleaf)
+                    _RedleafProjectSyncView(
+                      project: activeWorkspaceProject,
+                    )
+                  else
+                    ProjectPage(
+                      projectCatalogService: _projectCatalogService,
+                      projectMediaMetadataService:
+                          _projectMediaMetadataService,
+                      activeProjectId: _activeProjectId,
+                      onOpenCatalog: (catalogId) =>
+                          _openExplorerProjectView(catalogId: catalogId),
+                      onOpenRating: (rating) =>
+                          _openExplorerProjectView(exactRating: rating),
+                      onOpenTag: (tag) =>
+                          _openExplorerProjectView(tag: tag),
+                      onOpenColor: (colorHex) =>
+                          _openExplorerProjectView(colorHex: colorHex),
+                      onOpenBookmarks: () =>
+                          _openExplorerProjectView(bookmarkedOnly: true),
+                    ),
                 ],
               ),
             ),
@@ -405,6 +442,242 @@ class _WorkspaceTab extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _RedleafProjectSyncView extends StatelessWidget {
+  const _RedleafProjectSyncView({
+    required this.project,
+  });
+
+  final WorkspaceProject project;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF111111),
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(28, 28, 28, 40),
+          child: Align(
+            alignment: Alignment.topCenter,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 1100),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'PROJECT OVERVIEW',
+                    style: TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 1.8,
+                      color: Color(0xFFE8A33D),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      const Icon(
+                        Icons.cloud_outlined,
+                        size: 28,
+                        color: Color(0xFFE8A33D),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Text(
+                          project.name,
+                          style: const TextStyle(
+                            fontSize: 30,
+                            height: 1.05,
+                            fontWeight: FontWeight.w700,
+                            color: Colors.white,
+                          ),
+                        ),
+                      ),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 9,
+                          vertical: 5,
+                        ),
+                        decoration: BoxDecoration(
+                          color: const Color(0x18E8A33D),
+                          borderRadius: BorderRadius.circular(5),
+                          border: Border.all(
+                            color: const Color(0x44E8A33D),
+                          ),
+                        ),
+                        child: const Text(
+                          'REDLEAF',
+                          style: TextStyle(
+                            fontSize: 9,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 1.0,
+                            color: Color(0xFFE8A33D),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  const Text(
+                    'This Redleaf instance is now the active project for both '
+                    'Explorer and Project.',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Colors.white54,
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                  Wrap(
+                    spacing: 12,
+                    runSpacing: 12,
+                    children: [
+                      const _RedleafProjectIdentityCard(
+                        label: 'SOURCE',
+                        value: 'Redleaf',
+                        icon: Icons.cloud_outlined,
+                      ),
+                      _RedleafProjectIdentityCard(
+                        label: 'INSTANCE',
+                        value: project.redleafInstanceId ?? 'Unknown',
+                        icon: Icons.fingerprint,
+                      ),
+                      _RedleafProjectIdentityCard(
+                        label: 'SERVER',
+                        value: project.redleafServerUrl ?? 'Unknown',
+                        icon: Icons.dns_outlined,
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 22),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(18),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF181818),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: Colors.white10),
+                    ),
+                    child: const Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Icon(
+                          Icons.sync,
+                          size: 20,
+                          color: Color(0xFFE8A33D),
+                        ),
+                        SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'WORKSPACE PROJECT SYNCHRONIZED',
+                                style: TextStyle(
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w800,
+                                  letterSpacing: 1.0,
+                                  color: Colors.white70,
+                                ),
+                              ),
+                              SizedBox(height: 7),
+                              Text(
+                                'Explorer and Project are following the same '
+                                'Redleaf project. The next Redleaf Project '
+                                'slice will add its catalogs, tags, colors, '
+                                'and document organization here.',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  height: 1.45,
+                                  color: Colors.white38,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _RedleafProjectIdentityCard extends StatelessWidget {
+  const _RedleafProjectIdentityCard({
+    required this.label,
+    required this.value,
+    required this.icon,
+  });
+
+  final String label;
+  final String value;
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 310,
+      height: 92,
+      padding: const EdgeInsets.fromLTRB(15, 14, 15, 12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF181818),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Colors.white10),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 38,
+            height: 38,
+            decoration: BoxDecoration(
+              color: const Color(0x18E8A33D),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Icon(
+              icon,
+              size: 19,
+              color: const Color(0xFFE8A33D),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  style: const TextStyle(
+                    fontSize: 9,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.9,
+                    color: Colors.white38,
+                  ),
+                ),
+                const SizedBox(height: 7),
+                Text(
+                  value,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: Colors.white70,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }

@@ -4,6 +4,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../services/redleaf_catalog_service.dart';
 import '../services/redleaf_connection_service.dart';
 import '../services/redleaf_srt_service.dart';
 
@@ -24,10 +25,15 @@ class RedleafPage extends StatefulWidget {
 class _RedleafPageState extends State<RedleafPage> {
   late final RedleafConnectionService _connection;
   late final RedleafSrtDiscoveryService _discovery;
+  late final RedleafCatalogService _catalogs;
   final TextEditingController _searchController = TextEditingController();
 
   String _query = '';
   int? _selectedDocId;
+  int? _selectedCatalogId;
+  Set<int>? _selectedCatalogDocumentIds;
+  bool _catalogMembershipLoading = false;
+  String? _catalogMembershipError;
   String _loadedInstanceId = '';
 
   @override
@@ -36,9 +42,11 @@ class _RedleafPageState extends State<RedleafPage> {
 
     _connection = widget.connection ?? RedleafConnectionService.instance;
     _discovery = RedleafSrtDiscoveryService(connection: _connection);
+    _catalogs = RedleafCatalogService(connection: _connection);
 
     _connection.addListener(_onConnectionChanged);
     _discovery.addListener(_onDiscoveryChanged);
+    _catalogs.addListener(_onCatalogsChanged);
     _searchController.addListener(_onSearchChanged);
 
     unawaited(_connection.load().then((_) {
@@ -62,8 +70,10 @@ class _RedleafPageState extends State<RedleafPage> {
   void dispose() {
     _connection.removeListener(_onConnectionChanged);
     _discovery.removeListener(_onDiscoveryChanged);
+    _catalogs.removeListener(_onCatalogsChanged);
     _searchController.removeListener(_onSearchChanged);
     _searchController.dispose();
+    _catalogs.dispose();
     _discovery.dispose();
     super.dispose();
   }
@@ -72,11 +82,13 @@ class _RedleafPageState extends State<RedleafPage> {
     if (!_connection.isConnected) {
       _loadedInstanceId = '';
       _selectedDocId = null;
+      _resetCatalogFilter();
       _discovery.clear();
     } else if (_loadedInstanceId.isNotEmpty &&
         _loadedInstanceId != _connection.instanceId) {
       _loadedInstanceId = '';
       _selectedDocId = null;
+      _resetCatalogFilter();
       _discovery.clear();
     }
 
@@ -85,6 +97,23 @@ class _RedleafPageState extends State<RedleafPage> {
     }
 
     _maybeLoad();
+  }
+
+  void _onCatalogsChanged() {
+    if (!mounted) {
+      return;
+    }
+
+    final selectedCatalogId = _selectedCatalogId;
+    if (selectedCatalogId != null &&
+        _catalogs.loaded &&
+        !_visibleCatalogs.any(
+          (catalog) => catalog.id == selectedCatalogId,
+        )) {
+      _resetCatalogFilter();
+    }
+
+    setState(() {});
   }
 
   void _onDiscoveryChanged() {
@@ -111,21 +140,26 @@ class _RedleafPageState extends State<RedleafPage> {
   }
 
   void _maybeLoad() {
-    if (!mounted ||
-        !widget.active ||
-        !_connection.isConnected ||
-        _discovery.loading ||
-        _discovery.scanningMedia) {
+    if (!mounted || !widget.active || !_connection.isConnected) {
       return;
     }
 
-    if (_loadedInstanceId == _connection.instanceId &&
-        _discovery.documents.isNotEmpty) {
-      return;
+    final instanceId = _connection.instanceId;
+    if (_loadedInstanceId != instanceId) {
+      _loadedInstanceId = instanceId;
+      _selectedDocId = null;
+      _resetCatalogFilter();
     }
 
-    _loadedInstanceId = _connection.instanceId;
-    unawaited(_discovery.refresh());
+    if (!_catalogs.loaded && !_catalogs.loading) {
+      unawaited(_catalogs.refreshCatalogs());
+    }
+
+    if (!_discovery.loading &&
+        !_discovery.scanningMedia &&
+        _discovery.documents.isEmpty) {
+      unawaited(_discovery.refresh());
+    }
   }
 
   Future<void> _refresh() async {
@@ -134,22 +168,137 @@ class _RedleafPageState extends State<RedleafPage> {
     }
 
     _loadedInstanceId = _connection.instanceId;
+
+    final previousCatalogId = _selectedCatalogId;
+    await _catalogs.refreshCatalogs();
+
+    if (!mounted) {
+      return;
+    }
+
+    if (previousCatalogId != null &&
+        _visibleCatalogs.any(
+          (catalog) => catalog.id == previousCatalogId,
+        )) {
+      await _loadCatalogMembership(
+        previousCatalogId,
+        forceRefresh: true,
+      );
+    } else if (previousCatalogId != null) {
+      setState(_resetCatalogFilter);
+    }
+
     await _discovery.refresh();
   }
 
-  List<RedleafSrtDocument> get _filteredDocuments {
-    final documents = _discovery.documents;
-    if (_query.isEmpty) {
-      return documents;
+  List<RedleafCatalog> get _visibleCatalogs {
+    return _catalogs.catalogs
+        .where((catalog) => catalog.isUser)
+        .toList(growable: false);
+  }
+
+  RedleafCatalog? get _selectedCatalog {
+    final catalogId = _selectedCatalogId;
+    if (catalogId == null) {
+      return null;
     }
 
-    return documents
-        .where(
-          (document) =>
-              document.relativePath.toLowerCase().contains(_query) ||
-              document.docId.toString().contains(_query),
-        )
-        .toList(growable: false);
+    for (final catalog in _visibleCatalogs) {
+      if (catalog.id == catalogId) {
+        return catalog;
+      }
+    }
+    return null;
+  }
+
+  List<RedleafSrtDocument> get _filteredDocuments {
+    Iterable<RedleafSrtDocument> documents = _discovery.documents;
+
+    final selectedCatalogId = _selectedCatalogId;
+    if (selectedCatalogId != null) {
+      final memberDocIds = _selectedCatalogDocumentIds;
+      if (memberDocIds == null) {
+        return const <RedleafSrtDocument>[];
+      }
+
+      documents = documents.where(
+        (document) => memberDocIds.contains(document.docId),
+      );
+    }
+
+    if (_query.isNotEmpty) {
+      documents = documents.where(
+        (document) =>
+            document.relativePath.toLowerCase().contains(_query) ||
+            document.docId.toString().contains(_query),
+      );
+    }
+
+    return documents.toList(growable: false);
+  }
+
+  void _resetCatalogFilter() {
+    _selectedCatalogId = null;
+    _selectedCatalogDocumentIds = null;
+    _catalogMembershipLoading = false;
+    _catalogMembershipError = null;
+  }
+
+  Future<void> _selectCatalog(RedleafCatalog? catalog) async {
+    if (catalog == null) {
+      setState(() {
+        _resetCatalogFilter();
+        if (_selectedDocId != null &&
+            !_filteredDocuments.any(
+              (document) => document.docId == _selectedDocId,
+            )) {
+          _selectedDocId = null;
+        }
+      });
+      return;
+    }
+
+    setState(() {
+      _selectedCatalogId = catalog.id;
+      _selectedCatalogDocumentIds = null;
+      _catalogMembershipLoading = true;
+      _catalogMembershipError = null;
+      _selectedDocId = null;
+    });
+
+    await _loadCatalogMembership(catalog.id);
+  }
+
+  Future<void> _loadCatalogMembership(
+    int catalogId, {
+    bool forceRefresh = false,
+  }) async {
+    try {
+      final docIds = await _catalogs.srtDocumentIdsForCatalog(
+        catalogId,
+        forceRefresh: forceRefresh,
+      );
+
+      if (!mounted || _selectedCatalogId != catalogId) {
+        return;
+      }
+
+      setState(() {
+        _selectedCatalogDocumentIds = docIds;
+        _catalogMembershipLoading = false;
+        _catalogMembershipError = null;
+      });
+    } catch (error) {
+      if (!mounted || _selectedCatalogId != catalogId) {
+        return;
+      }
+
+      setState(() {
+        _selectedCatalogDocumentIds = const <int>{};
+        _catalogMembershipLoading = false;
+        _catalogMembershipError = error.toString();
+      });
+    }
   }
 
   RedleafSrtDocument? get _selectedDocument {
@@ -246,10 +395,16 @@ class _RedleafPageState extends State<RedleafPage> {
             IconButton(
               tooltip: 'Refresh Redleaf SRTs',
               visualDensity: VisualDensity.compact,
-              onPressed: _discovery.loading || _discovery.scanningMedia
+              onPressed: _discovery.loading ||
+                      _discovery.scanningMedia ||
+                      _catalogs.loading ||
+                      _catalogMembershipLoading
                   ? null
                   : () => unawaited(_refresh()),
-              icon: _discovery.loading || _discovery.scanningMedia
+              icon: _discovery.loading ||
+                      _discovery.scanningMedia ||
+                      _catalogs.loading ||
+                      _catalogMembershipLoading
                   ? const SizedBox(
                       width: 16,
                       height: 16,
@@ -289,7 +444,7 @@ class _RedleafPageState extends State<RedleafPage> {
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        final showInspector = constraints.maxWidth >= 980;
+        final showInspector = constraints.maxWidth >= 1180;
 
         return Column(
           children: [
@@ -300,6 +455,15 @@ class _RedleafPageState extends State<RedleafPage> {
             Expanded(
               child: Row(
                 children: [
+                  SizedBox(
+                    width: 220,
+                    child: _buildCatalogSidebar(context),
+                  ),
+                  const VerticalDivider(
+                    width: 1,
+                    thickness: 1,
+                    color: Colors.white10,
+                  ),
                   Expanded(
                     child: _buildDocumentTable(context),
                   ),
@@ -424,9 +588,13 @@ class _RedleafPageState extends State<RedleafPage> {
           ),
           const SizedBox(width: 12),
           Text(
-            _query.isEmpty
-                ? '${_discovery.documentCount} indexed SRTs'
-                : '${_filteredDocuments.length} of ${_discovery.documentCount} SRTs',
+            _catalogMembershipLoading
+                ? 'Loading ${_selectedCatalog?.name ?? 'catalog'}…'
+                : _selectedCatalog != null
+                    ? '${_filteredDocuments.length} SRTs in ${_selectedCatalog!.name}'
+                    : _query.isEmpty
+                        ? '${_discovery.documentCount} indexed SRTs'
+                        : '${_filteredDocuments.length} of ${_discovery.documentCount} SRTs',
             style: const TextStyle(
               fontSize: 10.5,
               color: Colors.white38,
@@ -437,14 +605,130 @@ class _RedleafPageState extends State<RedleafPage> {
     );
   }
 
+  Widget _buildCatalogSidebar(BuildContext context) {
+    final primary = Theme.of(context).colorScheme.primary;
+    final catalogs = _visibleCatalogs;
+
+    return Container(
+      color: const Color(0xFF131313),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 14, 12, 10),
+            child: Row(
+              children: [
+                const Expanded(
+                  child: Text(
+                    'CATALOGS',
+                    style: TextStyle(
+                      fontSize: 8.5,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 1.0,
+                      color: Colors.white38,
+                    ),
+                  ),
+                ),
+                if (_catalogs.loading)
+                  const SizedBox(
+                    width: 12,
+                    height: 12,
+                    child: CircularProgressIndicator(strokeWidth: 1.5),
+                  ),
+              ],
+            ),
+          ),
+          _CatalogTile(
+            label: 'All SRTs',
+            count: _discovery.documentCount,
+            selected: _selectedCatalogId == null,
+            loading: false,
+            primary: primary,
+            onTap: () => unawaited(_selectCatalog(null)),
+          ),
+          const Divider(height: 1, color: Colors.white10),
+          if (_catalogs.lastError != null && catalogs.isEmpty)
+            Padding(
+              padding: const EdgeInsets.all(14),
+              child: Text(
+                _catalogs.lastError!,
+                style: const TextStyle(
+                  fontSize: 10.5,
+                  height: 1.4,
+                  color: Colors.orangeAccent,
+                ),
+              ),
+            )
+          else if (!_catalogs.loading && catalogs.isEmpty)
+            const Padding(
+              padding: EdgeInsets.all(14),
+              child: Text(
+                'No user catalogs in this Redleaf project.',
+                style: TextStyle(
+                  fontSize: 10.5,
+                  height: 1.4,
+                  color: Colors.white30,
+                ),
+              ),
+            )
+          else
+            Expanded(
+              child: ListView.builder(
+                padding: const EdgeInsets.symmetric(vertical: 6),
+                itemCount: catalogs.length,
+                itemBuilder: (context, index) {
+                  final catalog = catalogs[index];
+                  final selected = catalog.id == _selectedCatalogId;
+                  final count = selected && !_catalogMembershipLoading
+                      ? _selectedCatalogDocumentIds?.length
+                      : null;
+
+                  return _CatalogTile(
+                    label: catalog.name,
+                    count: count,
+                    selected: selected,
+                    loading: selected && _catalogMembershipLoading,
+                    primary: primary,
+                    onTap: () => unawaited(_selectCatalog(catalog)),
+                  );
+                },
+              ),
+            ),
+          if (_catalogMembershipError != null) ...[
+            const Divider(height: 1, color: Colors.white10),
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: Text(
+                _catalogMembershipError!,
+                maxLines: 4,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 9.5,
+                  height: 1.35,
+                  color: Colors.orangeAccent,
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
   Widget _buildDocumentTable(BuildContext context) {
     final documents = _filteredDocuments;
 
     if (documents.isEmpty) {
-      return const Center(
+      final message = _catalogMembershipLoading
+          ? 'Loading catalog membership…'
+          : _selectedCatalog != null
+              ? 'No SRTs in this Redleaf catalog match the current filter.'
+              : 'No Redleaf SRTs match this filter.';
+
+      return Center(
         child: Text(
-          'No Redleaf SRTs match this filter.',
-          style: TextStyle(
+          message,
+          style: const TextStyle(
             fontSize: 12,
             color: Colors.white38,
           ),
@@ -475,6 +759,87 @@ class _RedleafPageState extends State<RedleafPage> {
           ),
         ),
       ],
+    );
+  }
+}
+
+class _CatalogTile extends StatelessWidget {
+  const _CatalogTile({
+    required this.label,
+    required this.count,
+    required this.selected,
+    required this.loading,
+    required this.primary,
+    required this.onTap,
+  });
+
+  final String label;
+  final int? count;
+  final bool selected;
+  final bool loading;
+  final Color primary;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: selected
+          ? primary.withValues(alpha: 0.08)
+          : Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        child: Container(
+          height: 38,
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          decoration: BoxDecoration(
+            border: Border(
+              left: BorderSide(
+                color: selected ? primary : Colors.transparent,
+                width: 2,
+              ),
+            ),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                selected
+                    ? Icons.folder_open_outlined
+                    : Icons.folder_outlined,
+                size: 15,
+                color: selected ? primary : Colors.white38,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 10.5,
+                    fontWeight:
+                        selected ? FontWeight.w700 : FontWeight.w500,
+                    color: selected ? Colors.white70 : Colors.white54,
+                  ),
+                ),
+              ),
+              if (loading)
+                const SizedBox(
+                  width: 12,
+                  height: 12,
+                  child: CircularProgressIndicator(strokeWidth: 1.5),
+                )
+              else if (count != null)
+                Text(
+                  '$count',
+                  style: const TextStyle(
+                    fontSize: 9.5,
+                    color: Colors.white30,
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

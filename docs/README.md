@@ -9,6 +9,9 @@ separate so there is only one source of truth for each job.
   product scope, features, build instructions, shortcuts, testing, and roadmap.
 - [`architecture.md`](architecture.md) describes **how the current system is put
   together now**.
+- [`redleaf-workspace.md`](redleaf-workspace.md) describes the **current
+  authenticated Redleaf workspace integration**: workspace identity, SRT
+  discovery, catalog filtering, media relationships, and the read-only boundary.
 - [`embedding-mlt-in-a-flutter-linux-app.md`](embedding-mlt-in-a-flutter-linux-app.md)
   is a **standalone engineering guide for other developers embedding MLT** in a
   Flutter/Linux desktop application.
@@ -17,7 +20,7 @@ The remaining POC documents are the historical engineering record. They explain
 how the architecture was discovered, which approaches failed, and why later
 choices were made. They are snapshots of their respective stages and should not
 be treated as current reference documentation when they conflict with
-`architecture.md` or the root README.
+`architecture.md`, `redleaf-workspace.md`, or the root README.
 
 ## Start here
 
@@ -30,6 +33,16 @@ engine handles, the four native translation units, the indexed three-slot
 composition model, preview/export separation, shared composition policy,
 serialized thumbnail generation, Explorer/Player lifecycle, and the validation
 boundaries that protect the native path.
+
+### Redleaf workspace integration
+
+[**Redleaf Workspace Integration**](redleaf-workspace.md)
+
+The current authenticated Redleaf path: Redleaf as a Project source rather than
+a third top-level tab, namespaced workspace identity, session authentication,
+canonical Redleaf `doc_id` handling, explicit-SRT discovery, media relationship
+semantics, user-created catalog discovery and filtering, and the current
+read-only boundary before Player handoff.
 
 ### Reusable MLT embedding guide
 
