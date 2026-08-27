@@ -248,6 +248,55 @@ class RedleafConnectionService extends ChangeNotifier {
     }
   }
 
+  Future<bool> refreshWriteCsrfForDocument(int docId) async {
+    if (!isConnected) {
+      return false;
+    }
+
+    final expectedInstanceId = _instanceId;
+    final client = HttpClient()..connectionTimeout = _requestTimeout;
+
+    try {
+      final request = await client
+          .getUrl(Uri.parse('$_serverUrl/document/$docId'))
+          .timeout(_requestTimeout);
+      request.followRedirects = false;
+
+      if (_sessionCookie.isNotEmpty) {
+        request.headers.set(
+          HttpHeaders.cookieHeader,
+          _sessionCookie,
+        );
+      }
+
+      final response = await request.close().timeout(_requestTimeout);
+      _captureSessionCookie(response);
+      final body = await _readBody(response).timeout(_requestTimeout);
+
+      if (response.statusCode != HttpStatus.ok) {
+        return false;
+      }
+
+      final token = _extractCsrfToken(body);
+      if (token.isEmpty) {
+        return false;
+      }
+
+      if (!isConnected || _instanceId != expectedInstanceId) {
+        return false;
+      }
+
+      _csrfToken = token;
+      return true;
+    } on TimeoutException {
+      return false;
+    } on SocketException {
+      return false;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
   Future<void> refreshInventory() async {
     if (!isConnected) {
       return;

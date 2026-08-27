@@ -9,6 +9,7 @@ import '../models/workspace_project.dart';
 import '../services/redleaf_catalog_service.dart';
 import '../services/redleaf_connection_service.dart';
 import '../services/redleaf_media_resource_service.dart';
+import '../services/redleaf_media_scan_service.dart';
 import '../services/redleaf_project_snapshot_service.dart';
 import '../services/redleaf_srt_service.dart';
 import '../services/redleaf_transcript_service.dart';
@@ -51,6 +52,7 @@ class _RedleafPageState extends State<RedleafPage> {
   late final RedleafSrtDiscoveryService _discovery;
   late final RedleafCatalogService _catalogs;
   late final RedleafMediaResourceService _mediaResources;
+  late final RedleafMediaScanService _mediaScanner;
   late final RedleafTranscriptService _transcripts;
   late final RedleafProjectSnapshotService _snapshots;
   final TextEditingController _searchController = TextEditingController();
@@ -68,6 +70,10 @@ class _RedleafPageState extends State<RedleafPage> {
   int _snapshotLoadSerial = 0;
   bool _syncing = false;
   String? _syncError;
+  bool _scanForMediaLoading = false;
+  String? _scanForMediaMessage;
+  String? _scanForMediaError;
+  int _scanForMediaSerial = 0;
   RedleafMediaResourceResolution? _selectedMediaResolution;
   bool _mediaResolutionLoading = false;
   String? _selectedMediaSignature;
@@ -84,6 +90,7 @@ class _RedleafPageState extends State<RedleafPage> {
     _discovery = RedleafSrtDiscoveryService(connection: _connection);
     _catalogs = RedleafCatalogService(connection: _connection);
     _mediaResources = RedleafMediaResourceService(connection: _connection);
+    _mediaScanner = RedleafMediaScanService(connection: _connection);
     _transcripts = RedleafTranscriptService(connection: _connection);
     _snapshots = RedleafProjectSnapshotService();
 
@@ -560,6 +567,14 @@ class _RedleafPageState extends State<RedleafPage> {
     _mediaResolutionLoading = false;
     _selectedMediaSignature = null;
     _resetHandoffState();
+    _resetMediaScanState();
+  }
+
+  void _resetMediaScanState() {
+    _scanForMediaSerial += 1;
+    _scanForMediaLoading = false;
+    _scanForMediaMessage = null;
+    _scanForMediaError = null;
   }
 
   void _resetHandoffState() {
@@ -588,6 +603,154 @@ class _RedleafPageState extends State<RedleafPage> {
     });
 
     await _resolveSelectedMedia(document);
+  }
+
+  Future<void> _scanSelectedMedia() async {
+    final document = _selectedDocument;
+    final instanceId = _workspaceInstanceId;
+
+    if (document == null ||
+        document.media.state != RedleafMediaLinkState.notLinked ||
+        instanceId.isEmpty ||
+        _scanForMediaLoading) {
+      return;
+    }
+
+    if (!_connectionMatchesWorkspace) {
+      setState(() {
+        _scanForMediaError =
+            'Connect this Redleaf project before scanning for media.';
+        _scanForMediaMessage = null;
+      });
+      return;
+    }
+
+    final serial = ++_scanForMediaSerial;
+    final docId = document.docId;
+
+    setState(() {
+      _scanForMediaLoading = true;
+      _scanForMediaMessage = null;
+      _scanForMediaError = null;
+    });
+
+    try {
+      final result = await _mediaScanner.scanForDocument(
+        instanceId: instanceId,
+        document: document,
+      );
+
+      if (!mounted ||
+          serial != _scanForMediaSerial ||
+          _selectedDocId != docId ||
+          _workspaceInstanceId != instanceId) {
+        return;
+      }
+
+      if (!result.linked) {
+        setState(() {
+          _scanForMediaLoading = false;
+          _scanForMediaMessage = result.message;
+          _scanForMediaError = null;
+        });
+        return;
+      }
+
+      final refreshed =
+          await _discovery.refreshMediaStatusForDocument(docId);
+
+      if (!mounted ||
+          serial != _scanForMediaSerial ||
+          _selectedDocId != docId ||
+          _workspaceInstanceId != instanceId) {
+        return;
+      }
+
+      if (!refreshed) {
+        throw StateError(
+          _discovery.lastError ??
+              'Redleaf linked media, but MLT Player could not refresh '
+                  'the updated media relationship.',
+        );
+      }
+
+      final updatedDocument = _selectedDocument;
+      if (updatedDocument == null ||
+          !updatedDocument.media.isLinked) {
+        throw StateError(
+          'Redleaf reported a successful media link, but the refreshed '
+          'document is still transcript-only.',
+        );
+      }
+
+      String? snapshotWarning;
+      try {
+        await _persistSnapshotAfterMediaScan(instanceId);
+      } catch (error) {
+        snapshotWarning =
+            'Media was linked in Redleaf, but the local snapshot could not '
+            'be updated: $error';
+      }
+
+      if (!mounted ||
+          serial != _scanForMediaSerial ||
+          _selectedDocId != docId ||
+          _workspaceInstanceId != instanceId) {
+        return;
+      }
+
+      setState(() {
+        _scanForMediaLoading = false;
+        _scanForMediaMessage = result.message;
+        _scanForMediaError = snapshotWarning;
+      });
+    } catch (error) {
+      if (!mounted ||
+          serial != _scanForMediaSerial ||
+          _selectedDocId != docId ||
+          _workspaceInstanceId != instanceId) {
+        return;
+      }
+
+      setState(() {
+        _scanForMediaLoading = false;
+        _scanForMediaMessage = null;
+        _scanForMediaError = error.toString();
+      });
+    }
+  }
+
+  Future<void> _persistSnapshotAfterMediaScan(
+    String instanceId,
+  ) async {
+    final previousSnapshot = _snapshot;
+    if (previousSnapshot == null) {
+      return;
+    }
+
+    final updatedSnapshot = RedleafProjectSnapshot(
+      instanceId: previousSnapshot.instanceId,
+      syncedAt: previousSnapshot.syncedAt,
+      documents: _discovery.documents,
+      catalogs: previousSnapshot.catalogs,
+      catalogMemberships: previousSnapshot.catalogMemberships,
+    );
+
+    await _snapshots.save(
+      instanceId: instanceId,
+      documents: updatedSnapshot.documents,
+      catalogs: updatedSnapshot.catalogs,
+      catalogMemberships: updatedSnapshot.catalogMemberships,
+      syncedAt: updatedSnapshot.syncedAt,
+    );
+
+    if (!mounted || _workspaceInstanceId != instanceId) {
+      return;
+    }
+
+    setState(() {
+      _snapshot = updatedSnapshot;
+    });
   }
 
   Future<void> _resolveSelectedMedia(RedleafSrtDocument document) async {
@@ -934,6 +1097,13 @@ class _RedleafPageState extends State<RedleafPage> {
                         document: _selectedDocument,
                         catalogName: _selectedCatalog?.name,
                         mediaScanInProgress: _discovery.scanningMedia,
+                        scanForMediaLoading: _scanForMediaLoading,
+                        scanForMediaMessage: _scanForMediaMessage,
+                        scanForMediaError: _scanForMediaError,
+                        onScanForMedia:
+                            _connectionMatchesWorkspace && !_syncing
+                                ? () => unawaited(_scanSelectedMedia())
+                                : null,
                         resolution: _selectedMediaResolution,
                         resolutionLoading: _mediaResolutionLoading,
                         handoffLoading: _handoffLoading,
@@ -1650,6 +1820,10 @@ class _RedleafHandoffPanel extends StatelessWidget {
     required this.document,
     required this.catalogName,
     required this.mediaScanInProgress,
+    required this.scanForMediaLoading,
+    required this.scanForMediaMessage,
+    required this.scanForMediaError,
+    required this.onScanForMedia,
     required this.resolution,
     required this.resolutionLoading,
     required this.handoffLoading,
@@ -1660,6 +1834,10 @@ class _RedleafHandoffPanel extends StatelessWidget {
   final RedleafSrtDocument? document;
   final String? catalogName;
   final bool mediaScanInProgress;
+  final bool scanForMediaLoading;
+  final String? scanForMediaMessage;
+  final String? scanForMediaError;
+  final VoidCallback? onScanForMedia;
   final RedleafMediaResourceResolution? resolution;
   final bool resolutionLoading;
   final bool handoffLoading;
@@ -1791,6 +1969,62 @@ class _RedleafHandoffPanel extends StatelessWidget {
                     media: document.media,
                     mediaScanInProgress: mediaScanInProgress,
                   ),
+                  if (document.media.state ==
+                          RedleafMediaLinkState.notLinked &&
+                      onScanForMedia != null) ...[
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        onPressed:
+                            scanForMediaLoading ? null : onScanForMedia,
+                        icon: scanForMediaLoading
+                            ? const SizedBox(
+                                width: 14,
+                                height: 14,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 1.5,
+                                ),
+                              )
+                            : const Icon(
+                                Icons.manage_search,
+                                size: 16,
+                              ),
+                        label: Text(
+                          scanForMediaLoading
+                              ? 'SCANNING REDLEAF…'
+                              : 'SCAN FOR MEDIA',
+                          style: const TextStyle(
+                            fontSize: 9.5,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 0.35,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                  if (scanForMediaMessage != null) ...[
+                    const SizedBox(height: 10),
+                    Text(
+                      scanForMediaMessage!,
+                      style: const TextStyle(
+                        fontSize: 10.5,
+                        height: 1.45,
+                        color: Colors.greenAccent,
+                      ),
+                    ),
+                  ],
+                  if (scanForMediaError != null) ...[
+                    const SizedBox(height: 10),
+                    Text(
+                      scanForMediaError!,
+                      style: const TextStyle(
+                        fontSize: 10.5,
+                        height: 1.45,
+                        color: Colors.orangeAccent,
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: 16),
                   const Divider(height: 1, color: Colors.white10),
                   const SizedBox(height: 14),

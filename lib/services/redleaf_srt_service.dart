@@ -238,6 +238,70 @@ class RedleafSrtDiscoveryService extends ChangeNotifier {
     return false;
   }
 
+  Future<bool> refreshMediaStatusForDocument(int docId) async {
+    if (_loading || _scanningMedia) {
+      _lastError =
+          'Wait for the current Redleaf refresh before checking one media link.';
+      notifyListeners();
+      return false;
+    }
+
+    if (!_connection.isConnected) {
+      _lastError =
+          'Connect to Redleaf before refreshing this media relationship.';
+      notifyListeners();
+      return false;
+    }
+
+    if (_loadedInstanceId.isEmpty ||
+        _loadedInstanceId != _connection.instanceId) {
+      _lastError =
+          'The loaded SRTs belong to a different Redleaf instance.';
+      notifyListeners();
+      return false;
+    }
+
+    final index = _documents.indexWhere(
+      (document) => document.docId == docId,
+    );
+    if (index < 0) {
+      throw ArgumentError.value(
+        docId,
+        'docId',
+        'Redleaf SRT is not in the current discovery set.',
+      );
+    }
+
+    final client = HttpClient()..connectionTimeout = _requestTimeout;
+
+    try {
+      final media = await _fetchMediaStatus(client, docId);
+      if (!media.isKnown) {
+        _lastError =
+            'Could not verify the updated Redleaf media relationship.';
+        notifyListeners();
+        return false;
+      }
+
+      final previous = _documents[index];
+      final previousKnown = previous.media.isKnown;
+
+      final updated = List<RedleafSrtDocument>.from(_documents);
+      updated[index] = previous.copyWith(media: media);
+      _documents = List<RedleafSrtDocument>.unmodifiable(updated);
+
+      if (!previousKnown && media.isKnown) {
+        _mediaCheckedCount += 1;
+      }
+
+      _lastError = null;
+      notifyListeners();
+      return true;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
   void loadCachedDocuments({
     required String instanceId,
     required Iterable<RedleafSrtDocument> documents,
