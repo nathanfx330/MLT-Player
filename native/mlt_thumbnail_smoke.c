@@ -5,6 +5,7 @@
 
 #include <gdk-pixbuf/gdk-pixbuf.h>
 #include <glib.h>
+#include <glib/gstdio.h>
 
 #include <stdint.h>
 #include <stdio.h>
@@ -160,6 +161,73 @@ static void check_concurrent_generation(
     }
 }
 
+static void check_storyboard_batch_generation(const char *video_path)
+{
+    GError *directory_error = NULL;
+    char *batch_directory =
+        g_dir_make_tmp("mlt-thumbnail-batch-XXXXXX", &directory_error);
+
+    check(
+        batch_directory != NULL,
+        "storyboard batch temporary directory is created"
+    );
+
+    if (batch_directory == NULL) {
+        if (directory_error != NULL) {
+            fprintf(stderr, "  batch directory error: %s\n", directory_error->message);
+            g_error_free(directory_error);
+        }
+        return;
+    }
+
+    if (directory_error != NULL) {
+        g_error_free(directory_error);
+    }
+
+    const int64_t frames[] = {25, 75, 125};
+    char error[512] = {0};
+    int generated_count = 0;
+
+    const int batch_ok = mlt_thumbnail_generate_frame_batch(
+        video_path,
+        batch_directory,
+        256,
+        144,
+        frames,
+        (int)(sizeof(frames) / sizeof(frames[0])),
+        &generated_count,
+        error,
+        (int)sizeof(error)
+    );
+
+    if (!batch_ok && error[0] != '\0') {
+        fprintf(stderr, "  storyboard batch error: %s\n", error);
+    }
+
+    check(batch_ok != 0, "storyboard batch opens one MLT generation session");
+    check(generated_count == 3, "storyboard batch publishes every requested frame");
+
+    int all_outputs = 1;
+    for (int index = 0; index < 3; index++) {
+        char *path = g_strdup_printf("%s%c%d.jpg", batch_directory, G_DIR_SEPARATOR, index);
+        if (path == NULL || !file_has_data(path)) {
+            all_outputs = 0;
+        }
+        if (path != NULL && file_has_data(path)) {
+            check_jpeg_geometry(path, 256, 144);
+            g_remove(path);
+        }
+        g_free(path);
+    }
+
+    check(all_outputs, "storyboard batch atomically publishes indexed JPEG outputs");
+    check(
+        g_rmdir(batch_directory) == 0,
+        "storyboard batch temporary directory cleans up"
+    );
+    g_free(batch_directory);
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 5) {
@@ -247,6 +315,8 @@ int main(int argc, char **argv)
         remove(exact_output);
         g_free(exact_output);
     }
+
+    check_storyboard_batch_generation(video_path);
 
     error[0] = '\0';
     selected_frame = -1;

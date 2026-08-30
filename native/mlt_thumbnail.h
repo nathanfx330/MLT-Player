@@ -63,6 +63,34 @@ mlt_thumbnail_generate_at_frame(
     int error_capacity
 );
 
+/*
+ * Decode several exact source frames through one MLT producer session.
+ *
+ * output_directory must already exist. Each successful request is atomically
+ * published as <request-index>.jpg inside that directory, where request-index
+ * is the zero-based index into requested_frames. Individual frame failures do
+ * not abort the remaining batch. succeeded_count_out receives the number of
+ * JPEGs published and may be NULL.
+ *
+ * Returns non-zero when the source session publishes at least one thumbnail.
+ *
+ * The process-wide thumbnail mutex is held once for the entire batch. This
+ * preserves the release-safety serialization contract while avoiding repeated
+ * producer/profile creation for every Storyboard card.
+ */
+MLT_THUMBNAIL_EXPORT int
+mlt_thumbnail_generate_frame_batch(
+    const char *source_path,
+    const char *output_directory,
+    int output_width,
+    int output_height,
+    const int64_t *requested_frames,
+    int frame_count,
+    int *succeeded_count_out,
+    char *error_buffer,
+    int error_capacity
+);
+
 #ifdef __cplusplus
 }
 #endif

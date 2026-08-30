@@ -4,6 +4,7 @@
 
 #include <framework/mlt.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
+#include <glib/gstdio.h>
 
 #include <math.h>
 #include <stdint.h>
@@ -13,6 +14,7 @@
 #define THUMBNAIL_SCORE_WIDTH 160
 #define THUMBNAIL_SCORE_HEIGHT 90
 #define THUMBNAIL_CANDIDATE_COUNT 3
+#define THUMBNAIL_FRAME_ERROR_CAPACITY 512
 
 /*
  * MLT producer/decoder/plugin stacks are proven concurrently against preview
@@ -48,6 +50,18 @@ static void thumbnail_set_error(
         "%s",
         message != NULL ? message : "MLT thumbnail generation failed."
     );
+}
+
+static void thumbnail_set_error_once(
+    char *buffer,
+    int capacity,
+    const char *message)
+{
+    if (buffer == NULL || capacity <= 0 || buffer[0] != '\0') {
+        return;
+    }
+
+    thumbnail_set_error(buffer, capacity, message);
 }
 
 static int thumbnail_has_suffix(
@@ -842,6 +856,202 @@ cleanup:
     return succeeded;
 }
 
+static int thumbnail_generate_frame_batch_locked(
+    const char *source_path,
+    const char *output_directory,
+    int output_width,
+    int output_height,
+    const int64_t *requested_frames,
+    int frame_count,
+    int *succeeded_count_out,
+    char *error_buffer,
+    int error_capacity)
+{
+    const int is_still = thumbnail_path_is_still(source_path);
+    mlt_profile profile = mlt_profile_init(NULL);
+    mlt_producer probe = NULL;
+    mlt_producer producer = NULL;
+    int session_succeeded = 0;
+    int generated_count = 0;
+
+    if (profile == NULL) {
+        thumbnail_set_error(
+            error_buffer,
+            error_capacity,
+            "Could not create an MLT storyboard batch profile."
+        );
+        goto cleanup;
+    }
+
+    probe = thumbnail_open_source(profile, source_path, is_still);
+    if (probe == NULL) {
+        thumbnail_set_error(
+            error_buffer,
+            error_capacity,
+            "MLT could not open the storyboard batch source."
+        );
+        goto cleanup;
+    }
+
+    mlt_producer_probe(probe);
+
+    const ThumbnailMediaKind media_kind =
+        thumbnail_classify_producer(probe);
+
+    if (media_kind == THUMBNAIL_MEDIA_UNSUPPORTED ||
+        (!is_still &&
+         (media_kind != THUMBNAIL_MEDIA_TIMED ||
+          !thumbnail_producer_has_video(probe)))) {
+        thumbnail_set_error(
+            error_buffer,
+            error_capacity,
+            "MLT opened the storyboard source, but it has no usable video."
+        );
+        goto cleanup;
+    }
+
+    mlt_profile_from_producer(profile, probe);
+
+    mlt_producer_close(probe);
+    probe = NULL;
+
+    producer = thumbnail_open_source(profile, source_path, is_still);
+    if (producer == NULL) {
+        thumbnail_set_error(
+            error_buffer,
+            error_capacity,
+            "MLT could not reopen the storyboard batch source."
+        );
+        goto cleanup;
+    }
+
+    mlt_producer_probe(producer);
+
+    if (is_still && !thumbnail_attach_still_converter(profile, producer)) {
+        thumbnail_set_error(
+            error_buffer,
+            error_capacity,
+            "MLT could not attach the storyboard still-image color converter."
+        );
+        goto cleanup;
+    }
+
+    const int64_t source_length =
+        is_still ? 1 : (int64_t)mlt_producer_get_length(producer);
+
+    if (source_length <= 0) {
+        thumbnail_set_error(
+            error_buffer,
+            error_capacity,
+            "The storyboard batch source has no decodable video frames."
+        );
+        goto cleanup;
+    }
+
+    session_succeeded = 1;
+
+    for (int index = 0; index < frame_count; index++) {
+        int64_t selected_frame = is_still ? 0 : requested_frames[index];
+        if (selected_frame >= source_length) {
+            selected_frame = source_length - 1;
+        }
+
+        char file_name[64];
+        char temporary_name[64];
+        snprintf(file_name, sizeof(file_name), "%d.jpg", index);
+        snprintf(temporary_name, sizeof(temporary_name), "%d.part.jpg", index);
+
+        char *output_path =
+            g_build_filename(output_directory, file_name, NULL);
+        char *temporary_path =
+            g_build_filename(output_directory, temporary_name, NULL);
+
+        if (output_path == NULL || temporary_path == NULL) {
+            thumbnail_set_error_once(
+                error_buffer,
+                error_capacity,
+                "Could not allocate a storyboard batch output path."
+            );
+            if (output_path != NULL) {
+                g_free(output_path);
+            }
+            if (temporary_path != NULL) {
+                g_free(temporary_path);
+            }
+            continue;
+        }
+
+        g_remove(output_path);
+        g_remove(temporary_path);
+
+        char frame_error[THUMBNAIL_FRAME_ERROR_CAPACITY] = {0};
+        const int rendered = thumbnail_render_selected_frame(
+            profile,
+            producer,
+            selected_frame,
+            temporary_path,
+            output_width,
+            output_height,
+            frame_error,
+            (int)sizeof(frame_error)
+        );
+
+        if (!rendered) {
+            char diagnostic[THUMBNAIL_FRAME_ERROR_CAPACITY + 96];
+            snprintf(
+                diagnostic,
+                sizeof(diagnostic),
+                "Storyboard frame %lld failed: %s",
+                (long long)selected_frame,
+                frame_error[0] != '\0'
+                    ? frame_error
+                    : "MLT could not render the requested frame."
+            );
+            thumbnail_set_error_once(
+                error_buffer,
+                error_capacity,
+                diagnostic
+            );
+            g_remove(temporary_path);
+            g_free(temporary_path);
+            g_free(output_path);
+            continue;
+        }
+
+        if (g_rename(temporary_path, output_path) != 0) {
+            thumbnail_set_error_once(
+                error_buffer,
+                error_capacity,
+                "Could not publish a storyboard batch thumbnail."
+            );
+            g_remove(temporary_path);
+            g_free(temporary_path);
+            g_free(output_path);
+            continue;
+        }
+
+        generated_count++;
+        g_free(temporary_path);
+        g_free(output_path);
+    }
+
+cleanup:
+    if (succeeded_count_out != NULL) {
+        *succeeded_count_out = generated_count;
+    }
+    if (producer != NULL) {
+        mlt_producer_close(producer);
+    }
+    if (probe != NULL) {
+        mlt_producer_close(probe);
+    }
+    if (profile != NULL) {
+        mlt_profile_close(profile);
+    }
+
+    return session_succeeded && generated_count > 0;
+}
+
 static int thumbnail_generate_serialized(
     const char *source_path,
     const char *output_path,
@@ -964,4 +1174,97 @@ int mlt_thumbnail_generate_at_frame(
         error_buffer,
         error_capacity
     );
+}
+
+int mlt_thumbnail_generate_frame_batch(
+    const char *source_path,
+    const char *output_directory,
+    int output_width,
+    int output_height,
+    const int64_t *requested_frames,
+    int frame_count,
+    int *succeeded_count_out,
+    char *error_buffer,
+    int error_capacity)
+{
+    if (succeeded_count_out != NULL) {
+        *succeeded_count_out = 0;
+    }
+    if (error_buffer != NULL && error_capacity > 0) {
+        error_buffer[0] = '\0';
+    }
+
+    if (source_path == NULL || source_path[0] == '\0') {
+        thumbnail_set_error(
+            error_buffer,
+            error_capacity,
+            "The storyboard batch source path is empty."
+        );
+        return 0;
+    }
+
+    if (output_directory == NULL || output_directory[0] == '\0') {
+        thumbnail_set_error(
+            error_buffer,
+            error_capacity,
+            "The storyboard batch output directory is empty."
+        );
+        return 0;
+    }
+
+    if (!g_file_test(output_directory, G_FILE_TEST_IS_DIR)) {
+        thumbnail_set_error(
+            error_buffer,
+            error_capacity,
+            "The storyboard batch output directory does not exist."
+        );
+        return 0;
+    }
+
+    if (output_width <= 0 || output_height <= 0) {
+        thumbnail_set_error(
+            error_buffer,
+            error_capacity,
+            "The storyboard batch dimensions are invalid."
+        );
+        return 0;
+    }
+
+    if (requested_frames == NULL || frame_count <= 0) {
+        thumbnail_set_error(
+            error_buffer,
+            error_capacity,
+            "The storyboard batch contains no frame requests."
+        );
+        return 0;
+    }
+
+    for (int index = 0; index < frame_count; index++) {
+        if (requested_frames[index] < 0) {
+            thumbnail_set_error(
+                error_buffer,
+                error_capacity,
+                "The storyboard batch contains an invalid source frame."
+            );
+            return 0;
+        }
+    }
+
+    thumbnail_ensure_mutex();
+    g_mutex_lock(&thumbnail_generation_mutex);
+
+    const int succeeded = thumbnail_generate_frame_batch_locked(
+        source_path,
+        output_directory,
+        output_width,
+        output_height,
+        requested_frames,
+        frame_count,
+        succeeded_count_out,
+        error_buffer,
+        error_capacity
+    );
+
+    g_mutex_unlock(&thumbnail_generation_mutex);
+    return succeeded;
 }

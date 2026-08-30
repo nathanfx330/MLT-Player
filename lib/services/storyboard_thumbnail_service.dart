@@ -16,35 +16,113 @@ typedef StoryboardThumbnailGenerator =
       required int requestedFrame,
     });
 
+typedef StoryboardThumbnailBatchGenerator =
+    Future<MltThumbnailBatchGenerationResult> Function({
+      required String sourcePath,
+      required String outputDirectory,
+      required int width,
+      required int height,
+      required List<int> requestedFrames,
+    });
+
 class StoryboardThumbnailService {
   StoryboardThumbnailService({
     Directory? cacheDirectory,
     StoryboardThumbnailGenerator? generator,
-  }) : _cacheDirectory = cacheDirectory ?? _defaultCacheDirectory(),
-       _generator = generator ?? generateMltThumbnailAtFrame;
+    StoryboardThumbnailBatchGenerator? batchGenerator,
+  }) : assert(generator == null || batchGenerator == null),
+       _cacheDirectory = cacheDirectory ?? _defaultCacheDirectory(),
+       _batchGenerator = batchGenerator ??
+           (generator == null
+               ? generateMltThumbnailFrameBatch
+               : _batchAdapterForSingleGenerator(generator));
 
   static const int thumbnailWidth = 256;
   static const int thumbnailHeight = 144;
+  static const int _maxBatchSize = 8;
+  static const Duration _batchPollInterval = Duration(milliseconds: 35);
   static const String _cacheVersion = 'v1-mlt-storyboard-exact-frame';
 
   final Directory _cacheDirectory;
-  final StoryboardThumbnailGenerator _generator;
-  final _StoryboardPermitPool _permits = _StoryboardPermitPool(1);
-  final Map<String, Future<String?>> _inFlight = <String, Future<String?>>{};
+  final StoryboardThumbnailBatchGenerator _batchGenerator;
+  final Queue<_StoryboardThumbnailRequest> _pending =
+      Queue<_StoryboardThumbnailRequest>();
+  final Map<String, _StoryboardThumbnailRequest> _inFlight =
+      <String, _StoryboardThumbnailRequest>{};
 
   String? _activeSourcePath;
+  Future<_StoryboardSourceIdentity?>? _activeSourceIdentity;
   int _generation = 0;
+  bool _pumpScheduled = false;
+  bool _pumpRunning = false;
 
   Directory get cacheDirectory => _cacheDirectory;
 
+  static StoryboardThumbnailBatchGenerator _batchAdapterForSingleGenerator(
+    StoryboardThumbnailGenerator generator,
+  ) {
+    return ({
+      required String sourcePath,
+      required String outputDirectory,
+      required int width,
+      required int height,
+      required List<int> requestedFrames,
+    }) async {
+      var generatedCount = 0;
+      String firstError = '';
+
+      for (var index = 0; index < requestedFrames.length; index++) {
+        final result = await generator(
+          sourcePath: sourcePath,
+          outputPath: _join(outputDirectory, '$index.jpg'),
+          width: width,
+          height: height,
+          requestedFrame: requestedFrames[index],
+        );
+
+        if (result.succeeded) {
+          generatedCount += 1;
+        } else if (firstError.isEmpty && result.error.trim().isNotEmpty) {
+          firstError = result.error.trim();
+        }
+      }
+
+      return MltThumbnailBatchGenerationResult(
+        succeeded: true,
+        generatedCount: generatedCount,
+        error: firstError,
+      );
+    };
+  }
+
   void beginSource(String sourcePath) {
+    final absolutePath = File(sourcePath).absolute.path;
+
     _generation += 1;
-    _activeSourcePath = File(sourcePath).absolute.path;
+    _activeSourcePath = absolutePath;
+    _activeSourceIdentity = _readSourceIdentity(absolutePath);
+    _completeInvalidatedRequests();
+    _schedulePump();
   }
 
   void cancelPending() {
-    _generation += 1;
-    _activeSourcePath = null;
+    final generation = _generation;
+    final sourcePath = _activeSourcePath;
+
+    // Storyboard and Bookmarks share this service. During a view replacement,
+    // the incoming view can begin the same source in the same event turn that
+    // the outgoing view disposes. Deferring cancellation prevents the old view
+    // from invalidating the replacement session that was just created.
+    scheduleMicrotask(() {
+      if (generation != _generation || sourcePath != _activeSourcePath) {
+        return;
+      }
+
+      _generation += 1;
+      _activeSourcePath = null;
+      _activeSourceIdentity = null;
+      _completeInvalidatedRequests();
+    });
   }
 
   void restartSource(String sourcePath) {
@@ -59,30 +137,27 @@ class StoryboardThumbnailService {
       return null;
     }
 
-    final source = File(sourcePath);
-    final absolutePath = source.absolute.path;
+    final absolutePath = File(sourcePath).absolute.path;
     final generation = _generation;
 
-    if (_activeSourcePath != absolutePath) {
+    if (!_isCurrent(generation, absolutePath)) {
       return null;
     }
 
-    FileStat stat;
-    try {
-      stat = await source.stat();
-    } on FileSystemException {
+    final identityFuture = _activeSourceIdentity;
+    if (identityFuture == null) {
       return null;
     }
 
-    if (!_isCurrent(generation, absolutePath) ||
-        stat.type != FileSystemEntityType.file) {
+    final identity = await identityFuture;
+    if (identity == null || !_isCurrent(generation, absolutePath)) {
       return null;
     }
 
     final cachePath = _cachePathFor(
       absolutePath,
-      stat.size,
-      stat.modified.microsecondsSinceEpoch,
+      identity.fileSize,
+      identity.modifiedMicros,
       requestedFrame,
     );
     final cached = File(cachePath);
@@ -98,104 +173,278 @@ class StoryboardThumbnailService {
     final inFlightKey = '$generation:$cachePath';
     final existing = _inFlight[inFlightKey];
     if (existing != null) {
-      return existing;
+      return existing.completer.future;
     }
 
-    final future = _permits.run<String?>(() async {
-      if (!_isCurrent(generation, absolutePath)) {
-        return null;
-      }
-      if (await _isUsableFile(cached)) {
-        return cachePath;
-      }
-      if (!_isCurrent(generation, absolutePath)) {
-        return null;
-      }
+    final request = _StoryboardThumbnailRequest(
+      key: inFlightKey,
+      generation: generation,
+      sourcePath: absolutePath,
+      requestedFrame: requestedFrame,
+      cachePath: cachePath,
+    );
 
-      return _generateThumbnail(
-        generation: generation,
-        sourcePath: absolutePath,
-        requestedFrame: requestedFrame,
-        cachePath: cachePath,
-      );
+    _inFlight[inFlightKey] = request;
+    _pending.addLast(request);
+    _schedulePump();
+
+    return request.completer.future;
+  }
+
+  void _schedulePump() {
+    if (_pumpScheduled || _pumpRunning || _pending.isEmpty) {
+      return;
+    }
+
+    _pumpScheduled = true;
+    Timer.run(() {
+      _pumpScheduled = false;
+      if (!_pumpRunning && _pending.isNotEmpty) {
+        unawaited(_pump());
+      }
     });
+  }
 
-    _inFlight[inFlightKey] = future;
+  Future<void> _pump() async {
+    if (_pumpRunning) {
+      return;
+    }
+
+    _pumpRunning = true;
     try {
-      return await future;
+      while (true) {
+        _completeInvalidatedRequests();
+
+        final batch = <_StoryboardThumbnailRequest>[];
+        while (_pending.isNotEmpty && batch.length < _maxBatchSize) {
+          final request = _pending.removeFirst();
+          if (request.completer.isCompleted) {
+            continue;
+          }
+          if (!_isCurrent(request.generation, request.sourcePath)) {
+            _completeRequest(request, null);
+            continue;
+          }
+          batch.add(request);
+        }
+
+        if (batch.isEmpty) {
+          if (_pending.isEmpty) {
+            break;
+          }
+          continue;
+        }
+
+        await _runBatch(batch);
+      }
     } finally {
-      _inFlight.removeWhere(
-        (key, value) => key == inFlightKey && identical(value, future),
-      );
+      _pumpRunning = false;
+      if (_pending.isNotEmpty) {
+        _schedulePump();
+      }
     }
   }
 
-  Future<String?> _generateThumbnail({
-    required int generation,
-    required String sourcePath,
-    required int requestedFrame,
-    required String cachePath,
-  }) async {
+  Future<void> _runBatch(List<_StoryboardThumbnailRequest> requests) async {
+    final work = <_StoryboardThumbnailRequest>[];
+
+    for (final request in requests) {
+      if (request.completer.isCompleted) {
+        continue;
+      }
+      if (!_isCurrent(request.generation, request.sourcePath)) {
+        _completeRequest(request, null);
+        continue;
+      }
+
+      final cached = File(request.cachePath);
+      if (await _isUsableFile(cached)) {
+        _completeRequest(request, request.cachePath);
+      } else {
+        work.add(request);
+      }
+    }
+
+    if (work.isEmpty) {
+      return;
+    }
+
+    final generation = work.first.generation;
+    final sourcePath = work.first.sourcePath;
+    if (!_isCurrent(generation, sourcePath)) {
+      for (final request in work) {
+        _completeRequest(request, null);
+      }
+      return;
+    }
+
     try {
       await _cacheDirectory.create(recursive: true);
     } on FileSystemException {
-      return null;
+      for (final request in work) {
+        _completeRequest(request, null);
+      }
+      return;
     }
 
     if (!_isCurrent(generation, sourcePath)) {
-      return null;
+      for (final request in work) {
+        _completeRequest(request, null);
+      }
+      return;
     }
 
     final nonce = DateTime.now().microsecondsSinceEpoch;
-    final temporaryPath = '$cachePath.$nonce.part.jpg';
-    final temporary = File(temporaryPath);
+    final batchDirectory = Directory(
+      _join(_cacheDirectory.path, '.batch-$generation-$nonce'),
+    );
 
     try {
-      final result = await _generator(
-        sourcePath: sourcePath,
-        outputPath: temporaryPath,
-        width: thumbnailWidth,
-        height: thumbnailHeight,
-        requestedFrame: requestedFrame,
-      );
-
-      if (!result.succeeded || !await _isUsableFile(temporary)) {
-        await _deleteIfPresent(temporary);
-        if (result.error.trim().isNotEmpty) {
-          stderr.writeln(
-            'storyboard: ${result.error.trim()} '
-            '($sourcePath @ frame $requestedFrame)',
-          );
-        }
-        return null;
-      }
-
-      // If navigation or interval changes while the synchronous native decode
-      // is running, discard the completed temporary instead of publishing a
-      // result from an obsolete Storyboard session.
-      if (!_isCurrent(generation, sourcePath)) {
-        await _deleteIfPresent(temporary);
-        return null;
-      }
-
-      final cached = File(cachePath);
-      await _deleteIfPresent(cached);
-      await temporary.rename(cachePath);
-      return cachePath;
+      await batchDirectory.create(recursive: true);
     } on FileSystemException {
-      await _deleteIfPresent(temporary);
-      return null;
-    } catch (error) {
-      await _deleteIfPresent(temporary);
+      for (final request in work) {
+        _completeRequest(request, null);
+      }
+      return;
+    }
+
+    var finished = false;
+    MltThumbnailBatchGenerationResult? result;
+    Object? generationFailure;
+
+    final generationFuture = () async {
+      try {
+        result = await _batchGenerator(
+          sourcePath: sourcePath,
+          outputDirectory: batchDirectory.path,
+          width: thumbnailWidth,
+          height: thumbnailHeight,
+          requestedFrames: work
+              .map((request) => request.requestedFrame)
+              .toList(growable: false),
+        );
+      } catch (error) {
+        generationFailure = error;
+      } finally {
+        finished = true;
+      }
+    }();
+
+    while (!finished) {
+      await _publishReadyBatchFiles(work, batchDirectory);
+      if (!finished) {
+        await Future<void>.delayed(_batchPollInterval);
+      }
+    }
+
+    await generationFuture;
+    await _publishReadyBatchFiles(work, batchDirectory);
+
+    final batchResult = result;
+    if (generationFailure != null) {
       stderr.writeln(
-        'storyboard: $error ($sourcePath @ frame $requestedFrame)',
+        'storyboard: $generationFailure ($sourcePath batch)',
       );
-      return null;
+    } else if (batchResult != null && batchResult.error.trim().isNotEmpty) {
+      stderr.writeln(
+        'storyboard: ${batchResult.error.trim()} ($sourcePath batch)',
+      );
+    }
+
+    for (final request in work) {
+      if (!request.completer.isCompleted) {
+        _completeRequest(request, null);
+      }
+    }
+
+    await _deleteDirectoryIfPresent(batchDirectory);
+  }
+
+  Future<void> _publishReadyBatchFiles(
+    List<_StoryboardThumbnailRequest> requests,
+    Directory batchDirectory,
+  ) async {
+    for (var index = 0; index < requests.length; index++) {
+      final request = requests[index];
+      if (request.completer.isCompleted) {
+        continue;
+      }
+
+      if (!_isCurrent(request.generation, request.sourcePath)) {
+        _completeRequest(request, null);
+        continue;
+      }
+
+      final cached = File(request.cachePath);
+      if (await _isUsableFile(cached)) {
+        _completeRequest(request, request.cachePath);
+        continue;
+      }
+
+      final ready = File(_join(batchDirectory.path, '$index.jpg'));
+      if (!await _isUsableFile(ready)) {
+        continue;
+      }
+
+      if (!_isCurrent(request.generation, request.sourcePath)) {
+        _completeRequest(request, null);
+        continue;
+      }
+
+      try {
+        await _deleteIfPresent(cached);
+        await ready.rename(request.cachePath);
+        _completeRequest(request, request.cachePath);
+      } on FileSystemException {
+        _completeRequest(request, null);
+      }
+    }
+  }
+
+  void _completeInvalidatedRequests() {
+    final requests = _inFlight.values.toList(growable: false);
+    for (final request in requests) {
+      if (!request.completer.isCompleted &&
+          !_isCurrent(request.generation, request.sourcePath)) {
+        _completeRequest(request, null);
+      }
+    }
+  }
+
+  void _completeRequest(
+    _StoryboardThumbnailRequest request,
+    String? value,
+  ) {
+    if (request.completer.isCompleted) {
+      return;
+    }
+
+    request.completer.complete(value);
+    if (identical(_inFlight[request.key], request)) {
+      _inFlight.remove(request.key);
     }
   }
 
   bool _isCurrent(int generation, String sourcePath) =>
       generation == _generation && _activeSourcePath == sourcePath;
+
+  Future<_StoryboardSourceIdentity?> _readSourceIdentity(
+    String absolutePath,
+  ) async {
+    try {
+      final stat = await File(absolutePath).stat();
+      if (stat.type != FileSystemEntityType.file) {
+        return null;
+      }
+
+      return _StoryboardSourceIdentity(
+        fileSize: stat.size,
+        modifiedMicros: stat.modified.microsecondsSinceEpoch,
+      );
+    } on FileSystemException {
+      return null;
+    }
+  }
 
   String _cachePathFor(
     String absolutePath,
@@ -242,6 +491,16 @@ class StoryboardThumbnailService {
     }
   }
 
+  static Future<void> _deleteDirectoryIfPresent(Directory directory) async {
+    try {
+      if (await directory.exists()) {
+        await directory.delete(recursive: true);
+      }
+    } on FileSystemException {
+      // Storyboard temporary batch cleanup is best-effort.
+    }
+  }
+
   static Directory _defaultCacheDirectory() {
     final xdg = Platform.environment['XDG_CACHE_HOME'];
     if (xdg != null && xdg.isNotEmpty) {
@@ -266,43 +525,29 @@ class StoryboardThumbnailService {
   }
 }
 
-class _StoryboardPermitPool {
-  _StoryboardPermitPool(this._capacity)
-    : assert(_capacity > 0),
-      _available = _capacity;
+class _StoryboardThumbnailRequest {
+  _StoryboardThumbnailRequest({
+    required this.key,
+    required this.generation,
+    required this.sourcePath,
+    required this.requestedFrame,
+    required this.cachePath,
+  });
 
-  final int _capacity;
-  int _available;
-  final Queue<Completer<void>> _waiters = Queue<Completer<void>>();
+  final String key;
+  final int generation;
+  final String sourcePath;
+  final int requestedFrame;
+  final String cachePath;
+  final Completer<String?> completer = Completer<String?>();
+}
 
-  Future<T> run<T>(Future<T> Function() action) async {
-    await _acquire();
-    try {
-      return await action();
-    } finally {
-      _release();
-    }
-  }
+class _StoryboardSourceIdentity {
+  const _StoryboardSourceIdentity({
+    required this.fileSize,
+    required this.modifiedMicros,
+  });
 
-  Future<void> _acquire() {
-    if (_available > 0) {
-      _available -= 1;
-      return Future<void>.value();
-    }
-
-    final completer = Completer<void>();
-    _waiters.addLast(completer);
-    return completer.future;
-  }
-
-  void _release() {
-    if (_waiters.isNotEmpty) {
-      _waiters.removeFirst().complete();
-      return;
-    }
-
-    if (_available < _capacity) {
-      _available += 1;
-    }
-  }
+  final int fileSize;
+  final int modifiedMicros;
 }

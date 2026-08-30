@@ -286,6 +286,10 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
     final activeWorkspaceProject = _activeWorkspaceProject;
     final workspaceIndex =
         _workspaceSection == _WorkspaceSection.explorer ? 0 : 1;
+    final playerMetadataProjectId = activeWorkspaceProject != null &&
+            activeWorkspaceProject.isRedleaf
+        ? activeWorkspaceProject.key
+        : _activeProjectId;
 
     return IndexedStack(
       index: _showPlayer ? 1 : 0,
@@ -352,7 +356,7 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
           startupError: widget.startupError,
           playerSettings: widget.playerSettings,
           projectMediaMetadataService: _projectMediaMetadataService,
-          activeProjectId: _activeProjectId,
+          activeProjectId: playerMetadataProjectId,
           initialPath: _playerPath,
           redleafHandoff: _redleafPlayerHandoff,
           openRequestSerial: _playerOpenRequest,

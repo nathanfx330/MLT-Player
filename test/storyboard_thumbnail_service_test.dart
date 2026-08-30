@@ -23,108 +23,148 @@ void main() {
     }
   });
 
-  test('exact storyboard frame is generated once then served from cache', () async {
+  Future<MltThumbnailBatchGenerationResult> writeBatch({
+    required String sourcePath,
+    required String outputDirectory,
+    required int width,
+    required int height,
+    required List<int> requestedFrames,
+  }) async {
+    for (var index = 0; index < requestedFrames.length; index++) {
+      await File('$outputDirectory/$index.jpg').writeAsBytes(
+        <int>[requestedFrames[index] & 0xff, index + 1],
+      );
+    }
+
+    return MltThumbnailBatchGenerationResult(
+      succeeded: true,
+      generatedCount: requestedFrames.length,
+      error: '',
+    );
+  }
+
+  test('concurrent exact frames share one native-style batch then cache', () async {
     var calls = 0;
-    var requested = -1;
+    final batches = <List<int>>[];
     final service = StoryboardThumbnailService(
       cacheDirectory: Directory('${temp.path}/cache'),
-      generator: ({
+      batchGenerator: ({
         required sourcePath,
-        required outputPath,
+        required outputDirectory,
         required width,
         required height,
-        required requestedFrame,
+        required requestedFrames,
       }) async {
         calls += 1;
-        requested = requestedFrame;
-        await File(outputPath).writeAsBytes(<int>[1, 2, 3, 4]);
-        return MltThumbnailGenerationResult(
-          succeeded: true,
-          selectedFrame: requestedFrame,
-          error: '',
+        batches.add(List<int>.from(requestedFrames));
+        return writeBatch(
+          sourcePath: sourcePath,
+          outputDirectory: outputDirectory,
+          width: width,
+          height: height,
+          requestedFrames: requestedFrames,
         );
       },
     );
 
     service.beginSource(source.path);
 
-    final first = await service.thumbnailAtFrame(
-      sourcePath: source.path,
-      requestedFrame: 250,
-    );
-    final second = await service.thumbnailAtFrame(
-      sourcePath: source.path,
-      requestedFrame: 250,
-    );
-
-    expect(first, isNotNull);
-    expect(second, first);
-    expect(calls, 1);
-    expect(requested, 250);
-    expect(await File(first!).length(), greaterThan(0));
-  });
-
-  test('different source frames receive different persistent cache entries', () async {
-    var calls = 0;
-    final service = StoryboardThumbnailService(
-      cacheDirectory: Directory('${temp.path}/cache'),
-      generator: ({
-        required sourcePath,
-        required outputPath,
-        required width,
-        required height,
-        required requestedFrame,
-      }) async {
-        calls += 1;
-        await File(outputPath).writeAsBytes(<int>[requestedFrame & 0xff, 7]);
-        return MltThumbnailGenerationResult(
-          succeeded: true,
-          selectedFrame: requestedFrame,
-          error: '',
-        );
-      },
-    );
-
-    service.beginSource(source.path);
-
-    final frame100 = await service.thumbnailAtFrame(
+    final frame100Future = service.thumbnailAtFrame(
       sourcePath: source.path,
       requestedFrame: 100,
     );
-    final frame200 = await service.thumbnailAtFrame(
+    final frame200Future = service.thumbnailAtFrame(
       sourcePath: source.path,
       requestedFrame: 200,
     );
 
-    expect(frame100, isNotNull);
-    expect(frame200, isNotNull);
-    expect(frame100, isNot(frame200));
-    expect(calls, 2);
+    final results = await Future.wait(<Future<String?>>[
+      frame100Future,
+      frame200Future,
+    ]);
+
+    expect(results[0], isNotNull);
+    expect(results[1], isNotNull);
+    expect(results[0], isNot(results[1]));
+    expect(calls, 1);
+    expect(batches, <List<int>>[
+      <int>[100, 200],
+    ]);
+    expect(await File(results[0]!).length(), greaterThan(0));
+    expect(await File(results[1]!).length(), greaterThan(0));
+
+    final cached = await service.thumbnailAtFrame(
+      sourcePath: source.path,
+      requestedFrame: 100,
+    );
+    expect(cached, results[0]);
+    expect(calls, 1);
   });
 
-  test('restarting a source cancels queued work from the old storyboard session', () async {
-    final started = <int>[];
+  test('duplicate concurrent frame requests are deduplicated', () async {
+    var calls = 0;
+    final service = StoryboardThumbnailService(
+      cacheDirectory: Directory('${temp.path}/cache'),
+      batchGenerator: ({
+        required sourcePath,
+        required outputDirectory,
+        required width,
+        required height,
+        required requestedFrames,
+      }) async {
+        calls += 1;
+        return writeBatch(
+          sourcePath: sourcePath,
+          outputDirectory: outputDirectory,
+          width: width,
+          height: height,
+          requestedFrames: requestedFrames,
+        );
+      },
+    );
+
+    service.beginSource(source.path);
+
+    final first = service.thumbnailAtFrame(
+      sourcePath: source.path,
+      requestedFrame: 250,
+    );
+    final second = service.thumbnailAtFrame(
+      sourcePath: source.path,
+      requestedFrame: 250,
+    );
+
+    final results = await Future.wait(<Future<String?>>[first, second]);
+    expect(results[0], isNotNull);
+    expect(results[1], results[0]);
+    expect(calls, 1);
+  });
+
+  test('restarting a source invalidates an active batch safely', () async {
+    final started = <List<int>>[];
     final firstStarted = Completer<void>();
     final releaseFirst = Completer<void>();
     final service = StoryboardThumbnailService(
       cacheDirectory: Directory('${temp.path}/cache'),
-      generator: ({
+      batchGenerator: ({
         required sourcePath,
-        required outputPath,
+        required outputDirectory,
         required width,
         required height,
-        required requestedFrame,
+        required requestedFrames,
       }) async {
-        started.add(requestedFrame);
-        if (requestedFrame == 10) {
+        started.add(List<int>.from(requestedFrames));
+        if (started.length == 1) {
           firstStarted.complete();
           await releaseFirst.future;
         }
-        await File(outputPath).writeAsBytes(<int>[1]);
-        return MltThumbnailGenerationResult(
-          succeeded: true,
-          selectedFrame: requestedFrame,
-          error: '',
+
+        return writeBatch(
+          sourcePath: sourcePath,
+          outputDirectory: outputDirectory,
+          width: width,
+          height: height,
+          requestedFrames: requestedFrames,
         );
       },
     );
@@ -134,24 +174,62 @@ void main() {
       sourcePath: source.path,
       requestedFrame: 10,
     );
-    final queued = service.thumbnailAtFrame(
+    final second = service.thumbnailAtFrame(
       sourcePath: source.path,
       requestedFrame: 20,
     );
 
     await firstStarted.future;
     service.restartSource(source.path);
-    releaseFirst.complete();
 
     expect(await first, isNull);
-    expect(await queued, isNull);
-    expect(started, <int>[10]);
+    expect(await second, isNull);
+
+    releaseFirst.complete();
 
     final current = await service.thumbnailAtFrame(
       sourcePath: source.path,
       requestedFrame: 30,
     );
     expect(current, isNotNull);
-    expect(started, <int>[10, 30]);
+    expect(started, <List<int>>[
+      <int>[10, 20],
+      <int>[30],
+    ]);
+  });
+
+  test('outgoing view cancellation cannot kill a replacement source session', () async {
+    var calls = 0;
+    final service = StoryboardThumbnailService(
+      cacheDirectory: Directory('${temp.path}/cache'),
+      batchGenerator: ({
+        required sourcePath,
+        required outputDirectory,
+        required width,
+        required height,
+        required requestedFrames,
+      }) async {
+        calls += 1;
+        return writeBatch(
+          sourcePath: sourcePath,
+          outputDirectory: outputDirectory,
+          width: width,
+          height: height,
+          requestedFrames: requestedFrames,
+        );
+      },
+    );
+
+    service.beginSource(source.path);
+    service.cancelPending();
+    service.beginSource(source.path);
+
+    final current = await service.thumbnailAtFrame(
+      sourcePath: source.path,
+      requestedFrame: 40,
+    );
+
+    expect(current, isNotNull);
+    expect(calls, 1);
   });
 }
