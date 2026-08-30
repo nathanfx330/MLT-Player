@@ -7,6 +7,39 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:mlt_player/services/mlt_thumbnail_bridge.dart';
 import 'package:mlt_player/services/storyboard_thumbnail_service.dart';
 
+Future<void> _deleteTestDirectory(Directory directory) async {
+  // A thumbnail request is completed as soon as its JPEG is published.
+  // The service can still be finishing best-effort cleanup of its temporary
+  // .batch directory for a few microtasks afterward. Recursive deletion of
+  // the parent test directory can therefore observe a child disappearing
+  // while dart:io is traversing it and report ENOENT even though cleanup is
+  // succeeding. Retry only that race; surface every other filesystem error.
+  for (var attempt = 0; attempt < 5; attempt++) {
+    try {
+      if (!await directory.exists()) {
+        return;
+      }
+
+      await directory.delete(recursive: true);
+      return;
+    } on FileSystemException catch (error) {
+      if (error.osError?.errorCode != 2) {
+        rethrow;
+      }
+
+      if (!await directory.exists()) {
+        return;
+      }
+
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+  }
+
+  if (await directory.exists()) {
+    await directory.delete(recursive: true);
+  }
+}
+
 void main() {
   late Directory temp;
   late File source;
@@ -18,9 +51,7 @@ void main() {
   });
 
   tearDown(() async {
-    if (await temp.exists()) {
-      await temp.delete(recursive: true);
-    }
+    await _deleteTestDirectory(temp);
   });
 
   Future<MltThumbnailBatchGenerationResult> writeBatch({
