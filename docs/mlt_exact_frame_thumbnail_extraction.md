@@ -1,4 +1,4 @@
-<!-- docs/MLT_EXACT_FRAME_THUMBNAIL_EXTRACTION.md -->
+<!-- docs/mlt_exact_frame_thumbnail_extraction.md -->
 
 # Efficient Exact Frame Thumbnail Extraction with MLT
 

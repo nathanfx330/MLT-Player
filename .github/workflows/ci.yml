@@ -80,3 +80,7 @@ jobs:
       - name: Run native smoke and preview/export parity
         shell: bash
         run: bash tools/smoke.sh
+
+      - name: Run native thumbnail smoke
+        shell: bash
+        run: bash tools/thumbnail_smoke.sh
