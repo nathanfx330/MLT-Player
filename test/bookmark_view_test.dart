@@ -15,7 +15,9 @@ void main() {
     final tempDirectory = await Directory.systemTemp.createTemp(
       'mlt-player-bookmark-view-test-',
     );
-    addTearDown(() => tempDirectory.delete(recursive: true));
+    addTearDown(() async {
+      await tempDirectory.delete(recursive: true);
+    });
 
     final sourceFile = File('${tempDirectory.path}/source.mov');
     await sourceFile.writeAsBytes(const <int>[0]);
@@ -78,7 +80,9 @@ void main() {
     final tempDirectory = await Directory.systemTemp.createTemp(
       'mlt-player-bookmark-view-disabled-test-',
     );
-    addTearDown(() => tempDirectory.delete(recursive: true));
+    addTearDown(() async {
+      await tempDirectory.delete(recursive: true);
+    });
 
     final sourceFile = File('${tempDirectory.path}/source.mov');
     await sourceFile.writeAsBytes(const <int>[0]);
