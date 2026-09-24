@@ -1861,6 +1861,157 @@ class _PlayerPageState extends State<PlayerPage>
     );
   }
 
+  Future<bool> _exportBookmarkFrameToPath(
+    String outputPath,
+    int sourceFrame,
+  ) async {
+    final completer = Completer<bool>();
+
+    late VoidCallback listener;
+    listener = () {
+      if (_engine.exporting || completer.isCompleted) {
+        return;
+      }
+
+      _engine.removeListener(listener);
+      completer.complete(_engine.exportSucceeded);
+    };
+
+    _engine.addListener(listener);
+
+    final started = _engine.startFrameExport(
+      outputPath,
+      sourceFrame: sourceFrame,
+    );
+
+    if (!started) {
+      _engine.removeListener(listener);
+      return false;
+    }
+
+    if (!_engine.exporting) {
+      listener();
+    }
+
+    return completer.future;
+  }
+
+  Future<void> _exportAllBookmarks() async {
+    final media = _engine.media;
+    if (media == null ||
+        media.isStill ||
+        !media.hasVideo ||
+        !_engine.exportsAvailable ||
+        _engine.exporting) {
+      return;
+    }
+
+    final frames = _bookmarkFramesFor(media)
+        .where((sourceFrame) => sourceFrame >= 0 && sourceFrame < media.frames)
+        .toList()
+      ..sort();
+
+    if (frames.isEmpty) {
+      return;
+    }
+
+    _showOverlay();
+
+    final parentDirectory = await getDirectoryPath(
+      confirmButtonText: 'Export Bookmarks',
+    );
+
+    if (parentDirectory == null) {
+      return;
+    }
+
+    final stem = _mediaStem(media.name);
+    late final String outputDirectory;
+
+    try {
+      outputDirectory = await _createUniqueSequenceDirectory(
+        parentDirectory,
+        '${stem}_bookmarks',
+      );
+    } on FileSystemException catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            error.message.isEmpty
+                ? 'Could not create the bookmark export directory.'
+                : error.message,
+          ),
+        ),
+      );
+      return;
+    }
+
+    var exportedCount = 0;
+
+    for (final sourceFrame in frames) {
+      if (!mounted || _engine.media?.path != media.path) {
+        return;
+      }
+
+      final clipFrameNumber =
+          _engine.clipFrameForSourceFrame(sourceFrame) + 1;
+      final frameLabel = clipFrameNumber.toString().padLeft(6, '0');
+      final outputPath = _joinPath(
+        outputDirectory,
+        '${stem}_bookmark_$frameLabel.png',
+      );
+
+      final succeeded = await _exportBookmarkFrameToPath(
+        outputPath,
+        sourceFrame,
+      );
+
+      if (!succeeded) {
+        if (exportedCount == 0) {
+          try {
+            await Directory(outputDirectory).delete();
+          } on FileSystemException {
+            // Leave a non-empty or otherwise protected directory untouched.
+          }
+        }
+
+        if (!mounted) {
+          return;
+        }
+
+        final detail = _engine.exportError?.trim();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              detail == null || detail.isEmpty
+                  ? 'Bookmark export stopped after $exportedCount of ${frames.length}.'
+                  : 'Bookmark export stopped after $exportedCount of ${frames.length}: $detail',
+            ),
+          ),
+        );
+        return;
+      }
+
+      exportedCount += 1;
+    }
+
+    if (!mounted) {
+      return;
+    }
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'Exported $exportedCount ${exportedCount == 1 ? 'bookmark' : 'bookmarks'} to $outputDirectory',
+        ),
+      ),
+    );
+  }
+
   Future<void> _exportImageSequence() async {
     final media = _engine.media;
     if (media == null ||
@@ -2499,6 +2650,7 @@ class _PlayerPageState extends State<PlayerPage>
         onRemoveFrame: _removeBookmarkFrame,
         onExportFrame: (sourceFrame) =>
             unawaited(_exportBookmarkFrame(sourceFrame)),
+        onExportAll: () => unawaited(_exportAllBookmarks()),
         exportEnabled: !_engine.exporting && _engine.exportsAvailable,
       );
     }
