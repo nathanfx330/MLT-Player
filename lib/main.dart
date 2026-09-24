@@ -1664,7 +1664,7 @@ class _PlayerPageState extends State<PlayerPage>
         : '$directory$separator$child';
   }
 
-  Future<String> _createUniqueSequenceDirectory(
+  Future<String> _createUniqueExportDirectory(
     String parentDirectory,
     String preferredName,
   ) async {
@@ -1692,7 +1692,7 @@ class _PlayerPageState extends State<PlayerPage>
     }
 
     throw FileSystemException(
-      'Could not create a unique image-sequence directory.',
+      'Could not create a unique export directory.',
       parentDirectory,
     );
   }
@@ -1786,9 +1786,8 @@ class _PlayerPageState extends State<PlayerPage>
     _showOverlay();
 
     final stem = _mediaStem(media.name);
-    final clipFrameNumber =
-        _engine.clipFrameForSourceFrame(sourceFrame) + 1;
-    final frameLabel = clipFrameNumber.toString().padLeft(6, '0');
+    final sourceFrameNumber = sourceFrame + 1;
+    final frameLabel = sourceFrameNumber.toString().padLeft(6, '0');
 
     final location = await getSaveLocation(
       confirmButtonText: 'Export Frame',
@@ -1831,9 +1830,8 @@ class _PlayerPageState extends State<PlayerPage>
     _showOverlay();
 
     final stem = _mediaStem(media.name);
-    final clipFrameNumber =
-        _engine.clipFrameForSourceFrame(sourceFrame) + 1;
-    final frameLabel = clipFrameNumber.toString().padLeft(6, '0');
+    final sourceFrameNumber = sourceFrame + 1;
+    final frameLabel = sourceFrameNumber.toString().padLeft(6, '0');
 
     final location = await getSaveLocation(
       confirmButtonText: 'Export Bookmark',
@@ -1929,7 +1927,7 @@ class _PlayerPageState extends State<PlayerPage>
     late final String outputDirectory;
 
     try {
-      outputDirectory = await _createUniqueSequenceDirectory(
+      outputDirectory = await _createUniqueExportDirectory(
         parentDirectory,
         '${stem}_bookmarks',
       );
@@ -2040,7 +2038,7 @@ class _PlayerPageState extends State<PlayerPage>
     late final String outputDirectory;
 
     try {
-      outputDirectory = await _createUniqueSequenceDirectory(
+      outputDirectory = await _createUniqueExportDirectory(
         parentDirectory,
         '${stem}_$suffix',
       );
