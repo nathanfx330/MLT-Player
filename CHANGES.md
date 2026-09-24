@@ -1,5 +1,24 @@
 # Changes
 
+## 2026-09-23 — Bookmark bulk export
+
+- Added `EXPORT ALL` to the Bookmarks toolbar for the current movie.
+- Bulk export asks for one parent folder, creates a unique `<movie>_bookmarks`
+  directory, and exports each bookmarked frame as a composited PNG.
+- Bookmark PNG names use exact source-frame numbers so bookmarks remain
+  unambiguous even after trim changes.
+- Bulk export queues frame exports sequentially through the existing native
+  export path instead of starting overlapping export jobs.
+- Frame export now accepts any valid source frame rather than limiting bookmark
+  export to the active trim.
+- Added focused widget coverage for the bulk-export action and its disabled
+  state while export is unavailable.
+- Manual verification: multi-bookmark bulk export completed successfully.
+- Regression verification: 131 Flutter tests passed and GitHub CI passed the
+  analyze, Flutter, native smoke/parity, and thumbnail-smoke gates.
+
+---
+
 Every item from the review, plus the overlay work. Files touched:
 `native/mlt_bridge.c`, `native/mlt_bridge.h`, `native/mlt_smoke.c`,
 `lib/main.dart`, `linux/runner/my_application.cc`, `linux/CMakeLists.txt`.
