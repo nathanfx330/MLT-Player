@@ -364,6 +364,7 @@ identity beyond the current path-based model is intentionally not claimed yet.
 - Non-destructive Trim with full Undo and Redo
 - Storyboard view at 5, 10, 30, or 60 second intervals
 - Exact-frame Bookmarks with generated frame previews
+- Single-bookmark PNG export plus one-click bulk export of all bookmarks for the current movie
 - Searchable SRT sidecar subtitles with UTF-8, Windows-1252, and Latin-1
   handling
 - Floating transcript sidebar with search-to-seek behavior
@@ -390,6 +391,7 @@ slot is a feature decision rather than a hidden topology change.
 - H.264 Delivery preset
 - ProRes 422 HQ Master preset
 - Current-frame PNG
+- Exact-frame bookmark PNG export, including bulk export to a unique per-movie folder
 - PNG sequence
 - WAV
 - Explicit output frame rate with layer positions correctly conformed
