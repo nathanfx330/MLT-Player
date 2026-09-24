@@ -18,6 +18,7 @@ class BookmarkView extends StatefulWidget {
     required this.onOpenFrame,
     required this.onRemoveFrame,
     required this.onExportFrame,
+    required this.onExportAll,
     required this.exportEnabled,
   });
 
@@ -30,6 +31,7 @@ class BookmarkView extends StatefulWidget {
   final ValueChanged<int> onOpenFrame;
   final ValueChanged<int> onRemoveFrame;
   final ValueChanged<int> onExportFrame;
+  final VoidCallback onExportAll;
   final bool exportEnabled;
 
   @override
@@ -71,6 +73,8 @@ class _BookmarkViewState extends State<BookmarkView> {
             _BookmarkToolbar(
               itemCount: frames.length,
               onAddCurrent: widget.onAddCurrent,
+              onExportAll: widget.onExportAll,
+              exportEnabled: widget.exportEnabled,
             ),
             const SizedBox(height: 12),
             Expanded(
@@ -120,10 +124,14 @@ class _BookmarkToolbar extends StatelessWidget {
   const _BookmarkToolbar({
     required this.itemCount,
     required this.onAddCurrent,
+    required this.onExportAll,
+    required this.exportEnabled,
   });
 
   final int itemCount;
   final VoidCallback onAddCurrent;
+  final VoidCallback onExportAll;
+  final bool exportEnabled;
 
   @override
   Widget build(BuildContext context) {
@@ -146,19 +154,37 @@ class _BookmarkToolbar extends StatelessWidget {
           style: const TextStyle(fontSize: 11, color: Colors.white38),
         ),
         const Spacer(),
+        if (itemCount > 0) ...[
+          ExcludeFocus(
+            child: TextButton.icon(
+              onPressed: exportEnabled ? onExportAll : null,
+              icon: const Icon(Icons.file_download_outlined, size: 17),
+              label: const Text('EXPORT ALL'),
+              style: TextButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                textStyle: const TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.5,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 4),
+        ],
         ExcludeFocus(
           child: TextButton.icon(
             onPressed: onAddCurrent,
-          icon: const Icon(Icons.bookmark_add_outlined, size: 17),
-          label: const Text('ADD CURRENT'),
-          style: TextButton.styleFrom(
-            foregroundColor: Theme.of(context).colorScheme.primary,
-            visualDensity: VisualDensity.compact,
-            textStyle: const TextStyle(
-              fontSize: 10,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 0.5,
-            ),
+            icon: const Icon(Icons.bookmark_add_outlined, size: 17),
+            label: const Text('ADD CURRENT'),
+            style: TextButton.styleFrom(
+              foregroundColor: Theme.of(context).colorScheme.primary,
+              visualDensity: VisualDensity.compact,
+              textStyle: const TextStyle(
+                fontSize: 10,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.5,
+              ),
             ),
           ),
         ),
