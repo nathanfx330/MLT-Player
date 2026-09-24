@@ -1,51 +1,38 @@
 // test/bookmark_view_test.dart
 
-import 'dart:io';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:mlt_player/services/mlt_thumbnail_bridge.dart';
 import 'package:mlt_player/services/storyboard_thumbnail_service.dart';
 import 'package:mlt_player/ui/widgets/bookmark_view.dart';
+
+class _NoopThumbnailService extends StoryboardThumbnailService {
+  @override
+  void beginSource(String sourcePath) {}
+
+  @override
+  void cancelPending() {}
+
+  @override
+  Future<String?> thumbnailAtFrame({
+    required String sourcePath,
+    required int requestedFrame,
+  }) async {
+    return null;
+  }
+}
 
 void main() {
   testWidgets('bookmarks toolbar exposes enabled bulk export action', (
     tester,
   ) async {
-    final tempDirectory = await Directory.systemTemp.createTemp(
-      'mlt-player-bookmark-view-test-',
-    );
-    addTearDown(() async {
-      await tempDirectory.delete(recursive: true);
-    });
-
-    final sourceFile = File('${tempDirectory.path}/source.mov');
-    await sourceFile.writeAsBytes(const <int>[0]);
-
-    final thumbnailService = StoryboardThumbnailService(
-      cacheDirectory: Directory('${tempDirectory.path}/cache'),
-      generator:
-          ({
-            required sourcePath,
-            required outputPath,
-            required width,
-            required height,
-            required requestedFrame,
-          }) async =>
-              const MltThumbnailGenerationResult(
-                succeeded: false,
-                selectedFrame: -1,
-                error: 'test thumbnail intentionally unavailable',
-              ),
-    );
-
+    final thumbnailService = _NoopThumbnailService();
     var exportAllCalls = 0;
 
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
           body: BookmarkView(
-            sourcePath: sourceFile.path,
+            sourcePath: '/tmp/source.mov',
             sourceFrames: const <int>[12, 48],
             currentSourceFrame: 12,
             thumbnailService: thumbnailService,
@@ -68,47 +55,18 @@ void main() {
 
     await tester.tap(find.text('EXPORT ALL'));
     expect(exportAllCalls, 1);
-
-    await tester.pumpWidget(const SizedBox.shrink());
-    thumbnailService.cancelPending();
-    await tester.pump();
   });
 
   testWidgets('bulk export action disables with export controls', (
     tester,
   ) async {
-    final tempDirectory = await Directory.systemTemp.createTemp(
-      'mlt-player-bookmark-view-disabled-test-',
-    );
-    addTearDown(() async {
-      await tempDirectory.delete(recursive: true);
-    });
-
-    final sourceFile = File('${tempDirectory.path}/source.mov');
-    await sourceFile.writeAsBytes(const <int>[0]);
-
-    final thumbnailService = StoryboardThumbnailService(
-      cacheDirectory: Directory('${tempDirectory.path}/cache'),
-      generator:
-          ({
-            required sourcePath,
-            required outputPath,
-            required width,
-            required height,
-            required requestedFrame,
-          }) async =>
-              const MltThumbnailGenerationResult(
-                succeeded: false,
-                selectedFrame: -1,
-                error: 'test thumbnail intentionally unavailable',
-              ),
-    );
+    final thumbnailService = _NoopThumbnailService();
 
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
           body: BookmarkView(
-            sourcePath: sourceFile.path,
+            sourcePath: '/tmp/source.mov',
             sourceFrames: const <int>[12],
             currentSourceFrame: 12,
             thumbnailService: thumbnailService,
@@ -130,9 +88,5 @@ void main() {
       find.widgetWithText(TextButton, 'EXPORT ALL'),
     );
     expect(exportAllButton.onPressed, isNull);
-
-    await tester.pumpWidget(const SizedBox.shrink());
-    thumbnailService.cancelPending();
-    await tester.pump();
   });
 }
