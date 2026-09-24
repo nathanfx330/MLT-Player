@@ -2027,8 +2027,8 @@ class PlayerEngine extends ChangeNotifier {
         media.isStill ||
         !media.hasVideo ||
         media.frames <= 0 ||
-        sourceFrame < _trimInFrame ||
-        sourceFrame > _trimOutFrame ||
+        sourceFrame < 0 ||
+        sourceFrame >= media.frames ||
         _exporting) {
       return false;
     }
