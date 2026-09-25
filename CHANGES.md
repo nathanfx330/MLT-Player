@@ -1,5 +1,21 @@
 # Changes
 
+## 2026-09-25 — Catalog dialog controller lifetime
+
+- Fixed a Flutter red-screen failure when saving New Catalog / Rename Catalog
+  dialogs on Rocky Linux.
+- The prompt dialog now owns its `TextEditingController` for the full route
+  lifetime and disposes it only when Flutter removes the dialog from the tree.
+- Catalog creation and persistence behavior is unchanged.
+- Added focused widget coverage for the first route-dismissal frame and the
+  existing select-all rename behavior.
+- Rocky verification: focused tests passed, `flutter analyze` reported no
+  issues, and the previously failing manual New Catalog flow completed without
+  a red screen or controller-lifetime exception.
+- GitHub CI passed the full branch gate.
+
+---
+
 ## 2026-09-23 — Bookmark bulk export
 
 - Added `EXPORT ALL` to the Bookmarks toolbar for the current movie.
