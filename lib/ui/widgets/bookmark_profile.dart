@@ -415,10 +415,14 @@ class _BookmarkTranscriptPanel extends StatelessWidget {
                 size: 17,
               ),
               const SizedBox(width: 8),
-              Text(
-                active
-                    ? 'This is the highlight line'
-                    : 'Set as highlight line',
+              Expanded(
+                child: Text(
+                  active
+                      ? 'This is the highlight line'
+                      : 'Set as highlight line',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
               ),
             ],
           ),
