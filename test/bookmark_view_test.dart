@@ -160,6 +160,12 @@ void main() {
     expect(find.text('Before the bookmark'), findsOneWidget);
     expect(find.text('Words at the bookmark'), findsOneWidget);
     expect(find.text('After the bookmark'), findsOneWidget);
+    expect(
+      find.byKey(
+        const ValueKey<String>('bookmark-profile-anchor-cue'),
+      ),
+      findsOneWidget,
+    );
     expect(openedFrame, isNull);
 
     await tester.tap(find.text('After the bookmark'));
