@@ -18,6 +18,7 @@ import '../services/explorer_navigation_service.dart';
 import '../services/explorer_service.dart';
 import '../services/explorer_sort_filter_service.dart';
 import '../services/explorer_view_preferences_service.dart';
+import '../services/host_channel.dart';
 import '../services/project_catalog_service.dart';
 import '../services/project_media_metadata_service.dart';
 import '../services/player_settings_service.dart';
@@ -149,6 +150,7 @@ enum _MediaMenuAction {
   assignCatalogs,
   createCatalog,
   colorLabel,
+  revealInFileExplorer,
   removeFromCurrent,
 }
 
@@ -1893,6 +1895,23 @@ class _ExplorerPageState extends State<ExplorerPage> {
     await _reloadCurrentCatalog();
   }
 
+  Future<void> _revealInFileExplorer(ExplorerItem item) async {
+    if (item.isDirectory) {
+      return;
+    }
+
+    final revealed = await HostChannel.revealPath(item.path);
+    if (!mounted || revealed) {
+      return;
+    }
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Could not reveal this file in the file explorer.'),
+      ),
+    );
+  }
+
   Future<void> _removeMediaFromCurrentCatalog(ExplorerItem item) async {
     final catalog = _selectedCatalog;
     if (catalog == null || item.isDirectory) {
@@ -1945,6 +1964,11 @@ class _ExplorerPageState extends State<ExplorerPage> {
           value: _MediaMenuAction.colorLabel,
           child: Text('Color Label…'),
         ),
+        const PopupMenuDivider(),
+        const PopupMenuItem(
+          value: _MediaMenuAction.revealInFileExplorer,
+          child: Text('Reveal in File Explorer'),
+        ),
         if (canRemoveFromCurrent) ...[
           const PopupMenuDivider(),
           PopupMenuItem(
@@ -1971,6 +1995,9 @@ class _ExplorerPageState extends State<ExplorerPage> {
         break;
       case _MediaMenuAction.colorLabel:
         await _chooseAssetColor(item);
+        break;
+      case _MediaMenuAction.revealInFileExplorer:
+        await _revealInFileExplorer(item);
         break;
       case _MediaMenuAction.removeFromCurrent:
         await _removeMediaFromCurrentCatalog(item);
