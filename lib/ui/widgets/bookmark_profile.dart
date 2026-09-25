@@ -316,8 +316,19 @@ class _BookmarkTranscriptPanel extends StatelessWidget {
           color: active ? accentColor.withAlpha(0x24) : Colors.transparent,
           child: InkWell(
             onTap: () => onOpenPosition(cue.startMs),
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(12, 10, 14, 10),
+            child: Container(
+              key: active
+                  ? const ValueKey<String>('bookmark-profile-anchor-cue')
+                  : null,
+              decoration: BoxDecoration(
+                border: Border(
+                  left: BorderSide(
+                    color: active ? accentColor : Colors.transparent,
+                    width: 4,
+                  ),
+                ),
+              ),
+              padding: const EdgeInsets.fromLTRB(8, 10, 14, 10),
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
