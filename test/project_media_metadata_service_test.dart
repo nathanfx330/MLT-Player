@@ -247,6 +247,65 @@ void main() {
       );
     });
 
+    test('bookmark highlight line is scoped, persisted, and removed', () async {
+      const path = '/tmp/highlight.mov';
+
+      metadata.addBookmark(defaultProjectId, path, 120);
+      metadata.addBookmark(defaultProjectId, path, 240);
+      metadata.setBookmarkHighlightCueStartMs(
+        defaultProjectId,
+        path,
+        120,
+        3456,
+      );
+
+      expect(
+        metadata.bookmarkHighlightCueStartMsFor(
+          defaultProjectId,
+          path,
+          120,
+        ),
+        3456,
+      );
+      expect(
+        metadata.bookmarkHighlightCueStartMsFor(
+          defaultProjectId,
+          path,
+          240,
+        ),
+        isNull,
+      );
+
+      await metadata.save();
+
+      final reader = ProjectMediaMetadataService(
+        configDirectory: root,
+      );
+      await reader.load(defaultProjectId: defaultProjectId);
+
+      expect(
+        reader.bookmarkHighlightCueStartMsFor(
+          defaultProjectId,
+          path,
+          120,
+        ),
+        3456,
+      );
+
+      expect(
+        reader.removeBookmark(defaultProjectId, path, 120),
+        isTrue,
+      );
+      expect(
+        reader.bookmarkHighlightCueStartMsFor(
+          defaultProjectId,
+          path,
+          120,
+        ),
+        isNull,
+      );
+    });
+
     test('save and load round-trip sparse project metadata', () async {
       final second = projects.createProject('Second Project');
 
