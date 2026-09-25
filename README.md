@@ -150,6 +150,7 @@ it.
 - Redleaf Projects remain selectable after disconnect and application restart
 - Per-Project Favorites for Local Projects
 - Nested local Catalogs
+- Immediate child Catalogs appear as clickable tiles in the parent Catalog grid
 - Many-to-many local Catalog membership: one media file may belong to multiple
   Catalogs without being duplicated
 - Catalog browsing through the same Explorer surface
