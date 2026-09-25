@@ -72,12 +72,11 @@ class _BookmarkViewState extends State<BookmarkView> {
     }
   }
 
-  @override
-  void dispose() {
-    widget.thumbnailService.cancelPending();
-    super.dispose();
-  }
-
+  // The Player owns cancellation for this shared Storyboard/Bookmarks
+  // thumbnail lane. Do not cancel here: during a direct sibling view
+  // replacement the incoming view can begin its source before this outgoing
+  // widget is disposed, and child-level cancellation would kill that new
+  // session.
   @override
   Widget build(BuildContext context) {
     final frames = List<int>.from(widget.sourceFrames)..sort();
