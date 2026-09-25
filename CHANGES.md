@@ -1,5 +1,22 @@
 # Changes
 
+## 2026-09-25 — Nested Catalog grid tiles
+
+- Parent Catalogs now show their immediate child Catalogs as simple rounded
+  tiles in the main Explorer grid.
+- Child Catalog tiles appear before directly assigned media and open the nested
+  Catalog when clicked.
+- The empty-Catalog state now appears only when the selected Catalog has neither
+  child Catalogs nor directly assigned media.
+- Catalog membership semantics are unchanged; this is an Explorer presentation
+  improvement only.
+- Added focused widget coverage for child-tile rendering, clicking, and long
+  names.
+- Rocky verification: the parent Catalog correctly showed nested bins instead
+  of reporting that the Catalog was empty.
+
+---
+
 ## 2026-09-25 — Reveal in File Explorer
 
 - Added `Reveal in File Explorer` to the media-thumbnail right-click menu.
