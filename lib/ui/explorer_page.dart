@@ -26,6 +26,7 @@ import '../services/thumbnail_service.dart';
 import '../services/workspace_project_service.dart';
 import 'redleaf_page.dart';
 import 'widgets/player_settings_button.dart';
+import 'widgets/text_prompt_dialog.dart';
 import 'widgets/workspace_project_switcher.dart';
 
 const List<String> _explorerColorLabelPalette = <String>[
@@ -1292,51 +1293,13 @@ class _ExplorerPageState extends State<ExplorerPage> {
     required String title,
     required String hint,
     String initialValue = '',
-  }) async {
-    final controller = TextEditingController(text: initialValue);
-    controller.selection = TextSelection(
-      baseOffset: 0,
-      extentOffset: controller.text.length,
+  }) {
+    return showTextPromptDialog(
+      context,
+      title: title,
+      hint: hint,
+      initialValue: initialValue,
     );
-
-    final result = await showDialog<String>(
-      context: context,
-      builder: (dialogContext) {
-        return AlertDialog(
-          title: Text(title),
-          content: TextField(
-            controller: controller,
-            autofocus: true,
-            textInputAction: TextInputAction.done,
-            decoration: InputDecoration(hintText: hint),
-            onSubmitted: (value) {
-              final trimmed = value.trim();
-              if (trimmed.isNotEmpty) {
-                Navigator.of(dialogContext).pop(trimmed);
-              }
-            },
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(),
-              child: const Text('CANCEL'),
-            ),
-            FilledButton(
-              onPressed: () {
-                final value = controller.text.trim();
-                if (value.isNotEmpty) {
-                  Navigator.of(dialogContext).pop(value);
-                }
-              },
-              child: const Text('SAVE'),
-            ),
-          ],
-        );
-      },
-    );
-
-    controller.dispose();
-    return result;
   }
 
   Future<bool> _confirm({
