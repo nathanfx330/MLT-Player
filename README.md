@@ -136,6 +136,7 @@ it.
 - Filename filtering, sorting, navigation history, Home, Up, Back, Forward,
   and saved favorite folders
 - Direct Open File and Open Folder workflows
+- Right-click media to reveal the exact source file in the desktop file manager
 - Compact Settings access from Explorer
 - The same top-level Explorer can switch between Local and saved Redleaf
   workspace Projects

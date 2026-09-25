@@ -1,5 +1,19 @@
 # Changes
 
+## 2026-09-25 — Reveal in File Explorer
+
+- Added `Reveal in File Explorer` to the media-thumbnail right-click menu.
+- Linux uses `org.freedesktop.FileManager1.ShowItems` through the existing GTK
+  host channel so the desktop file manager can open the containing directory
+  and select the exact media file.
+- Falls back to opening the parent directory when `FileManager1` is unavailable.
+- Added focused host-channel coverage with no new Dart dependency.
+- Rocky/GNOME verification: Nautilus opened the containing directory and
+  selected the requested media file.
+- GitHub CI passed the full branch gate.
+
+---
+
 ## 2026-09-25 — Catalog dialog controller lifetime
 
 - Fixed a Flutter red-screen failure when saving New Catalog / Rename Catalog

@@ -56,4 +56,18 @@ class HostChannel {
       // Ditto.
     }
   }
+
+  static Future<bool> revealPath(String path) async {
+    if (path.trim().isEmpty) {
+      return false;
+    }
+
+    try {
+      return await _channel.invokeMethod<bool>('revealPath', path) ?? false;
+    } on PlatformException {
+      return false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
 }

@@ -3,6 +3,7 @@
 #include "my_application.h"
 
 #include <flutter_linux/flutter_linux.h>
+#include <gio/gio.h>
 
 #ifdef GDK_WINDOWING_X11
 #include <gdk/gdkx.h>
@@ -14,7 +15,8 @@
 /*
  * Everything Dart cannot reach on its own travels over this channel:
  * the id of the external video texture, the window's fullscreen state,
- * and paths dropped onto the window by the desktop.
+ * paths dropped onto the window by the desktop, and desktop file-manager
+ * integration.
  */
 static constexpr char kHostChannel[] = "mlt_player/host";
 
@@ -145,6 +147,100 @@ static void apply_fullscreen(
 }
 
 /* ------------------------------------------------------------------------- */
+/* Desktop file-manager integration                                          */
+/* ------------------------------------------------------------------------- */
+
+static gboolean reveal_path_in_file_manager(
+    const gchar* path
+) {
+  if (path == nullptr || path[0] == '\0') {
+    return FALSE;
+  }
+
+  g_autofree gchar* file_uri =
+      g_filename_to_uri(path, nullptr, nullptr);
+
+  if (file_uri != nullptr) {
+    g_autoptr(GError) bus_error = nullptr;
+    g_autoptr(GDBusConnection) connection =
+        g_bus_get_sync(
+            G_BUS_TYPE_SESSION,
+            nullptr,
+            &bus_error
+        );
+
+    if (connection != nullptr) {
+      GVariantBuilder uris;
+      g_variant_builder_init(
+          &uris,
+          G_VARIANT_TYPE("as")
+      );
+      g_variant_builder_add(
+          &uris,
+          "s",
+          file_uri
+      );
+
+      g_autoptr(GError) reveal_error = nullptr;
+      g_autoptr(GVariant) result =
+          g_dbus_connection_call_sync(
+              connection,
+              "org.freedesktop.FileManager1",
+              "/org/freedesktop/FileManager1",
+              "org.freedesktop.FileManager1",
+              "ShowItems",
+              g_variant_new(
+                  "(ass)",
+                  &uris,
+                  ""
+              ),
+              nullptr,
+              G_DBUS_CALL_FLAGS_NONE,
+              1500,
+              nullptr,
+              &reveal_error
+          );
+
+      if (result != nullptr) {
+        return TRUE;
+      }
+    }
+  }
+
+  /*
+   * Not every Linux desktop implements FileManager1. Opening the parent
+   * directory is the portable fallback; it gets the user to the right place
+   * even when the file manager cannot select an individual file for us.
+   */
+  g_autofree gchar* parent =
+      g_path_get_dirname(path);
+  g_autofree gchar* parent_uri =
+      g_filename_to_uri(parent, nullptr, nullptr);
+
+  if (parent_uri == nullptr) {
+    return FALSE;
+  }
+
+  g_autoptr(GError) open_error = nullptr;
+  const gboolean opened =
+      g_app_info_launch_default_for_uri(
+          parent_uri,
+          nullptr,
+          &open_error
+      );
+
+  if (!opened && open_error != nullptr) {
+    g_warning(
+        "MLT Player: failed to reveal '%s': %s",
+        path,
+        open_error->message
+    );
+  }
+
+  return opened;
+}
+
+/* ------------------------------------------------------------------------- */
 /* Host channel                                                              */
 /* ------------------------------------------------------------------------- */
 
@@ -188,6 +284,26 @@ static void host_method_call_cb(
     fl_method_call_respond_success(
         method_call,
         nullptr,
+        &error
+    );
+  } else if (g_strcmp0(method, "revealPath") == 0) {
+    FlValue* args =
+        fl_method_call_get_args(method_call);
+
+    const gchar* path =
+        args != nullptr &&
+        fl_value_get_type(args) == FL_VALUE_TYPE_STRING
+            ? fl_value_get_string(args)
+            : nullptr;
+
+    g_autoptr(FlValue) result =
+        fl_value_new_bool(
+            reveal_path_in_file_manager(path)
+        );
+
+    fl_method_call_respond_success(
+        method_call,
+        result,
         &error
     );
   } else {
