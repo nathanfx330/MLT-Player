@@ -1,5 +1,32 @@
 # Changes
 
+## 2026-09-25 — Bookmark transcript profiles
+
+- Bookmark thumbnails now open into a profile view with the large bookmarked
+  frame on the left and contextual SRT transcript cues on the right.
+- The cue overlapping the bookmark starts as the default highlighted line.
+  Right-click any visible cue and choose `Set as highlight line` to move the
+  accent band to the line the bookmark is actually pointing out.
+- Highlight-line selection is stored per bookmark in Project metadata and
+  survives reopening the bookmark and restarting the application.
+- Left-clicking any transcript cue still returns to Player and seeks to that
+  cue; profile actions continue to expose open, PNG export, and bookmark
+  removal.
+- Media without an SRT shows an explicit no-transcript state.
+- Fixed a pre-existing shared-thumbnail lifecycle race where direct
+  Storyboard ↔ Bookmarks switches could leave black/unrendered tiles until the
+  user returned through Video. The Player now owns cancellation for the shared
+  thumbnail lane instead of the two child views competing over teardown.
+- Added focused coverage for profile rendering, cue seeking, right-click
+  highlight selection, Project metadata persistence, and direct
+  Storyboard → Bookmarks → Storyboard replacement.
+- Rocky verification: bookmark profile/highlight selection worked end to end,
+  the selected highlight persisted when reopening the bookmark, and direct
+  Storyboard/Bookmarks switching rendered thumbnails normally without going
+  through Video.
+
+---
+
 ## 2026-09-25 — Nested Catalog grid tiles
 
 - Parent Catalogs now show their immediate child Catalogs as simple rounded
