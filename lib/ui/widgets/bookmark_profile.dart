@@ -261,13 +261,17 @@ class _BookmarkTranscriptPanel extends StatelessWidget {
                     color: Colors.white70,
                   ),
                   SizedBox(width: 8),
-                  Text(
-                    'TRANSCRIPT AROUND BOOKMARK',
-                    style: TextStyle(
-                      fontSize: 10,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: 0.7,
-                      color: Colors.white54,
+                  Expanded(
+                    child: Text(
+                      'TRANSCRIPT AROUND BOOKMARK',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 0.7,
+                        color: Colors.white54,
+                      ),
                     ),
                   ),
                 ],
