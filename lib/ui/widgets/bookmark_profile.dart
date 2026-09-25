@@ -287,8 +287,10 @@ class _BookmarkTranscriptPanel extends StatelessWidget {
 
   Widget _buildTranscript(BuildContext context, SubtitleTrack track) {
     final anchor = _anchorIndex(track.cues, bookmarkPositionMs);
-    final first = (anchor - _contextRadius).clamp(0, track.cues.length - 1);
-    final last = (anchor + _contextRadius).clamp(0, track.cues.length - 1);
+    final first =
+        (anchor - _contextRadius).clamp(0, track.cues.length - 1).toInt();
+    final last =
+        (anchor + _contextRadius).clamp(0, track.cues.length - 1).toInt();
     final cues = track.cues.sublist(first, last + 1);
     final accentColor = Theme.of(context).colorScheme.primary;
 
