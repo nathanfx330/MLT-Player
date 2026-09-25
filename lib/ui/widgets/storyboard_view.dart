@@ -114,12 +114,11 @@ class _StoryboardViewState extends State<StoryboardView> {
     }
   }
 
-  @override
-  void dispose() {
-    widget.thumbnailService.cancelPending();
-    super.dispose();
-  }
-
+  // The Player owns cancellation for this shared Storyboard/Bookmarks
+  // thumbnail lane. Do not cancel here: during a direct sibling view
+  // replacement the incoming view can begin its source before this outgoing
+  // widget is disposed, and child-level cancellation would kill that new
+  // session.
   void _setInterval(int? seconds) {
     if (seconds == null || seconds == _intervalSeconds) {
       return;
