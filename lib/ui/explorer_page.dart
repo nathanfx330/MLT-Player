@@ -26,6 +26,7 @@ import '../services/redleaf_link_service.dart';
 import '../services/thumbnail_service.dart';
 import '../services/workspace_project_service.dart';
 import 'redleaf_page.dart';
+import 'widgets/catalog_child_tile.dart';
 import 'widgets/player_settings_button.dart';
 import 'widgets/text_prompt_dialog.dart';
 import 'widgets/workspace_project_switcher.dart';
@@ -2690,10 +2691,19 @@ class _ExplorerPageState extends State<ExplorerPage> {
         final selected = _selectedItem;
         final showLocations = constraints.maxWidth >= 1180;
         final showDetails = constraints.maxWidth >= 900;
+        final selectedCatalog = _selectedCatalog;
+        final childCatalogs =
+            _sourceMode == _ExplorerSourceMode.catalog &&
+                    selectedCatalog != null
+                ? _orderedCatalogs(
+                    _projectCatalogService.childrenOf(selectedCatalog.id),
+                  )
+                : const <MediaCatalog>[];
+        final gridItemCount = childCatalogs.length + _visibleItems.length;
 
         final mainContent = !_hasSource
             ? _buildWelcome()
-            : _visibleItems.isEmpty
+            : gridItemCount == 0
                 ? _buildEmptyGridState()
                 : GridView.builder(
                     padding: const EdgeInsets.all(14),
@@ -2707,9 +2717,20 @@ class _ExplorerPageState extends State<ExplorerPage> {
                       mainAxisSpacing:
                           _viewPreferencesService.gridSpacing,
                     ),
-                    itemCount: _visibleItems.length,
+                    itemCount: gridItemCount,
                     itemBuilder: (context, index) {
-                      final item = _visibleItems[index];
+                      if (index < childCatalogs.length) {
+                        final catalog = childCatalogs[index];
+                        return CatalogChildTile(
+                          key: ValueKey<String>(
+                            'catalog-child-tile-${catalog.id}',
+                          ),
+                          name: catalog.name,
+                          onTap: () => unawaited(_loadCatalog(catalog.id)),
+                        );
+                      }
+
+                      final item = _visibleItems[index - childCatalogs.length];
                       final favorite = _projectCatalogsLoaded &&
                           !item.isDirectory &&
                           _projectCatalogService.isFavorite(item.path);
