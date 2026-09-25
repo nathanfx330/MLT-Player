@@ -366,7 +366,11 @@ identity beyond the current path-based model is intentionally not claimed yet.
 - Non-destructive Trim with full Undo and Redo
 - Storyboard view at 5, 10, 30, or 60 second intervals
 - Exact-frame Bookmarks with generated frame previews
+- Bookmark profiles with a large frame view and contextual SRT transcript cues;
+  right-click any cue to save that bookmark's highlighted transcript line
 - Single-bookmark PNG export plus one-click bulk export of all bookmarks for the current movie
+- Direct Storyboard ↔ Bookmarks switching keeps the shared thumbnail lane alive,
+  so thumbnails render without detouring through Video
 - Searchable SRT sidecar subtitles with UTF-8, Windows-1252, and Latin-1
   handling
 - Floating transcript sidebar with search-to-seek behavior
