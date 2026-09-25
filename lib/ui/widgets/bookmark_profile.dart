@@ -16,6 +16,8 @@ class BookmarkProfile extends StatefulWidget {
     required this.thumbnailService,
     required this.subtitleTrack,
     required this.bookmarkPositionMs,
+    required this.highlightCueStartMs,
+    required this.onSetHighlightCueStartMs,
     required this.exportEnabled,
     required this.onBack,
     required this.onOpenFrame,
@@ -30,6 +32,8 @@ class BookmarkProfile extends StatefulWidget {
   final StoryboardThumbnailService thumbnailService;
   final SubtitleTrack? subtitleTrack;
   final int bookmarkPositionMs;
+  final int? highlightCueStartMs;
+  final ValueChanged<int> onSetHighlightCueStartMs;
   final bool exportEnabled;
   final VoidCallback onBack;
   final VoidCallback onOpenFrame;
@@ -130,6 +134,9 @@ class _BookmarkProfileState extends State<BookmarkProfile> {
                   child: _BookmarkTranscriptPanel(
                     track: widget.subtitleTrack,
                     bookmarkPositionMs: widget.bookmarkPositionMs,
+                    highlightCueStartMs: widget.highlightCueStartMs,
+                    onSetHighlightCueStartMs:
+                        widget.onSetHighlightCueStartMs,
                     onOpenPosition: widget.onOpenTranscriptPosition,
                   ),
                 ),
@@ -226,6 +233,8 @@ class _BookmarkTranscriptPanel extends StatelessWidget {
   const _BookmarkTranscriptPanel({
     required this.track,
     required this.bookmarkPositionMs,
+    required this.highlightCueStartMs,
+    required this.onSetHighlightCueStartMs,
     required this.onOpenPosition,
   });
 
@@ -233,6 +242,8 @@ class _BookmarkTranscriptPanel extends StatelessWidget {
 
   final SubtitleTrack? track;
   final int bookmarkPositionMs;
+  final int? highlightCueStartMs;
+  final ValueChanged<int> onSetHighlightCueStartMs;
   final ValueChanged<int> onOpenPosition;
 
   @override
@@ -297,6 +308,11 @@ class _BookmarkTranscriptPanel extends StatelessWidget {
         (anchor + _contextRadius).clamp(0, track.cues.length - 1).toInt();
     final cues = track.cues.sublist(first, last + 1);
     final accentColor = Theme.of(context).colorScheme.primary;
+    final requestedHighlight = highlightCueStartMs;
+    final highlightStartMs = requestedHighlight != null &&
+            track.cues.any((cue) => cue.startMs == requestedHighlight)
+        ? requestedHighlight
+        : track.cues[anchor].startMs;
 
     return ListView.separated(
       key: const ValueKey<String>('bookmark-profile-transcript'),
@@ -309,61 +325,110 @@ class _BookmarkTranscriptPanel extends StatelessWidget {
       ),
       itemBuilder: (context, index) {
         final cue = cues[index];
-        final fullIndex = first + index;
-        final active = fullIndex == anchor;
+        final active = cue.startMs == highlightStartMs;
 
-        return Material(
-          color: active ? accentColor.withAlpha(0x24) : Colors.transparent,
-          child: InkWell(
-            onTap: () => onOpenPosition(cue.startMs),
-            child: Container(
-              key: active
-                  ? const ValueKey<String>('bookmark-profile-anchor-cue')
-                  : null,
-              decoration: BoxDecoration(
-                border: Border(
-                  left: BorderSide(
-                    color: active ? accentColor : Colors.transparent,
-                    width: 4,
+        return GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onSecondaryTapDown: (details) => _showCueMenu(
+            context,
+            details.globalPosition,
+            cue,
+            active,
+          ),
+          child: Material(
+            color: active ? accentColor.withAlpha(0x24) : Colors.transparent,
+            child: InkWell(
+              onTap: () => onOpenPosition(cue.startMs),
+              child: Container(
+                key: active
+                    ? const ValueKey<String>('bookmark-profile-anchor-cue')
+                    : null,
+                decoration: BoxDecoration(
+                  border: Border(
+                    left: BorderSide(
+                      color: active ? accentColor : Colors.transparent,
+                      width: 4,
+                    ),
                   ),
                 ),
-              ),
-              padding: const EdgeInsets.fromLTRB(8, 10, 14, 10),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  SizedBox(
-                    width: 42,
-                    child: Text(
-                      _formatTime(cue.startMs),
-                      style: TextStyle(
-                        fontSize: 10,
-                        fontWeight:
-                            active ? FontWeight.w700 : FontWeight.w500,
-                        color: active ? accentColor : Colors.white38,
+                padding: const EdgeInsets.fromLTRB(8, 10, 14, 10),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    SizedBox(
+                      width: 42,
+                      child: Text(
+                        _formatTime(cue.startMs),
+                        style: TextStyle(
+                          fontSize: 10,
+                          fontWeight:
+                              active ? FontWeight.w700 : FontWeight.w500,
+                          color: active ? accentColor : Colors.white38,
+                        ),
                       ),
                     ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      cue.text,
-                      style: TextStyle(
-                        fontSize: 12,
-                        height: 1.35,
-                        fontWeight:
-                            active ? FontWeight.w600 : FontWeight.w400,
-                        color: active ? Colors.white : Colors.white70,
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        cue.text,
+                        style: TextStyle(
+                          fontSize: 12,
+                          height: 1.35,
+                          fontWeight:
+                              active ? FontWeight.w600 : FontWeight.w400,
+                          color: active ? Colors.white : Colors.white70,
+                        ),
                       ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),
         );
       },
     );
+  }
+
+  Future<void> _showCueMenu(
+    BuildContext context,
+    Offset globalPosition,
+    SubtitleCue cue,
+    bool active,
+  ) async {
+    final selected = await showMenu<bool>(
+      context: context,
+      position: RelativeRect.fromLTRB(
+        globalPosition.dx,
+        globalPosition.dy,
+        globalPosition.dx,
+        globalPosition.dy,
+      ),
+      items: <PopupMenuEntry<bool>>[
+        PopupMenuItem<bool>(
+          value: true,
+          enabled: !active,
+          child: Row(
+            children: [
+              Icon(
+                active ? Icons.check : Icons.vertical_align_center,
+                size: 17,
+              ),
+              const SizedBox(width: 8),
+              Text(
+                active
+                    ? 'This is the highlight line'
+                    : 'Set as highlight line',
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+
+    if (selected == true) {
+      onSetHighlightCueStartMs(cue.startMs);
+    }
   }
 
   static int _anchorIndex(List<SubtitleCue> cues, int positionMs) {
