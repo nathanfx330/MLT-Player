@@ -17,10 +17,12 @@ class BookmarkView extends StatefulWidget {
     required this.thumbnailService,
     required this.subtitleTrack,
     required this.positionMsForSourceFrame,
+    required this.highlightCueStartMsForSourceFrame,
     required this.formatFrame,
     required this.onAddCurrent,
     required this.onOpenFrame,
     required this.onOpenTranscriptPosition,
+    required this.onSetHighlightCueStartMs,
     required this.onRemoveFrame,
     required this.onExportFrame,
     required this.onExportAll,
@@ -33,10 +35,13 @@ class BookmarkView extends StatefulWidget {
   final StoryboardThumbnailService thumbnailService;
   final SubtitleTrack? subtitleTrack;
   final int Function(int sourceFrame) positionMsForSourceFrame;
+  final int? Function(int sourceFrame) highlightCueStartMsForSourceFrame;
   final String Function(int sourceFrame) formatFrame;
   final VoidCallback onAddCurrent;
   final ValueChanged<int> onOpenFrame;
   final ValueChanged<int> onOpenTranscriptPosition;
+  final void Function(int sourceFrame, int cueStartMs)
+      onSetHighlightCueStartMs;
   final ValueChanged<int> onRemoveFrame;
   final ValueChanged<int> onExportFrame;
   final VoidCallback onExportAll;
@@ -89,6 +94,17 @@ class _BookmarkViewState extends State<BookmarkView> {
               subtitleTrack: widget.subtitleTrack,
               bookmarkPositionMs:
                   widget.positionMsForSourceFrame(profileSourceFrame),
+              highlightCueStartMs:
+                  widget.highlightCueStartMsForSourceFrame(
+                profileSourceFrame,
+              ),
+              onSetHighlightCueStartMs: (cueStartMs) {
+                widget.onSetHighlightCueStartMs(
+                  profileSourceFrame,
+                  cueStartMs,
+                );
+                setState(() {});
+              },
               exportEnabled: widget.exportEnabled,
               onBack: () => setState(() => _profileSourceFrame = null),
               onOpenFrame: () => widget.onOpenFrame(profileSourceFrame),
