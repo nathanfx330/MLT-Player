@@ -44,6 +44,46 @@ class ProjectMediaMetadataService {
   List<int> bookmarkFramesFor(String projectId, String mediaPath) =>
       metadataFor(projectId, mediaPath).bookmarkFrames;
 
+  int? bookmarkHighlightCueStartMsFor(
+    String projectId,
+    String mediaPath,
+    int sourceFrame,
+  ) =>
+      metadataFor(
+        projectId,
+        mediaPath,
+      ).bookmarkHighlightCueStartMs[sourceFrame];
+
+  void setBookmarkHighlightCueStartMs(
+    String projectId,
+    String mediaPath,
+    int sourceFrame,
+    int cueStartMs,
+  ) {
+    if (sourceFrame < 0 || cueStartMs < 0) {
+      return;
+    }
+
+    final current = metadataFor(projectId, mediaPath);
+    if (!current.bookmarkFrames.contains(sourceFrame)) {
+      return;
+    }
+
+    final highlights = <int, int>{
+      ...current.bookmarkHighlightCueStartMs,
+      sourceFrame: cueStartMs,
+    };
+
+    _store(
+      projectId,
+      mediaPath,
+      current.copyWith(
+        bookmarkHighlightCueStartMs:
+            Map<int, int>.unmodifiable(highlights),
+      ),
+    );
+  }
+
   bool containsBookmark(
     String projectId,
     String mediaPath,
@@ -219,12 +259,18 @@ class ProjectMediaMetadataService {
     final frames = current.bookmarkFrames
         .where((frame) => frame != sourceFrame)
         .toList(growable: false);
+    final highlights = <int, int>{
+      for (final entry in current.bookmarkHighlightCueStartMs.entries)
+        if (entry.key != sourceFrame) entry.key: entry.value,
+    };
 
     _store(
       projectId,
       mediaPath,
       current.copyWith(
         bookmarkFrames: List<int>.unmodifiable(frames),
+        bookmarkHighlightCueStartMs:
+            Map<int, int>.unmodifiable(highlights),
       ),
     );
     return true;
@@ -629,11 +675,29 @@ class ProjectMediaMetadataService {
           )
         : const <int>[];
 
+    final rawHighlights = raw['bookmark_highlights'];
+    final highlights = <int, int>{};
+    if (rawHighlights is Map<String, dynamic>) {
+      for (final entry in rawHighlights.entries) {
+        final sourceFrame = int.tryParse(entry.key);
+        final cueStartMs = entry.value;
+        if (sourceFrame != null &&
+            sourceFrame >= 0 &&
+            cueStartMs is int &&
+            cueStartMs >= 0 &&
+            bookmarks.contains(sourceFrame)) {
+          highlights[sourceFrame] = cueStartMs;
+        }
+      }
+    }
+
     return ProjectMediaMetadata(
       rating: rating,
       tags: tags,
       colorHex: colorHex,
       bookmarkFrames: bookmarks,
+      bookmarkHighlightCueStartMs:
+          Map<int, int>.unmodifiable(highlights),
     );
   }
 
@@ -653,6 +717,13 @@ class ProjectMediaMetadataService {
     }
     if (metadata.bookmarkFrames.isNotEmpty) {
       json['bookmarks'] = metadata.bookmarkFrames;
+    }
+    if (metadata.bookmarkHighlightCueStartMs.isNotEmpty) {
+      json['bookmark_highlights'] = <String, int>{
+        for (final entry
+            in metadata.bookmarkHighlightCueStartMs.entries)
+          entry.key.toString(): entry.value,
+      };
     }
 
     return json;
@@ -688,6 +759,11 @@ class ProjectMediaMetadataService {
       tags: normalizeTags(metadata.tags),
       colorHex: normalizeColorHex(metadata.colorHex),
       bookmarkFrames: _normalizeBookmarkFrames(
+        metadata.bookmarkFrames,
+      ),
+      bookmarkHighlightCueStartMs:
+          _normalizeBookmarkHighlights(
+        metadata.bookmarkHighlightCueStartMs,
         metadata.bookmarkFrames,
       ),
     );
@@ -744,6 +820,24 @@ class ProjectMediaMetadataService {
       ..sort();
 
     return List<int>.unmodifiable(normalized);
+  }
+
+  static Map<int, int> _normalizeBookmarkHighlights(
+    Map<int, int> highlights,
+    Iterable<int> bookmarkFrames,
+  ) {
+    final validFrames = bookmarkFrames
+        .where((frame) => frame >= 0)
+        .toSet();
+    final normalized = <int, int>{};
+
+    for (final entry in highlights.entries) {
+      if (validFrames.contains(entry.key) && entry.value >= 0) {
+        normalized[entry.key] = entry.value;
+      }
+    }
+
+    return Map<int, int>.unmodifiable(normalized);
   }
 
   static String _normalizeMediaPath(String mediaPath) {
