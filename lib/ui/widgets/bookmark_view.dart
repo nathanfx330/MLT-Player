@@ -4,7 +4,9 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 
+import '../../services/srt_subtitle_service.dart';
 import '../../services/storyboard_thumbnail_service.dart';
+import 'bookmark_profile.dart';
 
 class BookmarkView extends StatefulWidget {
   const BookmarkView({
@@ -13,9 +15,14 @@ class BookmarkView extends StatefulWidget {
     required this.sourceFrames,
     required this.currentSourceFrame,
     required this.thumbnailService,
+    required this.subtitleTrack,
+    required this.positionMsForSourceFrame,
+    required this.highlightCueStartMsForSourceFrame,
     required this.formatFrame,
     required this.onAddCurrent,
     required this.onOpenFrame,
+    required this.onOpenTranscriptPosition,
+    required this.onSetHighlightCueStartMs,
     required this.onRemoveFrame,
     required this.onExportFrame,
     required this.onExportAll,
@@ -26,9 +33,15 @@ class BookmarkView extends StatefulWidget {
   final List<int> sourceFrames;
   final int currentSourceFrame;
   final StoryboardThumbnailService thumbnailService;
+  final SubtitleTrack? subtitleTrack;
+  final int Function(int sourceFrame) positionMsForSourceFrame;
+  final int? Function(int sourceFrame) highlightCueStartMsForSourceFrame;
   final String Function(int sourceFrame) formatFrame;
   final VoidCallback onAddCurrent;
   final ValueChanged<int> onOpenFrame;
+  final ValueChanged<int> onOpenTranscriptPosition;
+  final void Function(int sourceFrame, int cueStartMs)
+      onSetHighlightCueStartMs;
   final ValueChanged<int> onRemoveFrame;
   final ValueChanged<int> onExportFrame;
   final VoidCallback onExportAll;
@@ -39,6 +52,8 @@ class BookmarkView extends StatefulWidget {
 }
 
 class _BookmarkViewState extends State<BookmarkView> {
+  int? _profileSourceFrame;
+
   @override
   void initState() {
     super.initState();
@@ -49,23 +64,57 @@ class _BookmarkViewState extends State<BookmarkView> {
   void didUpdateWidget(covariant BookmarkView oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.sourcePath != widget.sourcePath) {
+      _profileSourceFrame = null;
       widget.thumbnailService.beginSource(widget.sourcePath);
+    } else if (_profileSourceFrame != null &&
+        !widget.sourceFrames.contains(_profileSourceFrame)) {
+      _profileSourceFrame = null;
     }
   }
 
-  @override
-  void dispose() {
-    widget.thumbnailService.cancelPending();
-    super.dispose();
-  }
-
+  // The Player owns cancellation for this shared Storyboard/Bookmarks
+  // thumbnail lane. Do not cancel here: during a direct sibling view
+  // replacement the incoming view can begin its source before this outgoing
+  // widget is disposed, and child-level cancellation would kill that new
+  // session.
   @override
   Widget build(BuildContext context) {
     final frames = List<int>.from(widget.sourceFrames)..sort();
+    final profileSourceFrame = _profileSourceFrame;
 
     return ColoredBox(
       color: const Color(0xFF0D0D0D),
-      child: Padding(
+      child: profileSourceFrame != null
+          ? BookmarkProfile(
+              sourcePath: widget.sourcePath,
+              sourceFrame: profileSourceFrame,
+              frameLabel: widget.formatFrame(profileSourceFrame),
+              thumbnailService: widget.thumbnailService,
+              subtitleTrack: widget.subtitleTrack,
+              bookmarkPositionMs:
+                  widget.positionMsForSourceFrame(profileSourceFrame),
+              highlightCueStartMs:
+                  widget.highlightCueStartMsForSourceFrame(
+                profileSourceFrame,
+              ),
+              onSetHighlightCueStartMs: (cueStartMs) {
+                widget.onSetHighlightCueStartMs(
+                  profileSourceFrame,
+                  cueStartMs,
+                );
+                setState(() {});
+              },
+              exportEnabled: widget.exportEnabled,
+              onBack: () => setState(() => _profileSourceFrame = null),
+              onOpenFrame: () => widget.onOpenFrame(profileSourceFrame),
+              onOpenTranscriptPosition: widget.onOpenTranscriptPosition,
+              onRemove: () {
+                setState(() => _profileSourceFrame = null);
+                widget.onRemoveFrame(profileSourceFrame);
+              },
+              onExport: () => widget.onExportFrame(profileSourceFrame),
+            )
+          : Padding(
         padding: const EdgeInsets.fromLTRB(20, 72, 20, 154),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -106,7 +155,9 @@ class _BookmarkViewState extends State<BookmarkView> {
                           service: widget.thumbnailService,
                           frameLabel: widget.formatFrame(sourceFrame),
                           exportEnabled: widget.exportEnabled,
-                          onOpen: () => widget.onOpenFrame(sourceFrame),
+                          onOpen: () => setState(
+                            () => _profileSourceFrame = sourceFrame,
+                          ),
                           onRemove: () => widget.onRemoveFrame(sourceFrame),
                           onExport: () => widget.onExportFrame(sourceFrame),
                         );

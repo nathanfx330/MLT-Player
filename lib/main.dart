@@ -1442,6 +1442,46 @@ class _PlayerPageState extends State<PlayerPage>
     );
   }
 
+  int? _bookmarkHighlightCueStartMsFor(
+    MediaInfo media,
+    int sourceFrame,
+  ) {
+    final projectId = widget.activeProjectId;
+    if (projectId == null ||
+        !widget.projectMediaMetadataService.loaded) {
+      return null;
+    }
+
+    return widget.projectMediaMetadataService
+        .bookmarkHighlightCueStartMsFor(
+      projectId,
+      media.path,
+      sourceFrame,
+    );
+  }
+
+  void _setBookmarkHighlightCueStartMs(
+    int sourceFrame,
+    int cueStartMs,
+  ) {
+    final media = _engine.media;
+    final projectId = widget.activeProjectId;
+    if (media == null ||
+        projectId == null ||
+        !widget.projectMediaMetadataService.loaded) {
+      return;
+    }
+
+    widget.projectMediaMetadataService.setBookmarkHighlightCueStartMs(
+      projectId,
+      media.path,
+      sourceFrame,
+      cueStartMs,
+    );
+    setState(() {});
+    unawaited(_saveProjectMetadata());
+  }
+
   void _toggleBookmarkFrame(int sourceFrame) {
     final media = _engine.media;
     final projectId = widget.activeProjectId;
@@ -1523,12 +1563,23 @@ class _PlayerPageState extends State<PlayerPage>
     // inside the target frame at ordinary video frame rates.
     final clipFrame = _engine.clipFrameForSourceFrame(sourceFrame);
     final clipPositionMs = ((clipFrame * 1000.0) / media.fps).round();
-    _engine.seekTo(clipPositionMs);
+    _openBookmarkPosition(clipPositionMs);
+  }
 
+  void _openBookmarkPosition(int clipPositionMs) {
+    _engine.seekTo(clipPositionMs);
     _storyboardThumbnailService.cancelPending();
     setState(() => _viewMode = PlayerViewMode.video);
     _keyboardFocus.requestFocus();
     _showOverlay();
+  }
+
+  int _bookmarkPositionMs(MediaInfo media, int sourceFrame) {
+    if (media.fps <= 0 || _engine.clipFrameCount <= 0) {
+      return 0;
+    }
+    final clipFrame = _engine.clipFrameForSourceFrame(sourceFrame);
+    return ((clipFrame * 1000.0) / media.fps).round();
   }
 
   String _formatBookmarkFrame(MediaInfo media, int sourceFrame) {
@@ -2641,10 +2692,17 @@ class _PlayerPageState extends State<PlayerPage>
         currentSourceFrame:
             _engine.sourceFrameForClipPositionMs(_engine.positionMs),
         thumbnailService: _storyboardThumbnailService,
+        subtitleTrack: _subtitleTrack,
+        positionMsForSourceFrame: (sourceFrame) =>
+            _bookmarkPositionMs(media, sourceFrame),
+        highlightCueStartMsForSourceFrame: (sourceFrame) =>
+            _bookmarkHighlightCueStartMsFor(media, sourceFrame),
         formatFrame: (sourceFrame) =>
             _formatBookmarkFrame(media, sourceFrame),
         onAddCurrent: _addCurrentBookmark,
         onOpenFrame: _openBookmarkFrame,
+        onOpenTranscriptPosition: _openBookmarkPosition,
+        onSetHighlightCueStartMs: _setBookmarkHighlightCueStartMs,
         onRemoveFrame: _removeBookmarkFrame,
         onExportFrame: (sourceFrame) =>
             unawaited(_exportBookmarkFrame(sourceFrame)),
