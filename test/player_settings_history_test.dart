@@ -69,16 +69,28 @@ void main() {
       await tester.tap(find.byTooltip('Settings'));
       await tester.pumpAndSettle();
 
-      expect(find.text('CLEAR RECENT LIST'), findsOneWidget);
-      expect(find.text('OPEN HISTORY (5)'), findsOneWidget);
+      final clearRecent = find.text(
+        'CLEAR RECENT LIST',
+        skipOffstage: false,
+      );
+      final openHistory = find.text(
+        'OPEN HISTORY (5)',
+        skipOffstage: false,
+      );
+      expect(clearRecent, findsOneWidget);
+      expect(openHistory, findsOneWidget);
 
-      await tester.tap(find.text('CLEAR RECENT LIST'));
+      await tester.ensureVisible(clearRecent);
+      await tester.pumpAndSettle();
+      await tester.tap(clearRecent);
       await tester.pumpAndSettle();
 
       expect(navigation.recents, isEmpty);
       expect(navigation.locationHistory.length, 5);
 
-      await tester.tap(find.text('OPEN HISTORY (5)'));
+      await tester.ensureVisible(openHistory);
+      await tester.pumpAndSettle();
+      await tester.tap(openHistory);
       await tester.pumpAndSettle();
 
       expect(find.text('Explorer History'), findsOneWidget);
@@ -113,7 +125,14 @@ void main() {
 
     await tester.tap(find.byTooltip('Settings'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('OPEN HISTORY (5)'));
+    final openHistory = find.text(
+      'OPEN HISTORY (5)',
+      skipOffstage: false,
+    );
+    expect(openHistory, findsOneWidget);
+    await tester.ensureVisible(openHistory);
+    await tester.pumpAndSettle();
+    await tester.tap(openHistory);
     await tester.pumpAndSettle();
 
     await tester.tap(find.text('CLEAR HISTORY'));
