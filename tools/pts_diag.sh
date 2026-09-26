@@ -31,6 +31,7 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 MLT_VERSION="$(pkg-config --modversion mlt-framework-7)"
+MLT_LIB_DIR="$(pkg-config --variable=libdir mlt-framework-7)"
 echo "PTS diagnostic on MLT $MLT_VERSION"
 echo
 
@@ -103,7 +104,7 @@ run_pts_case() {
 
     echo "PTS case: $label"
 
-    LD_LIBRARY_PATH="$WORK" \
+    LD_LIBRARY_PATH="$WORK:$MLT_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
     SDL_AUDIODRIVER=dummy \
         "$WORK/mlt_pts_smoke" "${args[@]}" \
         2>"$log"
