@@ -119,11 +119,8 @@ class _StoryboardViewState extends State<StoryboardView> {
     final sourceChanged = oldWidget.media.path != widget.media.path;
     final durationChanged = oldWidget.durationMs != widget.durationMs;
 
-    if (sourceChanged) {
-      widget.thumbnailService.beginSource(widget.media.path);
-    }
-
     if (sourceChanged || durationChanged) {
+      widget.thumbnailService.beginSource(widget.media.path);
       _resetBackgroundProgress();
       _scheduleBackgroundProcessing();
     }
