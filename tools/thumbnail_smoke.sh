@@ -34,6 +34,7 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 MLT_DATA_DIR="$(pkg-config --variable=prefix mlt-framework-7)/share/mlt-7"
+MLT_LIB_DIR="$(pkg-config --variable=libdir mlt-framework-7)"
 [ -d "$MLT_DATA_DIR" ] || echo \
     "thumbnail-smoke: warning, $MLT_DATA_DIR is missing. Install libmlt-data." >&2
 
@@ -95,7 +96,7 @@ ffmpeg -hide_banner -loglevel error -y \
 echo "thumbnail-smoke: running MLT thumbnail coverage"
 echo
 
-LD_LIBRARY_PATH="$WORK" \
+LD_LIBRARY_PATH="$WORK:$MLT_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
 SDL_AUDIODRIVER=dummy \
     "$WORK/mlt_thumbnail_smoke" \
     "$VIDEO" \
