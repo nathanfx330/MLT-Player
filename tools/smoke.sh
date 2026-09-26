@@ -42,6 +42,7 @@ pkg-config --exists mlt-framework-7 || fail \
 # The loader producer reads its service dictionary from MLT's data directory.
 # Without it every open returns NULL and says nothing about why.
 MLT_DATA_DIR="$(pkg-config --variable=prefix mlt-framework-7)/share/mlt-7"
+MLT_LIB_DIR="$(pkg-config --variable=libdir mlt-framework-7)"
 [ -d "$MLT_DATA_DIR" ] || echo \
     "smoke: warning, $MLT_DATA_DIR is missing. Install libmlt-data." >&2
 
@@ -237,7 +238,7 @@ fi
 echo "smoke: running no-active-engine guards"
 echo
 
-LD_LIBRARY_PATH="$WORK" \
+LD_LIBRARY_PATH="$WORK:$MLT_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
 SDL_AUDIODRIVER=dummy \
     "$WORK/mlt_guard_smoke"
 
@@ -255,7 +256,7 @@ if [ -n "$ALPHA_STILL" ]; then
     fi
 fi
 
-LD_LIBRARY_PATH="$WORK" \
+LD_LIBRARY_PATH="$WORK:$MLT_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
 SDL_AUDIODRIVER=dummy \
     "$WORK/mlt_smoke" "${ARGS[@]}"
 
@@ -268,7 +269,7 @@ if [ -n "$ALPHA_STILL" ]; then
     PARITY_ARGS+=("$ALPHA_STILL")
 fi
 
-LD_LIBRARY_PATH="$WORK" \
+LD_LIBRARY_PATH="$WORK:$MLT_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
 SDL_AUDIODRIVER=dummy \
     "$WORK/mlt_parity_smoke" "${PARITY_ARGS[@]}"
 
@@ -276,7 +277,7 @@ echo
 echo "smoke: running layer timing coverage"
 echo
 
-LD_LIBRARY_PATH="$WORK" \
+LD_LIBRARY_PATH="$WORK:$MLT_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
 SDL_AUDIODRIVER=dummy \
     "$WORK/mlt_layer_timing_smoke" "$MEDIA"
 
@@ -284,7 +285,7 @@ echo
 echo "smoke: running layer source-trim coverage"
 echo
 
-LD_LIBRARY_PATH="$WORK" \
+LD_LIBRARY_PATH="$WORK:$MLT_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
 SDL_AUDIODRIVER=dummy \
     "$WORK/mlt_layer_source_trim_smoke" "$MEDIA"
 
@@ -292,7 +293,7 @@ echo
 echo "smoke: running layer order coverage"
 echo
 
-LD_LIBRARY_PATH="$WORK" \
+LD_LIBRARY_PATH="$WORK:$MLT_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
 SDL_AUDIODRIVER=dummy \
     "$WORK/mlt_layer_order_smoke" "$MEDIA"
 
@@ -302,7 +303,7 @@ echo
 
 PRESET_MOV="$WORK/prores-422-hq.mov"
 
-LD_LIBRARY_PATH="$WORK" \
+LD_LIBRARY_PATH="$WORK:$MLT_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
 SDL_AUDIODRIVER=dummy \
     "$WORK/mlt_export_preset_smoke" "$MEDIA" "$PRESET_MOV"
 
@@ -374,7 +375,7 @@ echo
 
 FRAME_RATE_MP4="$WORK/frame-rate-2997.mp4"
 
-LD_LIBRARY_PATH="$WORK" \
+LD_LIBRARY_PATH="$WORK:$MLT_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
 SDL_AUDIODRIVER=dummy \
     "$WORK/mlt_export_frame_rate_smoke" "$MEDIA" "$FRAME_RATE_MP4"
 
