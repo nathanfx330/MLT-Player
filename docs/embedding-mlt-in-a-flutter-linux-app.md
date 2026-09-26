@@ -486,22 +486,26 @@ video processing fought the audio clock.
 
 Even with RGBA, I do not hard-code the byte count.
 
-I ask MLT:
+The bridge already validated the returned frame as RGBA, so it describes that
+image to MLT and asks the supported image object API for the byte count:
 
 ```c
+struct mlt_image_s measured_image = {
+    .format = format,
+    .width = width,
+    .height = height,
+};
+
 const int size =
-    mlt_image_format_size(
-        format,
-        width,
-        height,
-        NULL
-    );
+    mlt_image_calculate_size(&measured_image);
 ```
 
 Then copy exactly that amount.
 
-This is a small defensive decision that prevents a future alignment/format
-change from turning into a silent over-read.
+This preserves MLT-owned sizing instead of assuming `width * height * 4`, while
+avoiding `mlt_image_format_size()`, which newer MLT 7.x releases such as 7.40
+mark deprecated. `mlt_image_calculate_size()` is available in both the
+project's MLT 7.22 Linux baseline and MLT 7.40.
 
 ---
 
