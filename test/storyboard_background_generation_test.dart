@@ -127,6 +127,8 @@ void main() {
         containsAll(<int>[...firstWindow, ...finalWindow]),
       );
     },
+  );
+
   testWidgets(
     'visible islands count immediately without derailing background progress',
     (tester) async {
@@ -167,7 +169,5 @@ void main() {
 
       expect(find.text('12 of 12 moments processed'), findsOneWidget);
     },
-  );
-
   );
 }
