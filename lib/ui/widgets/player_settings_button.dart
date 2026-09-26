@@ -249,9 +249,10 @@ class _MltPlayerSettingsDialogState extends State<_MltPlayerSettingsDialog> {
                     const SizedBox(height: 6),
                     Text(
                       'Recent keeps the short folder list shown in the Explorer '
-                      'sidebar. History keeps up to '
+                      'sidebar for the current workspace. History keeps up to '
                       '${widget.explorerNavigation!.historyLimit} previously '
-                      'visited folders for later recall.',
+                      'visited folders for this workspace. Clearing either list '
+                      'affects only the current workspace.',
                       style: const TextStyle(
                         fontSize: 12,
                         height: 1.45,
