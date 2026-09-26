@@ -21,12 +21,15 @@ class ExplorerNavigationService {
 
   final List<String> _favorites = <String>[];
   final List<String> _recents = <String>[];
+  final List<String> _locationHistory = <String>[];
   final List<String> _history = <String>[];
   int _historyIndex = -1;
   Future<void> _writeTail = Future<void>.value();
 
   List<String> get favorites => List<String>.unmodifiable(_favorites);
   List<String> get recents => List<String>.unmodifiable(_recents);
+  List<String> get locationHistory =>
+      List<String>.unmodifiable(_locationHistory);
 
   bool get canGoBack => _historyIndex > 0;
   bool get canGoForward =>
@@ -63,19 +66,24 @@ class ExplorerNavigationService {
     }
 
     rememberRecent(normalized);
+    rememberLocationHistory(normalized);
   }
 
   void commitBack() {
     if (canGoBack) {
       _historyIndex -= 1;
-      rememberRecent(_history[_historyIndex]);
+      final path = _history[_historyIndex];
+      rememberRecent(path);
+      rememberLocationHistory(path);
     }
   }
 
   void commitForward() {
     if (canGoForward) {
       _historyIndex += 1;
-      rememberRecent(_history[_historyIndex]);
+      final path = _history[_historyIndex];
+      rememberRecent(path);
+      rememberLocationHistory(path);
     }
   }
 
@@ -87,6 +95,24 @@ class ExplorerNavigationService {
     if (_recents.length > recentLimit) {
       _recents.removeRange(recentLimit, _recents.length);
     }
+  }
+
+  void rememberLocationHistory(String path) {
+    final normalized = _normalize(path);
+    _locationHistory.remove(normalized);
+    _locationHistory.insert(0, normalized);
+
+    if (_locationHistory.length > historyLimit) {
+      _locationHistory.removeRange(historyLimit, _locationHistory.length);
+    }
+  }
+
+  void clearRecents() {
+    _recents.clear();
+  }
+
+  void clearLocationHistory() {
+    _locationHistory.clear();
   }
 
   void toggleFavorite(String path) {
@@ -118,11 +144,16 @@ class ExplorerNavigationService {
       _recents
         ..clear()
         ..addAll(_readPathList(decoded['recents']).take(recentLimit));
+
+      _locationHistory
+        ..clear()
+        ..addAll(_readPathList(decoded['history']).take(historyLimit));
     } catch (_) {
       // Explorer location state is convenience data. A corrupt or partially
       // written settings file must never prevent the browser from launching.
       _favorites.clear();
       _recents.clear();
+      _locationHistory.clear();
     }
   }
 
@@ -131,6 +162,7 @@ class ExplorerNavigationService {
       'version': 1,
       'favorites': _favorites,
       'recents': _recents,
+      'history': _locationHistory,
     });
 
     final previousWrite = _writeTail;
