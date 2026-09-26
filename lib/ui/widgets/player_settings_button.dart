@@ -4,6 +4,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../../services/explorer_navigation_service.dart';
 import '../../services/player_settings_service.dart';
 import '../../services/redleaf_connection_service.dart';
 
@@ -13,12 +14,16 @@ class MltPlayerSettingsButton extends StatelessWidget {
     required this.settings,
     required this.mltVersion,
     this.redleaf,
+    this.explorerNavigation,
+    this.onOpenHistoryPath,
     this.onClosed,
   });
 
   final PlayerSettingsService settings;
   final String mltVersion;
   final RedleafConnectionService? redleaf;
+  final ExplorerNavigationService? explorerNavigation;
+  final ValueChanged<String>? onOpenHistoryPath;
   final VoidCallback? onClosed;
 
   @override
@@ -36,15 +41,19 @@ class MltPlayerSettingsButton extends StatelessWidget {
           return;
         }
 
-        await showDialog<void>(
+        final historyPath = await showDialog<String>(
           context: context,
           builder: (context) => _MltPlayerSettingsDialog(
             settings: settings,
             mltVersion: mltVersion,
             redleaf: redleafService,
+            explorerNavigation: explorerNavigation,
           ),
         );
         onClosed?.call();
+        if (historyPath != null) {
+          onOpenHistoryPath?.call(historyPath);
+        }
       },
       icon: const Icon(Icons.settings_outlined),
     );
@@ -56,11 +65,13 @@ class _MltPlayerSettingsDialog extends StatefulWidget {
     required this.settings,
     required this.mltVersion,
     required this.redleaf,
+    required this.explorerNavigation,
   });
 
   final PlayerSettingsService settings;
   final String mltVersion;
   final RedleafConnectionService redleaf;
+  final ExplorerNavigationService? explorerNavigation;
 
   @override
   State<_MltPlayerSettingsDialog> createState() =>
@@ -123,6 +134,47 @@ class _MltPlayerSettingsDialogState extends State<_MltPlayerSettingsDialog> {
   void _disconnect() {
     widget.redleaf.disconnect();
     _passwordController.clear();
+  }
+
+  Future<void> _clearRecents() async {
+    final navigation = widget.explorerNavigation;
+    if (navigation == null) {
+      return;
+    }
+
+    navigation.clearRecents();
+    try {
+      await navigation.save();
+    } catch (_) {
+      // Explorer location state is convenience data; keep Settings usable.
+    }
+
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  Future<void> _openHistory() async {
+    final navigation = widget.explorerNavigation;
+    if (navigation == null) {
+      return;
+    }
+
+    final selectedPath = await showDialog<String>(
+      context: context,
+      builder: (context) => _ExplorerHistoryDialog(
+        navigation: navigation,
+      ),
+    );
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {});
+    if (selectedPath != null) {
+      Navigator.of(context).pop(selectedPath);
+    }
   }
 
   @override
@@ -191,6 +243,48 @@ class _MltPlayerSettingsDialogState extends State<_MltPlayerSettingsDialog> {
                     ),
                     child: const Text('RESET TO AMBER'),
                   ),
+                  if (widget.explorerNavigation != null) ...[
+                    const _SettingsDivider(),
+                    const _SectionLabel('EXPLORER'),
+                    const SizedBox(height: 6),
+                    Text(
+                      'Recent keeps the short folder list shown in the Explorer '
+                      'sidebar. History keeps up to '
+                      '${widget.explorerNavigation!.historyLimit} previously '
+                      'visited folders for later recall.',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        height: 1.45,
+                        color: Colors.white60,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        OutlinedButton.icon(
+                          onPressed:
+                              widget.explorerNavigation!.recents.isEmpty
+                                  ? null
+                                  : _clearRecents,
+                          icon: const Icon(
+                            Icons.cleaning_services_outlined,
+                            size: 17,
+                          ),
+                          label: const Text('CLEAR RECENT LIST'),
+                        ),
+                        FilledButton.icon(
+                          onPressed: _openHistory,
+                          icon: const Icon(Icons.history, size: 17),
+                          label: Text(
+                            'OPEN HISTORY '
+                            '(${widget.explorerNavigation!.locationHistory.length})',
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
                   const _SettingsDivider(),
                   const _SectionLabel('REDLEAF'),
                   const SizedBox(height: 6),
@@ -378,6 +472,119 @@ class _MltPlayerSettingsDialogState extends State<_MltPlayerSettingsDialog> {
         _RedleafStatusBlock(redleaf: redleaf),
       ],
     );
+  }
+}
+
+class _ExplorerHistoryDialog extends StatefulWidget {
+  const _ExplorerHistoryDialog({
+    required this.navigation,
+  });
+
+  final ExplorerNavigationService navigation;
+
+  @override
+  State<_ExplorerHistoryDialog> createState() =>
+      _ExplorerHistoryDialogState();
+}
+
+class _ExplorerHistoryDialogState extends State<_ExplorerHistoryDialog> {
+  Future<void> _clearHistory() async {
+    widget.navigation.clearLocationHistory();
+    try {
+      await widget.navigation.save();
+    } catch (_) {
+      // Explorer location state is convenience data; keep History usable.
+    }
+
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final history = widget.navigation.locationHistory;
+
+    return AlertDialog(
+      title: const Row(
+        children: [
+          Icon(Icons.history, size: 22),
+          SizedBox(width: 10),
+          Text('Explorer History'),
+        ],
+      ),
+      content: SizedBox(
+        width: 640,
+        height: 460,
+        child: history.isEmpty
+            ? const Center(
+                child: Text(
+                  'No folder history yet.',
+                  style: TextStyle(color: Colors.white54),
+                ),
+              )
+            : ListView.separated(
+                itemCount: history.length,
+                separatorBuilder: (context, index) =>
+                    const Divider(height: 1, color: Colors.white10),
+                itemBuilder: (context, index) {
+                  final path = history[index];
+                  return ListTile(
+                    dense: true,
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: 2,
+                    ),
+                    leading: const Icon(
+                      Icons.folder_outlined,
+                      size: 19,
+                      color: Colors.white54,
+                    ),
+                    title: Text(
+                      _historyLabel(path),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    subtitle: Text(
+                      path,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 10.5,
+                        color: Colors.white38,
+                      ),
+                    ),
+                    trailing: const Icon(
+                      Icons.open_in_new,
+                      size: 16,
+                      color: Colors.white38,
+                    ),
+                    onTap: () => Navigator.of(context).pop(path),
+                  );
+                },
+              ),
+      ),
+      actions: [
+        TextButton.icon(
+          onPressed: history.isEmpty ? null : _clearHistory,
+          icon: const Icon(Icons.delete_sweep_outlined, size: 17),
+          label: const Text('CLEAR HISTORY'),
+        ),
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('CLOSE'),
+        ),
+      ],
+    );
+  }
+
+  static String _historyLabel(String path) {
+    final normalized = path.replaceAll('\\', '/');
+    final parts = normalized
+        .split('/')
+        .where((part) => part.isNotEmpty)
+        .toList(growable: false);
+    return parts.isEmpty ? path : parts.last;
   }
 }
 
