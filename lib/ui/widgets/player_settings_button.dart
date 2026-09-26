@@ -143,14 +143,14 @@ class _MltPlayerSettingsDialogState extends State<_MltPlayerSettingsDialog> {
     }
 
     navigation.clearRecents();
+    if (mounted) {
+      setState(() {});
+    }
+
     try {
       await navigation.save();
     } catch (_) {
       // Explorer location state is convenience data; keep Settings usable.
-    }
-
-    if (mounted) {
-      setState(() {});
     }
   }
 
@@ -490,14 +490,14 @@ class _ExplorerHistoryDialog extends StatefulWidget {
 class _ExplorerHistoryDialogState extends State<_ExplorerHistoryDialog> {
   Future<void> _clearHistory() async {
     widget.navigation.clearLocationHistory();
+    if (mounted) {
+      setState(() {});
+    }
+
     try {
       await widget.navigation.save();
     } catch (_) {
       // Explorer location state is convenience data; keep History usable.
-    }
-
-    if (mounted) {
-      setState(() {});
     }
   }
 
