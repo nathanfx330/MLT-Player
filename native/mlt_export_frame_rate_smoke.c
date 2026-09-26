@@ -232,75 +232,6 @@ static int frame_is_magenta(
     return red > 150 && green < 110 && blue > 150 ? 1 : 0;
 }
 
-static void print_frame_rgb_probe(
-    const char *path,
-    int frame)
-{
-    int red = 0;
-    int green = 0;
-    int blue = 0;
-
-    if (!sample_frame_rgb(path, frame, &red, &green, &blue)) {
-        printf("    frame %d: RGB sample unavailable\n", frame);
-        return;
-    }
-
-    printf(
-        "    frame %d: RGB %d %d %d -> %s\n",
-        frame,
-        red,
-        green,
-        blue,
-        red > 150 && green < 110 && blue > 150
-            ? "magenta"
-            : "not magenta"
-    );
-}
-
-static void print_video_stream_probe(
-    const char *path)
-{
-    if (path == NULL) {
-        return;
-    }
-
-    char *quoted_path = g_shell_quote(path);
-    if (quoted_path == NULL) {
-        return;
-    }
-
-    char *probe_command = g_strdup_printf(
-        "ffprobe -v error -select_streams v:0 -count_frames "
-        "-show_entries "
-        "stream=codec_name,width,height,pix_fmt,r_frame_rate,avg_frame_rate,"
-        "nb_frames,nb_read_frames,duration "
-        "-of default=noprint_wrappers=1 %s",
-        quoted_path
-    );
-
-    char *decode_command = g_strdup_printf(
-        "ffmpeg -hide_banner -loglevel error -i %s "
-        "-map 0:v:0 -frames:v 1 -f null -",
-        quoted_path
-    );
-
-    g_free(quoted_path);
-
-    printf("  layered export video stream probe:\n");
-
-    if (probe_command != NULL) {
-        const int probe_exit = command_exit_code(probe_command);
-        printf("    ffprobe exit: %d\n", probe_exit);
-        g_free(probe_command);
-    }
-
-    if (decode_command != NULL) {
-        const int decode_exit = command_exit_code(decode_command);
-        printf("    first-frame decode exit: %d\n", decode_exit);
-        g_free(decode_command);
-    }
-}
-
 static int run_simple_one_second_export(
     const char *output_path,
     int64_t duration)
@@ -432,7 +363,6 @@ static int run_layered_conform_export(
         return 0;
     }
 
-    print_video_stream_probe(layered_output_path);
 
     /*
      * Source-rate Layer 3 START 20 -> output frame 24.
@@ -470,16 +400,6 @@ static int run_layered_conform_export(
     const int frame120 = frame_is_magenta(layered_output_path, 120);
     const int frame156 = frame_is_magenta(layered_output_path, 156);
     const int frame157 = frame_is_magenta(layered_output_path, 157);
-
-    printf("  layered conform sampled RGB:\n");
-    print_frame_rgb_probe(layered_output_path, 22);
-    print_frame_rgb_probe(layered_output_path, 24);
-    print_frame_rgb_probe(layered_output_path, 80);
-    print_frame_rgb_probe(layered_output_path, 85);
-    print_frame_rgb_probe(layered_output_path, 118);
-    print_frame_rgb_probe(layered_output_path, 120);
-    print_frame_rgb_probe(layered_output_path, 156);
-    print_frame_rgb_probe(layered_output_path, 157);
 
     check(
         frame118 == 0,
