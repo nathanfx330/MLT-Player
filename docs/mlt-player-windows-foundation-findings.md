@@ -120,6 +120,35 @@ The key rule is:
 
 The existing PTS diagnostic is especially relevant because it was deliberately kept diagnostic rather than promoted to the zero-warning CI gate. A candidate baseline that changes audio-flush behavior should be characterized before the shared bridge is reorganized.
 
+### September 26, 2026 Rocky 7.40 cross-version check
+
+A Rocky Linux workstation using a private-prefix **MLT 7.40.0** install was run
+through the current Linux native gates before any baseline change. This exposed
+two compatibility issues in the harness/bridge rather than a media-semantics
+difference:
+
+- `mlt_image_format_size()` is deprecated by the 7.40 headers and fails the
+  project's `-Werror` native build. The bridge now uses
+  `mlt_image_calculate_size()`, which is also present in the 7.22 baseline.
+- Native scripts previously put only their temporary bridge directory in
+  `LD_LIBRARY_PATH`. They now also include the MLT `libdir` reported by
+  `pkg-config`, which allows private-prefix MLT installations to run without
+  manual loader setup.
+- The layered 25 -> 30000/1001 conform probe used an FFmpeg rawvideo/awk
+  sampling pipeline that could produce no sample bytes on the newer Rocky
+  FFmpeg while still exiting in a way that looked like a color match. The probe
+  now samples a one-pixel PPM frame and rejects missing data explicitly.
+
+After those fixes, Rocky MLT 7.40 passed the native thumbnail smoke and the full
+`tools/smoke.sh` suite, including preview/export parity, layer timing/source
+trim/order, ProRes preset validation, and layered 25 -> 30000/1001 frame-rate
+conform. Manual playback, scrubbing, pause/resume, and Explorer thumbnail
+generation also behaved normally.
+
+This is useful evidence that the current Linux engine behavior survives MLT
+7.40, but it does **not** by itself raise the Linux CI baseline from 7.22 or
+prove Windows export parity. Keep those as separate decisions.
+
 ---
 
 # Part I — Native Windows MLT feasibility
