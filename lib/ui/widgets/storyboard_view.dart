@@ -180,20 +180,35 @@ class _StoryboardViewState extends State<StoryboardView> {
       return;
     }
 
-    final work = <Future<void>>[];
-    for (var index = 0; index < total; index++) {
-      final clipMs = index * intervalMs;
-      final sourceFrame = widget.sourceFrameForPositionMs(clipMs);
-      work.add(
-        _processMoment(
-          serial: serial,
-          sourcePath: sourcePath,
-          sourceFrame: sourceFrame,
-        ),
-      );
-    }
+    // Keep only one small background window queued at a time. Visible tiles
+    // issue their own requests, so a user who scrolls ahead can still get those
+    // moments in front of the next background window instead of waiting behind
+    // the entire movie.
+    const backgroundWindow = 8;
+    for (var start = 0; start < total; start += backgroundWindow) {
+      if (!mounted || serial != _backgroundSerial) {
+        return;
+      }
 
-    await Future.wait(work);
+      final end = (start + backgroundWindow) < total
+          ? start + backgroundWindow
+          : total;
+      final work = <Future<void>>[];
+
+      for (var index = start; index < end; index++) {
+        final clipMs = index * intervalMs;
+        final sourceFrame = widget.sourceFrameForPositionMs(clipMs);
+        work.add(
+          _processMoment(
+            serial: serial,
+            sourcePath: sourcePath,
+            sourceFrame: sourceFrame,
+          ),
+        );
+      }
+
+      await Future.wait(work);
+    }
   }
 
   Future<void> _processMoment({
