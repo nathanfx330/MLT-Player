@@ -1050,14 +1050,19 @@ static void on_consumer_frame_show(
      * Ask MLT how large the image actually is rather than assuming
      * four packed bytes per pixel, so that a future change to
      * alignment or stride does not turn into a silent overread.
+     *
+     * mlt_image_format_size() is deprecated in newer MLT 7.x releases.
+     * mlt_image_calculate_size() is available in both our Ubuntu 7.22
+     * baseline and Rocky 7.40, so describe the already-validated image
+     * and let MLT calculate the byte count through the supported API.
      */
+    struct mlt_image_s measured_image = {
+        .format = format,
+        .width = width,
+        .height = height,
+    };
     const int measured_size =
-        mlt_image_format_size(
-            format,
-            width,
-            height,
-            NULL
-        );
+        mlt_image_calculate_size(&measured_image);
 
     if (measured_size <= 0) {
         return;

@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 
@@ -116,33 +117,43 @@ static int generate_overlay_fixture(
 }
 
 /*
- * Return 1 when the selected encoded output frame is predominantly magenta,
- * 0 when it is not, and -1 when the frame could not be sampled.
+ * Sample the area-averaged RGB value of one encoded output frame.
  *
- * Scaling the selected frame to 1x1 with area averaging makes this robust to
- * H.264 quantization while still strongly separating the full-frame magenta
- * overlay from the generated testsrc2 base movie.
+ * This returns false when ffmpeg produces no bytes. The older boolean-only
+ * probe piped through awk, and an empty input let awk exit successfully by
+ * default, which could masquerade as a magenta frame.
  */
-static int frame_is_magenta(
+static int sample_frame_rgb(
     const char *path,
-    int frame)
+    int frame,
+    int *red,
+    int *green,
+    int *blue)
 {
-    if (path == NULL || frame < 0) {
-        return -1;
+    if (path == NULL ||
+        frame < 0 ||
+        red == NULL ||
+        green == NULL ||
+        blue == NULL) {
+        return 0;
     }
 
     char *quoted_path = g_shell_quote(path);
     if (quoted_path == NULL) {
-        return -1;
+        return 0;
     }
 
+    /*
+     * Use a one-pixel PPM instead of rawvideo. The Rocky/FFmpeg 9 rawvideo
+     * pipe used by the older probe can complete without publishing bytes for
+     * this selected-frame filter, even though the encoded stream itself is
+     * healthy and fully decodable. PPM gives us a tiny self-describing frame
+     * that is straightforward to parse without adding another image library.
+     */
     char *command = g_strdup_printf(
         "ffmpeg -hide_banner -loglevel error -i %s "
         "-vf \"select='eq(n\\,%d)',scale=1:1:flags=area,format=rgb24\" "
-        "-frames:v 1 -fps_mode passthrough -f rawvideo - 2>/dev/null | "
-        "od -An -tu1 -N3 | "
-        "awk '{ if (NF < 3) exit 2; "
-        "exit !( $1 > 150 && $2 < 110 && $3 > 150 ) }'",
+        "-frames:v 1 -f image2pipe -vcodec ppm - 2>/dev/null",
         quoted_path,
         frame
     );
@@ -150,19 +161,75 @@ static int frame_is_magenta(
     g_free(quoted_path);
 
     if (command == NULL) {
+        return 0;
+    }
+
+    FILE *pipe = popen(command, "r");
+    g_free(command);
+
+    if (pipe == NULL) {
+        return 0;
+    }
+
+    char magic[3] = {0};
+    int width = 0;
+    int height = 0;
+    int max_value = 0;
+
+    const int header_fields =
+        fscanf(
+            pipe,
+            "%2s %d %d %d",
+            magic,
+            &width,
+            &height,
+            &max_value
+        );
+
+    int separator = EOF;
+    if (header_fields == 4) {
+        separator = fgetc(pipe);
+    }
+
+    const int sampled_red = fgetc(pipe);
+    const int sampled_green = fgetc(pipe);
+    const int sampled_blue = fgetc(pipe);
+    const int status = pclose(pipe);
+
+    if (header_fields != 4 ||
+        strcmp(magic, "P6") != 0 ||
+        width != 1 ||
+        height != 1 ||
+        max_value != 255 ||
+        separator == EOF ||
+        sampled_red == EOF ||
+        sampled_green == EOF ||
+        sampled_blue == EOF ||
+        status == -1 ||
+        !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 0) {
+        return 0;
+    }
+
+    *red = sampled_red;
+    *green = sampled_green;
+    *blue = sampled_blue;
+    return 1;
+}
+
+static int frame_is_magenta(
+    const char *path,
+    int frame)
+{
+    int red = 0;
+    int green = 0;
+    int blue = 0;
+
+    if (!sample_frame_rgb(path, frame, &red, &green, &blue)) {
         return -1;
     }
 
-    const int exit_code = command_exit_code(command);
-    g_free(command);
-
-    if (exit_code == 0) {
-        return 1;
-    }
-    if (exit_code == 1) {
-        return 0;
-    }
-    return -1;
+    return red > 150 && green < 110 && blue > 150 ? 1 : 0;
 }
 
 static int run_simple_one_second_export(
@@ -295,6 +362,7 @@ static int run_layered_conform_export(
         !file_has_data(layered_output_path)) {
         return 0;
     }
+
 
     /*
      * Source-rate Layer 3 START 20 -> output frame 24.
