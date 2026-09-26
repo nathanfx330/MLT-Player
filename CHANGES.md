@@ -1,5 +1,27 @@
 # Changes
 
+## 2026-09-26 — Rocky MLT 7.40 compatibility hardening
+
+- The Linux bridge now uses the supported `mlt_image_calculate_size()` API
+  instead of deprecated `mlt_image_format_size()` when sizing validated RGBA
+  preview frames. This preserves MLT-owned byte sizing while compiling cleanly
+  against MLT 7.40 with warnings treated as errors.
+- Native smoke and diagnostic scripts now include the MLT library directory
+  reported by `pkg-config` in `LD_LIBRARY_PATH`, so private-prefix installs
+  such as `~/.local/mlt-7.40` run without manual loader-path exports.
+- The layered frame-rate conform smoke now samples selected output frames
+  through a one-pixel PPM image instead of a rawvideo/awk pipe. The old probe
+  could receive no bytes on newer FFmpeg builds and incorrectly classify empty
+  input as a successful magenta match.
+- Rocky verification with MLT 7.40: thumbnail smoke passed with 0 failures;
+  the full native smoke suite passed guards, playback, preview/export parity,
+  layer timing/source trim/order, ProRes preset validation, and 25 -> 30000/1001
+  layered conform coverage.
+- The full Flutter suite remained green at 152 tests, and manual Rocky playback,
+  scrubbing, pause/resume, and Explorer thumbnail generation worked normally.
+
+---
+
 ## 2026-09-26 — Faster Explorer thumbnail generation
 
 - Explorer representative thumbnails now try the 50% source position first.
@@ -199,8 +221,9 @@ each other. The remaining per-frame copy could be removed entirely by holding
 a reference to the `mlt_frame` and uploading from its image directly, which
 is the next thing worth doing if 4K stutters.
 
-**Buffer size comes from MLT.** `mlt_image_format_size()` instead of
-`width * height * 4`, and the returned format is checked rather than assumed.
+**Buffer size comes from MLT.** The bridge describes the validated image to
+`mlt_image_calculate_size()` instead of hard-coding `width * height * 4`, and
+the returned format is checked rather than assumed.
 
 **Media classification.** This one is entirely down to running the code. A
 `.txt` file does not fail to open: MLT's loader hands back a **pango**
