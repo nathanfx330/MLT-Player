@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 
@@ -142,11 +143,17 @@ static int sample_frame_rgb(
         return 0;
     }
 
+    /*
+     * Use a one-pixel PPM instead of rawvideo. The Rocky/FFmpeg 9 rawvideo
+     * pipe used by the older probe can complete without publishing bytes for
+     * this selected-frame filter, even though the encoded stream itself is
+     * healthy and fully decodable. PPM gives us a tiny self-describing frame
+     * that is straightforward to parse without adding another image library.
+     */
     char *command = g_strdup_printf(
         "ffmpeg -hide_banner -loglevel error -i %s "
         "-vf \"select='eq(n\\,%d)',scale=1:1:flags=area,format=rgb24\" "
-        "-frames:v 1 -fps_mode passthrough -f rawvideo - 2>/dev/null | "
-        "od -An -tu1 -N3",
+        "-frames:v 1 -f image2pipe -vcodec ppm - 2>/dev/null",
         quoted_path,
         frame
     );
@@ -164,20 +171,40 @@ static int sample_frame_rgb(
         return 0;
     }
 
-    int sampled_red = 0;
-    int sampled_green = 0;
-    int sampled_blue = 0;
-    const int parsed =
+    char magic[3] = {0};
+    int width = 0;
+    int height = 0;
+    int max_value = 0;
+
+    const int header_fields =
         fscanf(
             pipe,
-            "%d %d %d",
-            &sampled_red,
-            &sampled_green,
-            &sampled_blue
+            "%2s %d %d %d",
+            magic,
+            &width,
+            &height,
+            &max_value
         );
+
+    int separator = EOF;
+    if (header_fields == 4) {
+        separator = fgetc(pipe);
+    }
+
+    const int sampled_red = fgetc(pipe);
+    const int sampled_green = fgetc(pipe);
+    const int sampled_blue = fgetc(pipe);
     const int status = pclose(pipe);
 
-    if (parsed != 3 ||
+    if (header_fields != 4 ||
+        strcmp(magic, "P6") != 0 ||
+        width != 1 ||
+        height != 1 ||
+        max_value != 255 ||
+        separator == EOF ||
+        sampled_red == EOF ||
+        sampled_green == EOF ||
+        sampled_blue == EOF ||
         status == -1 ||
         !WIFEXITED(status) ||
         WEXITSTATUS(status) != 0) {
