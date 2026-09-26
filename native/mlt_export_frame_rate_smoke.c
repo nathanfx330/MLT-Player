@@ -116,81 +116,37 @@ static int generate_overlay_fixture(
 }
 
 /*
- * Return 1 when the selected encoded output frame is predominantly magenta,
- * 0 when it is not, and -1 when the frame could not be sampled.
+ * Sample the area-averaged RGB value of one encoded output frame.
  *
- * Keep this original boolean probe unchanged while the diagnostic below prints
- * raw RGB values. That way the diagnostic cannot change the pass/fail behavior
- * it is trying to explain.
+ * This returns false when ffmpeg produces no bytes. The older boolean-only
+ * probe piped through awk, and an empty input let awk exit successfully by
+ * default, which could masquerade as a magenta frame.
  */
-static int frame_is_magenta(
+static int sample_frame_rgb(
     const char *path,
-    int frame)
+    int frame,
+    int *red,
+    int *green,
+    int *blue)
 {
-    if (path == NULL || frame < 0) {
-        return -1;
-    }
-
-    char *quoted_path = g_shell_quote(path);
-    if (quoted_path == NULL) {
-        return -1;
-    }
-
-    char *command = g_strdup_printf(
-        "ffmpeg -hide_banner -loglevel error -i %s "
-        "-vf \"select='eq(n\\,%d)',scale=1:1:flags=area,format=rgb24\" "
-        "-frames:v 1 -fps_mode passthrough -f rawvideo - 2>/dev/null | "
-        "od -An -tu1 -N3 | "
-        "awk '{ if (NF < 3) exit 2; "
-        "exit !( $1 > 150 && $2 < 110 && $3 > 150 ) }'",
-        quoted_path,
-        frame
-    );
-
-    g_free(quoted_path);
-
-    if (command == NULL) {
-        return -1;
-    }
-
-    const int exit_code = command_exit_code(command);
-    g_free(command);
-
-    if (exit_code == 0) {
-        return 1;
-    }
-    if (exit_code == 1) {
+    if (path == NULL ||
+        frame < 0 ||
+        red == NULL ||
+        green == NULL ||
+        blue == NULL) {
         return 0;
     }
-    return -1;
-}
-
-/*
- * Print the same 1x1 area-averaged RGB sample directly to stdout. This is
- * intentionally observation-only: it does not feed the smoke-test assertions.
- */
-static void print_frame_rgb_probe(
-    const char *path,
-    int frame)
-{
-    if (path == NULL || frame < 0) {
-        printf("    frame %d: RGB sample unavailable\n", frame);
-        return;
-    }
 
     char *quoted_path = g_shell_quote(path);
     if (quoted_path == NULL) {
-        printf("    frame %d: RGB sample unavailable\n", frame);
-        return;
+        return 0;
     }
 
     char *command = g_strdup_printf(
-        "printf '    frame %d: RGB '; "
         "ffmpeg -hide_banner -loglevel error -i %s "
         "-vf \"select='eq(n\\,%d)',scale=1:1:flags=area,format=rgb24\" "
         "-frames:v 1 -fps_mode passthrough -f rawvideo - 2>/dev/null | "
         "od -An -tu1 -N3",
-        frame,
         quoted_path,
         frame
     );
@@ -198,16 +154,123 @@ static void print_frame_rgb_probe(
     g_free(quoted_path);
 
     if (command == NULL) {
+        return 0;
+    }
+
+    FILE *pipe = popen(command, "r");
+    g_free(command);
+
+    if (pipe == NULL) {
+        return 0;
+    }
+
+    int sampled_red = 0;
+    int sampled_green = 0;
+    int sampled_blue = 0;
+    const int parsed =
+        fscanf(
+            pipe,
+            "%d %d %d",
+            &sampled_red,
+            &sampled_green,
+            &sampled_blue
+        );
+    const int status = pclose(pipe);
+
+    if (parsed != 3 ||
+        status == -1 ||
+        !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 0) {
+        return 0;
+    }
+
+    *red = sampled_red;
+    *green = sampled_green;
+    *blue = sampled_blue;
+    return 1;
+}
+
+static int frame_is_magenta(
+    const char *path,
+    int frame)
+{
+    int red = 0;
+    int green = 0;
+    int blue = 0;
+
+    if (!sample_frame_rgb(path, frame, &red, &green, &blue)) {
+        return -1;
+    }
+
+    return red > 150 && green < 110 && blue > 150 ? 1 : 0;
+}
+
+static void print_frame_rgb_probe(
+    const char *path,
+    int frame)
+{
+    int red = 0;
+    int green = 0;
+    int blue = 0;
+
+    if (!sample_frame_rgb(path, frame, &red, &green, &blue)) {
         printf("    frame %d: RGB sample unavailable\n", frame);
         return;
     }
 
-    fflush(stdout);
-    const int exit_code = command_exit_code(command);
-    g_free(command);
+    printf(
+        "    frame %d: RGB %d %d %d -> %s\n",
+        frame,
+        red,
+        green,
+        blue,
+        red > 150 && green < 110 && blue > 150
+            ? "magenta"
+            : "not magenta"
+    );
+}
 
-    if (exit_code != 0) {
-        printf("    frame %d: RGB probe command failed\n", frame);
+static void print_video_stream_probe(
+    const char *path)
+{
+    if (path == NULL) {
+        return;
+    }
+
+    char *quoted_path = g_shell_quote(path);
+    if (quoted_path == NULL) {
+        return;
+    }
+
+    char *probe_command = g_strdup_printf(
+        "ffprobe -v error -select_streams v:0 -count_frames "
+        "-show_entries "
+        "stream=codec_name,width,height,pix_fmt,r_frame_rate,avg_frame_rate,"
+        "nb_frames,nb_read_frames,duration "
+        "-of default=noprint_wrappers=1 %s",
+        quoted_path
+    );
+
+    char *decode_command = g_strdup_printf(
+        "ffmpeg -hide_banner -loglevel error -i %s "
+        "-map 0:v:0 -frames:v 1 -f null -",
+        quoted_path
+    );
+
+    g_free(quoted_path);
+
+    printf("  layered export video stream probe:\n");
+
+    if (probe_command != NULL) {
+        const int probe_exit = command_exit_code(probe_command);
+        printf("    ffprobe exit: %d\n", probe_exit);
+        g_free(probe_command);
+    }
+
+    if (decode_command != NULL) {
+        const int decode_exit = command_exit_code(decode_command);
+        printf("    first-frame decode exit: %d\n", decode_exit);
+        g_free(decode_command);
     }
 }
 
@@ -341,6 +404,8 @@ static int run_layered_conform_export(
         !file_has_data(layered_output_path)) {
         return 0;
     }
+
+    print_video_stream_probe(layered_output_path);
 
     /*
      * Source-rate Layer 3 START 20 -> output frame 24.
