@@ -101,7 +101,7 @@ class _StoryboardViewState extends State<StoryboardView> {
 
   int _intervalSeconds = 10;
   int _backgroundSerial = 0;
-  int _processedMoments = 0;
+  final Set<int> _processedMomentIndexes = <int>{};
   int _processingTotal = 0;
 
   @override
@@ -152,8 +152,22 @@ class _StoryboardViewState extends State<StoryboardView> {
 
   void _resetBackgroundProgress() {
     _backgroundSerial += 1;
-    _processedMoments = 0;
+    _processedMomentIndexes.clear();
     _processingTotal = _storyboardItemCount();
+  }
+
+  void _markMomentProcessed(int serial, int momentIndex) {
+    if (!mounted ||
+        serial != _backgroundSerial ||
+        momentIndex < 0 ||
+        momentIndex >= _processingTotal ||
+        _processedMomentIndexes.contains(momentIndex)) {
+      return;
+    }
+
+    setState(() {
+      _processedMomentIndexes.add(momentIndex);
+    });
   }
 
   void _scheduleBackgroundProcessing() {
@@ -198,6 +212,7 @@ class _StoryboardViewState extends State<StoryboardView> {
         work.add(
           _processMoment(
             serial: serial,
+            momentIndex: index,
             sourcePath: sourcePath,
             sourceFrame: sourceFrame,
           ),
@@ -210,11 +225,12 @@ class _StoryboardViewState extends State<StoryboardView> {
 
   Future<void> _processMoment({
     required int serial,
+    required int momentIndex,
     required String sourcePath,
     required int sourceFrame,
   }) async {
     try {
-      await widget.thumbnailService.thumbnailAtFrame(
+      await widget.thumbnailService.prefetchAtFrame(
         sourcePath: sourcePath,
         requestedFrame: sourceFrame,
       );
@@ -222,15 +238,7 @@ class _StoryboardViewState extends State<StoryboardView> {
       // The tile itself will render the normal failed-thumbnail placeholder.
       // Progress tracks completed work, not only successful images.
     } finally {
-      if (!mounted || serial != _backgroundSerial) {
-        return;
-      }
-
-      setState(() {
-        if (_processedMoments < _processingTotal) {
-          _processedMoments += 1;
-        }
-      });
+      _markMomentProcessed(serial, momentIndex);
     }
   }
 
@@ -251,7 +259,7 @@ class _StoryboardViewState extends State<StoryboardView> {
               intervalSeconds: _intervalSeconds,
               choices: _intervalChoices,
               itemCount: itemCount,
-              processedMoments: _processedMoments,
+              processedMoments: _processedMomentIndexes.length,
               onChanged: _setInterval,
             ),
             const SizedBox(height: 12),
@@ -285,16 +293,21 @@ class _StoryboardViewState extends State<StoryboardView> {
                           durationMs,
                         );
 
+                        final progressSerial = _backgroundSerial;
+
                         return _StoryboardTile(
                           key: ValueKey<String>(
                             '${widget.media.path}:$_intervalSeconds:$sourceFrame',
                           ),
+                          momentIndex: index,
                           sourcePath: widget.media.path,
                           sourceFrame: sourceFrame,
                           clipMs: clipMs,
                           selected: selected,
                           bookmarked: widget.bookmarkedFrames.contains(sourceFrame),
                           service: widget.thumbnailService,
+                          onProcessed: (momentIndex) =>
+                              _markMomentProcessed(progressSerial, momentIndex),
                           onTap: () => widget.onSeek(clipMs),
                           onDoubleTap: () => widget.onOpenVideo(clipMs),
                           onToggleBookmark: () =>
@@ -386,23 +399,27 @@ class _StoryboardToolbar extends StatelessWidget {
 class _StoryboardTile extends StatefulWidget {
   const _StoryboardTile({
     super.key,
+    required this.momentIndex,
     required this.sourcePath,
     required this.sourceFrame,
     required this.clipMs,
     required this.selected,
     required this.bookmarked,
     required this.service,
+    required this.onProcessed,
     required this.onTap,
     required this.onDoubleTap,
     required this.onToggleBookmark,
   });
 
+  final int momentIndex;
   final String sourcePath;
   final int sourceFrame;
   final int clipMs;
   final bool selected;
   final bool bookmarked;
   final StoryboardThumbnailService service;
+  final ValueChanged<int> onProcessed;
   final VoidCallback onTap;
   final VoidCallback onDoubleTap;
   final VoidCallback onToggleBookmark;
@@ -430,10 +447,17 @@ class _StoryboardTileState extends State<_StoryboardTile> {
     }
   }
 
-  Future<String?> _load() => widget.service.thumbnailAtFrame(
-    sourcePath: widget.sourcePath,
-    requestedFrame: widget.sourceFrame,
-  );
+  Future<String?> _load() {
+    final momentIndex = widget.momentIndex;
+    final onProcessed = widget.onProcessed;
+
+    return widget.service
+        .thumbnailAtFrame(
+          sourcePath: widget.sourcePath,
+          requestedFrame: widget.sourceFrame,
+        )
+        .whenComplete(() => onProcessed(momentIndex));
+  }
 
   @override
   Widget build(BuildContext context) {
