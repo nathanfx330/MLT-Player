@@ -1,5 +1,23 @@
 # Changes
 
+## 2026-09-26 — Faster Explorer thumbnail generation
+
+- Explorer representative thumbnails now try the 50% source position first.
+- If the midpoint is already a clearly useful frame, thumbnail selection accepts
+  it immediately instead of decoding and scoring all three representative
+  candidates.
+- Dark, faded, or visually flat midpoint frames still fall back to the existing
+  15% / 50% / 85% comparison, preserving black-leader and slate protection.
+- The process-wide native thumbnail serialization lock remains unchanged, so the
+  release-build concurrency hardening is preserved.
+- Cached thumbnail identity and output dimensions are unchanged.
+- Ubuntu verification: native thumbnail smoke passed with 0 failures, the 5
+  focused thumbnail tests passed, and the full Flutter suite passed 152 tests.
+- Manual verification against a large uncached directory showed a clearly
+  noticeable improvement in Explorer thumbnail population speed.
+
+---
+
 ## 2026-09-25 — Workspace-scoped Explorer Recent and History
 
 - Explorer now keeps two separate navigation recall surfaces: the short

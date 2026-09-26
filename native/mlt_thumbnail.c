@@ -14,6 +14,7 @@
 #define THUMBNAIL_SCORE_WIDTH 160
 #define THUMBNAIL_SCORE_HEIGHT 90
 #define THUMBNAIL_CANDIDATE_COUNT 3
+#define THUMBNAIL_FAST_ACCEPT_SCORE 750.0
 #define THUMBNAIL_FRAME_ERROR_CAPACITY 512
 
 /*
@@ -426,9 +427,20 @@ static int thumbnail_choose_frame(
         return 1;
     }
 
+    /*
+     * Explorer previously scored all three candidates for every uncached
+     * video before rendering the winner. That makes large folders a strictly
+     * linear sequence of four decode/seeks per file: three scoring frames plus
+     * the final output frame.
+     *
+     * Try the midpoint first. When it is already a clearly useful frame, use
+     * it immediately. Dark, faded, or visually flat midpoint frames still
+     * fall through to the full three-candidate comparison, preserving the
+     * black-leader/slate protection that representative selection exists for.
+     */
     static const double fractions[THUMBNAIL_CANDIDATE_COUNT] = {
-        0.15,
         0.50,
+        0.15,
         0.85,
     };
 
@@ -489,6 +501,10 @@ static int thumbnail_choose_frame(
             found = 1;
             best_score = score;
             best_frame = candidates[index];
+        }
+
+        if (index == 0 && score >= THUMBNAIL_FAST_ACCEPT_SCORE) {
+            break;
         }
     }
 
