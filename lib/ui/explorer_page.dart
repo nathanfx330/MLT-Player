@@ -2933,7 +2933,6 @@ class _ExplorerPageState extends State<ExplorerPage> {
               _ExplorerLocationRow(
                 icon: Icons.history,
                 label: _locationLabel(path),
-                path: path,
                 selected: _sourceMode == _ExplorerSourceMode.directory &&
                     _directoryPath == path,
                 onTap: () => unawaited(_loadDirectory(path)),
