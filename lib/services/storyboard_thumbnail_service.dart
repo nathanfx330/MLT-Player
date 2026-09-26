@@ -45,7 +45,9 @@ class StoryboardThumbnailService {
 
   final Directory _cacheDirectory;
   final StoryboardThumbnailBatchGenerator _batchGenerator;
-  final Queue<_StoryboardThumbnailRequest> _pending =
+  final Queue<_StoryboardThumbnailRequest> _foregroundPending =
+      Queue<_StoryboardThumbnailRequest>();
+  final Queue<_StoryboardThumbnailRequest> _backgroundPending =
       Queue<_StoryboardThumbnailRequest>();
   final Map<String, _StoryboardThumbnailRequest> _inFlight =
       <String, _StoryboardThumbnailRequest>{};
@@ -132,6 +134,29 @@ class StoryboardThumbnailService {
   Future<String?> thumbnailAtFrame({
     required String sourcePath,
     required int requestedFrame,
+  }) {
+    return _thumbnailAtFrame(
+      sourcePath: sourcePath,
+      requestedFrame: requestedFrame,
+      foreground: true,
+    );
+  }
+
+  Future<String?> prefetchAtFrame({
+    required String sourcePath,
+    required int requestedFrame,
+  }) {
+    return _thumbnailAtFrame(
+      sourcePath: sourcePath,
+      requestedFrame: requestedFrame,
+      foreground: false,
+    );
+  }
+
+  Future<String?> _thumbnailAtFrame({
+    required String sourcePath,
+    required int requestedFrame,
+    required bool foreground,
   }) async {
     if (requestedFrame < 0) {
       return null;
@@ -173,6 +198,9 @@ class StoryboardThumbnailService {
     final inFlightKey = '$generation:$cachePath';
     final existing = _inFlight[inFlightKey];
     if (existing != null) {
+      if (foreground && _backgroundPending.remove(existing)) {
+        _foregroundPending.addLast(existing);
+      }
       return existing.completer.future;
     }
 
@@ -185,21 +213,28 @@ class StoryboardThumbnailService {
     );
 
     _inFlight[inFlightKey] = request;
-    _pending.addLast(request);
+    if (foreground) {
+      _foregroundPending.addLast(request);
+    } else {
+      _backgroundPending.addLast(request);
+    }
     _schedulePump();
 
     return request.completer.future;
   }
 
+  bool get _hasPending =>
+      _foregroundPending.isNotEmpty || _backgroundPending.isNotEmpty;
+
   void _schedulePump() {
-    if (_pumpScheduled || _pumpRunning || _pending.isEmpty) {
+    if (_pumpScheduled || _pumpRunning || !_hasPending) {
       return;
     }
 
     _pumpScheduled = true;
     Timer.run(() {
       _pumpScheduled = false;
-      if (!_pumpRunning && _pending.isNotEmpty) {
+      if (!_pumpRunning && _hasPending) {
         unawaited(_pump());
       }
     });
@@ -216,20 +251,34 @@ class StoryboardThumbnailService {
         _completeInvalidatedRequests();
 
         final batch = <_StoryboardThumbnailRequest>[];
-        while (_pending.isNotEmpty && batch.length < _maxBatchSize) {
-          final request = _pending.removeFirst();
-          if (request.completer.isCompleted) {
-            continue;
+        var admittedBackground = false;
+
+        while (_hasPending && batch.length < _maxBatchSize) {
+          _StoryboardThumbnailRequest? request;
+
+          // Interactive tiles get the first three slots in a mixed batch, then
+          // one background slot is guaranteed before the remaining foreground
+          // work. This keeps scrolling responsive without allowing a collection
+          // of off-screen "islands" to starve the sequential backfill.
+          if (_foregroundPending.isNotEmpty &&
+              (batch.length < 3 ||
+                  _backgroundPending.isEmpty ||
+                  admittedBackground)) {
+            request = _takeNextValid(_foregroundPending);
+          } else if (_backgroundPending.isNotEmpty) {
+            request = _takeNextValid(_backgroundPending);
+            admittedBackground = request != null || admittedBackground;
+          } else if (_foregroundPending.isNotEmpty) {
+            request = _takeNextValid(_foregroundPending);
           }
-          if (!_isCurrent(request.generation, request.sourcePath)) {
-            _completeRequest(request, null);
-            continue;
+
+          if (request != null) {
+            batch.add(request);
           }
-          batch.add(request);
         }
 
         if (batch.isEmpty) {
-          if (_pending.isEmpty) {
+          if (!_hasPending) {
             break;
           }
           continue;
@@ -239,10 +288,30 @@ class StoryboardThumbnailService {
       }
     } finally {
       _pumpRunning = false;
-      if (_pending.isNotEmpty) {
+      if (_hasPending) {
         _schedulePump();
       }
     }
+  }
+
+  _StoryboardThumbnailRequest? _takeNextValid(
+    Queue<_StoryboardThumbnailRequest> queue,
+  ) {
+    while (queue.isNotEmpty) {
+      final request = queue.removeFirst();
+
+      if (request.completer.isCompleted) {
+        continue;
+      }
+      if (!_isCurrent(request.generation, request.sourcePath)) {
+        _completeRequest(request, null);
+        continue;
+      }
+
+      return request;
+    }
+
+    return null;
   }
 
   Future<void> _runBatch(List<_StoryboardThumbnailRequest> requests) async {
