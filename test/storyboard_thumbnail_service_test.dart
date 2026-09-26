@@ -171,6 +171,56 @@ void main() {
     expect(calls, 1);
   });
 
+  test('foreground islands cannot starve sequential background backfill', () async {
+    final batches = <List<int>>[];
+    final service = StoryboardThumbnailService(
+      cacheDirectory: Directory('${temp.path}/cache'),
+      batchGenerator: ({
+        required sourcePath,
+        required outputDirectory,
+        required width,
+        required height,
+        required requestedFrames,
+      }) async {
+        batches.add(List<int>.from(requestedFrames));
+        return writeBatch(
+          sourcePath: sourcePath,
+          outputDirectory: outputDirectory,
+          width: width,
+          height: height,
+          requestedFrames: requestedFrames,
+        );
+      },
+    );
+
+    service.beginSource(source.path);
+
+    final background = <Future<String?>>[
+      for (final frame in <int>[0, 10, 20, 30, 40, 50, 60, 70])
+        service.prefetchAtFrame(
+          sourcePath: source.path,
+          requestedFrame: frame,
+        ),
+    ];
+    final foreground = <Future<String?>>[
+      for (final frame in <int>[500, 510, 520, 530, 540, 550, 560, 570, 580, 590])
+        service.thumbnailAtFrame(
+          sourcePath: source.path,
+          requestedFrame: frame,
+        ),
+    ];
+
+    await Future.wait(<Future<String?>>[...background, ...foreground]);
+
+    expect(batches, isNotEmpty);
+    expect(batches.first.take(3), <int>[500, 510, 520]);
+    expect(
+      batches.first.any((frame) => frame < 100),
+      isTrue,
+      reason: 'a mixed batch must reserve admission for background progress',
+    );
+  });
+
   test('restarting a source invalidates an active batch safely', () async {
     final started = <List<int>>[];
     final firstStarted = Completer<void>();
