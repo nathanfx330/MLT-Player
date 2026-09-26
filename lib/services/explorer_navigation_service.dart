@@ -49,6 +49,7 @@ class ExplorerNavigationService {
         _historyIndex < _history.length &&
         _history[_historyIndex] == normalized) {
       rememberRecent(normalized);
+      rememberLocationHistory(normalized);
       return;
     }
 
