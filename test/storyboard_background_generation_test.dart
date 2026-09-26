@@ -17,15 +17,27 @@ class _ControlledStoryboardThumbnailService
   @override
   void beginSource(String sourcePath) {}
 
+  Future<String?> _request(int requestedFrame) {
+    requestedFrames.add(requestedFrame);
+    return _completers
+        .putIfAbsent(requestedFrame, () => Completer<String?>())
+        .future;
+  }
+
   @override
   Future<String?> thumbnailAtFrame({
     required String sourcePath,
     required int requestedFrame,
   }) {
-    requestedFrames.add(requestedFrame);
-    return _completers
-        .putIfAbsent(requestedFrame, () => Completer<String?>())
-        .future;
+    return _request(requestedFrame);
+  }
+
+  @override
+  Future<String?> prefetchAtFrame({
+    required String sourcePath,
+    required int requestedFrame,
+  }) {
+    return _request(requestedFrame);
   }
 
   void completeFrames(Iterable<int> frames) {
