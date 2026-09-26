@@ -32,6 +32,7 @@ void main() {
     redleaf = RedleafConnectionService(
       configDirectory: Directory('${root.path}/redleaf'),
     );
+    await redleaf.load();
 
     for (final name in <String>['A', 'B', 'C', 'D', 'E']) {
       navigation.recordVisit('${root.path}/$name');
@@ -67,7 +68,10 @@ void main() {
       );
 
       await tester.tap(find.byTooltip('Settings'));
+      await tester.pump();
       await tester.pumpAndSettle();
+
+      expect(find.text('Settings'), findsOneWidget);
 
       final clearRecent = find.text(
         'CLEAR RECENT LIST',
