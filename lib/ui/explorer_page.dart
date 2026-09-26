@@ -442,6 +442,19 @@ class _ExplorerPageState extends State<ExplorerPage> {
     setState(() => _navigationLoaded = true);
   }
 
+  void _handleSettingsClosed() {
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {});
+    _focusNode.requestFocus();
+  }
+
+  void _openHistoryPath(String path) {
+    unawaited(_loadDirectory(path));
+  }
+
   Future<void> _initializeViewPreferences() async {
     try {
       await _viewPreferencesService.load();
@@ -2219,6 +2232,9 @@ class _ExplorerPageState extends State<ExplorerPage> {
                 child: MltPlayerSettingsButton(
                   settings: widget.playerSettings!,
                   mltVersion: widget.version,
+                  explorerNavigation: _navigationService,
+                  onOpenHistoryPath: _openHistoryPath,
+                  onClosed: _handleSettingsClosed,
                 ),
               ),
           ],
@@ -2391,7 +2407,9 @@ class _ExplorerPageState extends State<ExplorerPage> {
                 child: MltPlayerSettingsButton(
                   settings: widget.playerSettings!,
                   mltVersion: widget.version,
-                  onClosed: _focusNode.requestFocus,
+                  explorerNavigation: _navigationService,
+                  onOpenHistoryPath: _openHistoryPath,
+                  onClosed: _handleSettingsClosed,
                 ),
               ),
             ],
