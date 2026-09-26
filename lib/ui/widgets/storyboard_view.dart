@@ -1,5 +1,6 @@
 // lib/ui/widgets/storyboard_view.dart
 
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -99,18 +100,32 @@ class _StoryboardViewState extends State<StoryboardView> {
   static const List<int> _intervalChoices = <int>[5, 10, 30, 60];
 
   int _intervalSeconds = 10;
+  int _backgroundSerial = 0;
+  int _processedMoments = 0;
+  int _processingTotal = 0;
 
   @override
   void initState() {
     super.initState();
     widget.thumbnailService.beginSource(widget.media.path);
+    _resetBackgroundProgress();
+    _scheduleBackgroundProcessing();
   }
 
   @override
   void didUpdateWidget(covariant StoryboardView oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.media.path != widget.media.path) {
+
+    final sourceChanged = oldWidget.media.path != widget.media.path;
+    final durationChanged = oldWidget.durationMs != widget.durationMs;
+
+    if (sourceChanged) {
       widget.thumbnailService.beginSource(widget.media.path);
+    }
+
+    if (sourceChanged || durationChanged) {
+      _resetBackgroundProgress();
+      _scheduleBackgroundProcessing();
     }
   }
 
@@ -124,17 +139,94 @@ class _StoryboardViewState extends State<StoryboardView> {
       return;
     }
 
-    setState(() => _intervalSeconds = seconds);
+    setState(() {
+      _intervalSeconds = seconds;
+      _resetBackgroundProgress();
+    });
     widget.thumbnailService.restartSource(widget.media.path);
+    _scheduleBackgroundProcessing();
+  }
+
+  int _storyboardItemCount() {
+    final durationMs = widget.durationMs < 0 ? 0 : widget.durationMs;
+    final intervalMs = _intervalSeconds * 1000;
+    return durationMs <= 0 ? 0 : ((durationMs - 1) ~/ intervalMs) + 1;
+  }
+
+  void _resetBackgroundProgress() {
+    _backgroundSerial += 1;
+    _processedMoments = 0;
+    _processingTotal = _storyboardItemCount();
+  }
+
+  void _scheduleBackgroundProcessing() {
+    final serial = _backgroundSerial;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || serial != _backgroundSerial) {
+        return;
+      }
+
+      unawaited(_processAllMoments(serial));
+    });
+  }
+
+  Future<void> _processAllMoments(int serial) async {
+    final sourcePath = widget.media.path;
+    final intervalMs = _intervalSeconds * 1000;
+    final total = _storyboardItemCount();
+
+    if (serial != _backgroundSerial || total != _processingTotal) {
+      return;
+    }
+
+    final work = <Future<void>>[];
+    for (var index = 0; index < total; index++) {
+      final clipMs = index * intervalMs;
+      final sourceFrame = widget.sourceFrameForPositionMs(clipMs);
+      work.add(
+        _processMoment(
+          serial: serial,
+          sourcePath: sourcePath,
+          sourceFrame: sourceFrame,
+        ),
+      );
+    }
+
+    await Future.wait(work);
+  }
+
+  Future<void> _processMoment({
+    required int serial,
+    required String sourcePath,
+    required int sourceFrame,
+  }) async {
+    try {
+      await widget.thumbnailService.thumbnailAtFrame(
+        sourcePath: sourcePath,
+        requestedFrame: sourceFrame,
+      );
+    } catch (_) {
+      // The tile itself will render the normal failed-thumbnail placeholder.
+      // Progress tracks completed work, not only successful images.
+    } finally {
+      if (!mounted || serial != _backgroundSerial) {
+        return;
+      }
+
+      setState(() {
+        if (_processedMoments < _processingTotal) {
+          _processedMoments += 1;
+        }
+      });
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     final durationMs = widget.durationMs < 0 ? 0 : widget.durationMs;
     final intervalMs = _intervalSeconds * 1000;
-    final itemCount = durationMs <= 0
-        ? 0
-        : ((durationMs - 1) ~/ intervalMs) + 1;
+    final itemCount = _storyboardItemCount();
 
     return ColoredBox(
       color: const Color(0xFF0D0D0D),
@@ -147,6 +239,7 @@ class _StoryboardViewState extends State<StoryboardView> {
               intervalSeconds: _intervalSeconds,
               choices: _intervalChoices,
               itemCount: itemCount,
+              processedMoments: _processedMoments,
               onChanged: _setInterval,
             ),
             const SizedBox(height: 12),
@@ -223,12 +316,14 @@ class _StoryboardToolbar extends StatelessWidget {
     required this.intervalSeconds,
     required this.choices,
     required this.itemCount,
+    required this.processedMoments,
     required this.onChanged,
   });
 
   final int intervalSeconds;
   final List<int> choices;
   final int itemCount;
+  final int processedMoments;
   final ValueChanged<int?> onChanged;
 
   @override
@@ -265,7 +360,10 @@ class _StoryboardToolbar extends StatelessWidget {
         ),
         const Spacer(),
         Text(
-          '$itemCount ${itemCount == 1 ? 'moment' : 'moments'}',
+          itemCount == 0
+              ? '0 moments'
+              : '$processedMoments of $itemCount '
+                    '${itemCount == 1 ? 'moment' : 'moments'} processed',
           style: const TextStyle(fontSize: 11, color: Colors.white38),
         ),
       ],
