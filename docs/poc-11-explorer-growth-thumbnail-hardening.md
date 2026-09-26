@@ -450,7 +450,7 @@ reproducible fixtures, but it is not an Explorer runtime dependency.
 
 # 11. Representative-frame selection
 
-Timed video now samples three positions:
+Timed video keeps the same three representative positions:
 
 ```text
 15%
@@ -458,13 +458,20 @@ Timed video now samples three positions:
 85%
 ```
 
-Three samples were chosen instead of an arbitrarily large sample set to keep
-cache-miss cost bounded on high-resolution or long-GOP media.
+but no longer decodes all three unconditionally.
 
-Candidate frames are decoded through MLT and scored using image information such
-as luma variance/contrast, with a penalty for near-black frames.
+Explorer now tries the 50% position first. If that frame is clearly useful by
+the existing luma/contrast score, it is accepted immediately. Only a dark,
+faded, or visually flat midpoint falls back to decoding and comparing the full
+15% / 50% / 85% set.
 
-The strongest candidate becomes the cached thumbnail.
+This preserves the representative-frame behavior for black leaders and slates
+while reducing the common uncached-video path from three scoring decodes to one
+before the final 480 × 270 thumbnail render.
+
+The fallback still scores candidate frames through MLT using image information
+such as luma variance/contrast, with a penalty for near-black frames. The
+strongest fallback candidate becomes the cached thumbnail.
 
 ## Regression fixture
 
@@ -597,6 +604,13 @@ Only after that test passed was the standalone release rebuilt and exercised
 against the folder that previously crashed.
 
 The release remained stable.
+
+A later Explorer throughput pass deliberately kept this serialization contract.
+Rather than reintroducing concurrent native thumbnail graphs, it reduced work
+inside each ordinary thumbnail request with the midpoint fast path described
+above. Ubuntu verification passed the native thumbnail smoke, 5 focused
+thumbnail tests, and the full 152-test Flutter suite; a large uncached directory
+also populated noticeably faster in manual use.
 
 ---
 
