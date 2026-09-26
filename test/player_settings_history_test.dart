@@ -34,9 +34,16 @@ void main() {
     );
     await redleaf.load();
 
+    navigation.selectWorkspace('local:alpha');
     for (final name in <String>['A', 'B', 'C', 'D', 'E']) {
       navigation.recordVisit('${root.path}/$name');
     }
+
+    navigation.selectWorkspace('local:beta');
+    navigation.recordVisit('${root.path}/Beta One');
+    navigation.recordVisit('${root.path}/Beta Two');
+
+    navigation.selectWorkspace('local:alpha');
     await navigation.save();
   });
 
@@ -108,6 +115,10 @@ void main() {
         openedPath,
         Directory('${root.path}/E').absolute.path,
       );
+
+      navigation.selectWorkspace('local:beta');
+      expect(navigation.recents.length, 2);
+      expect(navigation.locationHistory.length, 2);
     },
   );
 
@@ -145,5 +156,9 @@ void main() {
     expect(navigation.locationHistory, isEmpty);
     expect(navigation.recents.length, 3);
     expect(find.text('No folder history yet.'), findsOneWidget);
+
+    navigation.selectWorkspace('local:beta');
+    expect(navigation.locationHistory.length, 2);
+    expect(navigation.recents.length, 2);
   });
 }
