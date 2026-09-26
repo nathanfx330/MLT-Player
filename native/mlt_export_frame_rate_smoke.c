@@ -116,33 +116,38 @@ static int generate_overlay_fixture(
 }
 
 /*
- * Return 1 when the selected encoded output frame is predominantly magenta,
- * 0 when it is not, and -1 when the frame could not be sampled.
+ * Sample the area-averaged RGB value of one encoded output frame.
  *
- * Scaling the selected frame to 1x1 with area averaging makes this robust to
- * H.264 quantization while still strongly separating the full-frame magenta
- * overlay from the generated testsrc2 base movie.
+ * Keeping the raw sample available lets the frame-rate conform smoke explain
+ * boundary failures instead of reducing them immediately to a boolean. That is
+ * useful when comparing MLT releases because a base frame can otherwise look
+ * like a false-positive overlay to a coarse color threshold.
  */
-static int frame_is_magenta(
+static int sample_frame_rgb(
     const char *path,
-    int frame)
+    int frame,
+    int *red,
+    int *green,
+    int *blue)
 {
-    if (path == NULL || frame < 0) {
-        return -1;
+    if (path == NULL ||
+        frame < 0 ||
+        red == NULL ||
+        green == NULL ||
+        blue == NULL) {
+        return 0;
     }
 
     char *quoted_path = g_shell_quote(path);
     if (quoted_path == NULL) {
-        return -1;
+        return 0;
     }
 
     char *command = g_strdup_printf(
         "ffmpeg -hide_banner -loglevel error -i %s "
         "-vf \"select='eq(n\\,%d)',scale=1:1:flags=area,format=rgb24\" "
         "-frames:v 1 -fps_mode passthrough -f rawvideo - 2>/dev/null | "
-        "od -An -tu1 -N3 | "
-        "awk '{ if (NF < 3) exit 2; "
-        "exit !( $1 > 150 && $2 < 110 && $3 > 150 ) }'",
+        "od -An -tu1 -N3",
         quoted_path,
         frame
     );
@@ -150,19 +155,84 @@ static int frame_is_magenta(
     g_free(quoted_path);
 
     if (command == NULL) {
+        return 0;
+    }
+
+    FILE *pipe = popen(command, "r");
+    g_free(command);
+
+    if (pipe == NULL) {
+        return 0;
+    }
+
+    int sampled_red = 0;
+    int sampled_green = 0;
+    int sampled_blue = 0;
+    const int parsed =
+        fscanf(
+            pipe,
+            "%d %d %d",
+            &sampled_red,
+            &sampled_green,
+            &sampled_blue
+        );
+    const int status = pclose(pipe);
+
+    if (parsed != 3 ||
+        status == -1 ||
+        !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 0) {
+        return 0;
+    }
+
+    *red = sampled_red;
+    *green = sampled_green;
+    *blue = sampled_blue;
+    return 1;
+}
+
+/*
+ * Return 1 when the selected encoded output frame is predominantly magenta,
+ * 0 when it is not, and -1 when the frame could not be sampled.
+ */
+static int frame_is_magenta(
+    const char *path,
+    int frame)
+{
+    int red = 0;
+    int green = 0;
+    int blue = 0;
+
+    if (!sample_frame_rgb(path, frame, &red, &green, &blue)) {
         return -1;
     }
 
-    const int exit_code = command_exit_code(command);
-    g_free(command);
+    return red > 150 && green < 110 && blue > 150 ? 1 : 0;
+}
 
-    if (exit_code == 0) {
-        return 1;
+static void print_frame_rgb_probe(
+    const char *path,
+    int frame)
+{
+    int red = 0;
+    int green = 0;
+    int blue = 0;
+
+    if (!sample_frame_rgb(path, frame, &red, &green, &blue)) {
+        printf("    frame %d: RGB sample unavailable\n", frame);
+        return;
     }
-    if (exit_code == 1) {
-        return 0;
-    }
-    return -1;
+
+    printf(
+        "    frame %d: RGB %d %d %d -> %s\n",
+        frame,
+        red,
+        green,
+        blue,
+        red > 150 && green < 110 && blue > 150
+            ? "magenta"
+            : "not magenta"
+    );
 }
 
 static int run_simple_one_second_export(
@@ -332,6 +402,16 @@ static int run_layered_conform_export(
     const int frame120 = frame_is_magenta(layered_output_path, 120);
     const int frame156 = frame_is_magenta(layered_output_path, 156);
     const int frame157 = frame_is_magenta(layered_output_path, 157);
+
+    printf("  layered conform sampled RGB:\n");
+    print_frame_rgb_probe(layered_output_path, 22);
+    print_frame_rgb_probe(layered_output_path, 24);
+    print_frame_rgb_probe(layered_output_path, 80);
+    print_frame_rgb_probe(layered_output_path, 85);
+    print_frame_rgb_probe(layered_output_path, 118);
+    print_frame_rgb_probe(layered_output_path, 120);
+    print_frame_rgb_probe(layered_output_path, 156);
+    print_frame_rgb_probe(layered_output_path, 157);
 
     check(
         frame118 == 0,
