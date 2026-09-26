@@ -127,5 +127,47 @@ void main() {
         containsAll(<int>[...firstWindow, ...finalWindow]),
       );
     },
+  testWidgets(
+    'visible islands count immediately without derailing background progress',
+    (tester) async {
+      final service = _ControlledStoryboardThumbnailService();
+
+      await tester.pumpWidget(_storyboard(service));
+      await tester.pump();
+
+      expect(find.text('0 of 12 moments processed'), findsOneWidget);
+
+      await tester.drag(find.byType(GridView), const Offset(0, -1200));
+      await tester.pump();
+
+      final islandFrames = service.requestedFrames
+          .where((frame) => frame >= 80)
+          .toList()
+        ..sort();
+      expect(islandFrames, isNotEmpty);
+
+      final islandFrame = islandFrames.first;
+      service.completeFrames(<int>[islandFrame]);
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('1 of 12 moments processed'), findsOneWidget);
+
+      const firstWindow = <int>[0, 10, 20, 30, 40, 50, 60, 70];
+      service.completeFrames(firstWindow);
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('9 of 12 moments processed'), findsOneWidget);
+
+      const finalWindow = <int>[80, 90, 100, 110];
+      service.completeFrames(finalWindow);
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('12 of 12 moments processed'), findsOneWidget);
+    },
+  );
+
   );
 }
