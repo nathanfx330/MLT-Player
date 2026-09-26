@@ -134,6 +134,18 @@ void main() {
       );
     });
 
+    test('reopening current folder repopulates cleared history', () {
+      service.recordVisit('${root.path}/A');
+      service.clearLocationHistory();
+
+      service.recordVisit('${root.path}/A');
+
+      expect(
+        service.locationHistory,
+        <String>[Directory('${root.path}/A').absolute.path],
+      );
+    });
+
     test('clearing location history leaves recents and back stack intact', () {
       service.recordVisit('${root.path}/A');
       service.recordVisit('${root.path}/B');
