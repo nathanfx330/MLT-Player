@@ -162,6 +162,109 @@ void main() {
       );
     });
 
+    test('recents and long history are scoped by workspace', () {
+      service.selectWorkspace('local:alpha');
+      service.recordVisit('${root.path}/alpha-one');
+      service.recordVisit('${root.path}/alpha-two');
+
+      service.selectWorkspace('local:beta');
+      expect(service.recents, isEmpty);
+      expect(service.locationHistory, isEmpty);
+      expect(service.canGoBack, isFalse);
+
+      service.recordVisit('${root.path}/beta-one');
+
+      service.selectWorkspace('local:alpha');
+      expect(
+        service.recents,
+        <String>[
+          Directory('${root.path}/alpha-two').absolute.path,
+          Directory('${root.path}/alpha-one').absolute.path,
+        ],
+      );
+      expect(
+        service.locationHistory,
+        <String>[
+          Directory('${root.path}/alpha-two').absolute.path,
+          Directory('${root.path}/alpha-one').absolute.path,
+        ],
+      );
+
+      service.clearRecents();
+      service.clearLocationHistory();
+
+      service.selectWorkspace('local:beta');
+      expect(
+        service.recents,
+        <String>[Directory('${root.path}/beta-one').absolute.path],
+      );
+      expect(
+        service.locationHistory,
+        <String>[Directory('${root.path}/beta-one').absolute.path],
+      );
+    });
+
+    test('workspace-scoped navigation persists across service instances', () async {
+      service.selectWorkspace('local:alpha');
+      service.recordVisit('${root.path}/alpha');
+
+      service.selectWorkspace('redleaf:instance-beta');
+      service.recordVisit('${root.path}/beta');
+      await service.save();
+
+      final restored = ExplorerNavigationService(
+        configDirectory: config,
+        homePath: '${root.path}/home',
+        recentLimit: 3,
+        historyLimit: 6,
+      );
+      restored.selectWorkspace('local:alpha');
+      await restored.load();
+
+      expect(
+        restored.recents,
+        <String>[Directory('${root.path}/alpha').absolute.path],
+      );
+      expect(
+        restored.locationHistory,
+        <String>[Directory('${root.path}/alpha').absolute.path],
+      );
+
+      restored.selectWorkspace('redleaf:instance-beta');
+      expect(
+        restored.recents,
+        <String>[Directory('${root.path}/beta').absolute.path],
+      );
+      expect(
+        restored.locationHistory,
+        <String>[Directory('${root.path}/beta').absolute.path],
+      );
+    });
+
+    test('legacy global recents migrate into the first real workspace', () async {
+      await config.create(recursive: true);
+      await File('${config.path}/explorer_locations.json').writeAsString(
+        jsonEncode(<String, Object>{
+          'version': 1,
+          'favorites': <String>[],
+          'recents': <String>['${root.path}/Recent'],
+          'history': <String>['${root.path}/History'],
+        }),
+      );
+
+      await service.load();
+      service.selectWorkspace('local:alpha');
+
+      expect(
+        service.recents,
+        <String>[Directory('${root.path}/Recent').absolute.path],
+      );
+      expect(
+        service.locationHistory,
+        <String>[Directory('${root.path}/History').absolute.path],
+      );
+    });
+
     test('recent folders are unique, newest first, and capped', () {
       service.recordVisit('${root.path}/A');
       service.recordVisit('${root.path}/B');
