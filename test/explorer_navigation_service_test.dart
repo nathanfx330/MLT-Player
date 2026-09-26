@@ -19,6 +19,7 @@ void main() {
         configDirectory: config,
         homePath: '${root.path}/home',
         recentLimit: 3,
+        historyLimit: 6,
       );
     });
 
@@ -80,6 +81,72 @@ void main() {
           Directory('${root.path}/Two').absolute.path,
           Directory('${root.path}/One').absolute.path,
         ],
+      );
+    });
+
+    test('long location history persists independently of recents', () async {
+      for (final name in <String>['A', 'B', 'C', 'D', 'E']) {
+        service.recordVisit('${root.path}/$name');
+      }
+      await service.save();
+
+      final restored = ExplorerNavigationService(
+        configDirectory: config,
+        homePath: '${root.path}/home',
+        recentLimit: 3,
+        historyLimit: 6,
+      );
+      await restored.load();
+
+      expect(
+        restored.recents,
+        <String>[
+          Directory('${root.path}/E').absolute.path,
+          Directory('${root.path}/D').absolute.path,
+          Directory('${root.path}/C').absolute.path,
+        ],
+      );
+      expect(
+        restored.locationHistory,
+        <String>[
+          Directory('${root.path}/E').absolute.path,
+          Directory('${root.path}/D').absolute.path,
+          Directory('${root.path}/C').absolute.path,
+          Directory('${root.path}/B').absolute.path,
+          Directory('${root.path}/A').absolute.path,
+        ],
+      );
+    });
+
+    test('clearing recents leaves long history intact', () {
+      service.recordVisit('${root.path}/A');
+      service.recordVisit('${root.path}/B');
+
+      service.clearRecents();
+
+      expect(service.recents, isEmpty);
+      expect(
+        service.locationHistory,
+        <String>[
+          Directory('${root.path}/B').absolute.path,
+          Directory('${root.path}/A').absolute.path,
+        ],
+      );
+    });
+
+    test('clearing location history leaves recents and back stack intact', () {
+      service.recordVisit('${root.path}/A');
+      service.recordVisit('${root.path}/B');
+      service.recordVisit('${root.path}/C');
+
+      service.clearLocationHistory();
+
+      expect(service.locationHistory, isEmpty);
+      expect(service.recents, isNotEmpty);
+      expect(service.canGoBack, isTrue);
+      expect(
+        service.backPath,
+        Directory('${root.path}/B').absolute.path,
       );
     });
 
