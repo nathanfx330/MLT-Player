@@ -1,5 +1,32 @@
 # Changes
 
+## 2026-09-25 — Workspace-scoped Explorer Recent and History
+
+- Explorer now keeps two separate navigation recall surfaces: the short
+  sidebar Recent list and a longer persistent History available from Settings.
+- Recent and History are scoped by workspace identity for both Local and saved
+  Redleaf workspaces, so switching workspaces shows that workspace's own folder
+  recall state.
+- Settings can clear Recent without deleting History, and clear History without
+  affecting Recent, Favorites, or another workspace.
+- Opening a History entry returns Explorer directly to that folder.
+- Back/Forward remains session navigation and resets on workspace changes so one
+  workspace cannot leak navigation state into another.
+- Removed the full-path hover tooltip from Explorer Home, Favorite, and Recent
+  rows to keep the sidebar quieter for normal use and demos.
+- Existing global Recent/History state migrates into the first real workspace
+  selected after upgrade.
+- Added focused persistence, workspace-isolation, Settings, and legacy-migration
+  coverage.
+- Rocky verification: two workspaces maintained independent Recent and History
+  lists; clearing one workspace left the other intact; clearing Recent preserved
+  History; History navigation still opened the selected folder; sidebar path
+  hover tooltips were gone.
+- Local verification: 13 Explorer navigation tests passed, 2 Settings history
+  tests passed, and `flutter analyze` reported no issues.
+
+---
+
 ## 2026-09-25 — Bookmark transcript profiles
 
 - Bookmark thumbnails now open into a profile view with the large bookmarked

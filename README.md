@@ -133,8 +133,11 @@ it.
 - Representative-frame selection that scores candidates and skips black leader,
   slates, and fades instead of blindly grabbing one fixed offset
 - Persistent thumbnail cache with atomic publish and adjustable tile size
-- Filename filtering, sorting, navigation history, Home, Up, Back, Forward,
-  and saved favorite folders
+- Filename filtering, sorting, Home, Up, Back, Forward, and saved favorite
+  folders
+- Workspace-scoped Recent and longer History lists for Local and Redleaf
+  workspaces; Settings can clear the short Recent list without losing History,
+  or clear History independently for only the active workspace
 - Direct Open File and Open Folder workflows
 - Right-click media to reveal the exact source file in the desktop file manager
 - Compact Settings access from Explorer

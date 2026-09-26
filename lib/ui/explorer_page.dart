@@ -391,6 +391,13 @@ class _ExplorerPageState extends State<ExplorerPage> {
     final active = _workspaceProjectService.activeProject;
     _reportWorkspaceProject(active);
 
+    if (active != null) {
+      final changed = _navigationService.selectWorkspace(active.key);
+      if (changed && _navigationLoaded) {
+        unawaited(_persistNavigation());
+      }
+    }
+
     if (active != null && active.isLocal) {
       _reportLocalProject(active.localProjectId!);
       if (widget.active) {
@@ -440,6 +447,19 @@ class _ExplorerPageState extends State<ExplorerPage> {
     }
 
     setState(() => _navigationLoaded = true);
+  }
+
+  void _handleSettingsClosed() {
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {});
+    _focusNode.requestFocus();
+  }
+
+  void _openHistoryPath(String path) {
+    unawaited(_loadDirectory(path));
   }
 
   Future<void> _initializeViewPreferences() async {
@@ -493,6 +513,14 @@ class _ExplorerPageState extends State<ExplorerPage> {
 
     final activeWorkspaceProject = _workspaceProjectService.activeProject;
     _reportWorkspaceProject(activeWorkspaceProject);
+
+    if (activeWorkspaceProject != null) {
+      final changed =
+          _navigationService.selectWorkspace(activeWorkspaceProject.key);
+      if (changed && _navigationLoaded) {
+        unawaited(_persistNavigation());
+      }
+    }
 
     if (activeWorkspaceProject != null && activeWorkspaceProject.isLocal) {
       _reportLocalProject(activeWorkspaceProject.localProjectId!);
@@ -2219,6 +2247,9 @@ class _ExplorerPageState extends State<ExplorerPage> {
                 child: MltPlayerSettingsButton(
                   settings: widget.playerSettings!,
                   mltVersion: widget.version,
+                  explorerNavigation: _navigationService,
+                  onOpenHistoryPath: _openHistoryPath,
+                  onClosed: _handleSettingsClosed,
                 ),
               ),
           ],
@@ -2391,7 +2422,9 @@ class _ExplorerPageState extends State<ExplorerPage> {
                 child: MltPlayerSettingsButton(
                   settings: widget.playerSettings!,
                   mltVersion: widget.version,
-                  onClosed: _focusNode.requestFocus,
+                  explorerNavigation: _navigationService,
+                  onOpenHistoryPath: _openHistoryPath,
+                  onClosed: _handleSettingsClosed,
                 ),
               ),
             ],
@@ -2872,7 +2905,6 @@ class _ExplorerPageState extends State<ExplorerPage> {
           _ExplorerLocationRow(
             icon: Icons.home_outlined,
             label: 'Home',
-            path: _navigationService.homePath,
             selected: _sourceMode == _ExplorerSourceMode.directory &&
                 _directoryPath == _navigationService.homePath,
             onTap: () => unawaited(_goHome()),
@@ -2887,7 +2919,6 @@ class _ExplorerPageState extends State<ExplorerPage> {
               _ExplorerLocationRow(
                 icon: Icons.star_outline,
                 label: _locationLabel(path),
-                path: path,
                 selected: _sourceMode == _ExplorerSourceMode.directory &&
                     _directoryPath == path,
                 onTap: () => unawaited(_loadDirectory(path)),
@@ -2902,7 +2933,6 @@ class _ExplorerPageState extends State<ExplorerPage> {
               _ExplorerLocationRow(
                 icon: Icons.history,
                 label: _locationLabel(path),
-                path: path,
                 selected: _sourceMode == _ExplorerSourceMode.directory &&
                     _directoryPath == path,
                 onTap: () => unawaited(_loadDirectory(path)),
@@ -3385,55 +3415,46 @@ class _ExplorerLocationRow extends StatelessWidget {
   const _ExplorerLocationRow({
     required this.icon,
     required this.label,
-    required this.path,
     required this.selected,
     required this.onTap,
   });
 
   final IconData icon;
   final String label;
-  final String path;
   final bool selected;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    return Tooltip(
-      message: path,
-      child: Material(
-        color:
-            selected ? const Color(0x22E8A33D) : Colors.transparent,
+    return Material(
+      color: selected ? const Color(0x22E8A33D) : Colors.transparent,
+      borderRadius: BorderRadius.circular(6),
+      child: InkWell(
         borderRadius: BorderRadius.circular(6),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(6),
-          onTap: onTap,
-          child: Padding(
-            padding:
-                const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
-            child: Row(
-              children: [
-                Icon(
-                  icon,
-                  size: 16,
-                  color: selected
-                      ? const Color(0xFFE8A33D)
-                      : Colors.white38,
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    label,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 11,
-                      color:
-                          selected ? Colors.white70 : Colors.white54,
-                    ),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
+          child: Row(
+            children: [
+              Icon(
+                icon,
+                size: 16,
+                color:
+                    selected ? const Color(0xFFE8A33D) : Colors.white38,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: selected ? Colors.white70 : Colors.white54,
                   ),
                 ),
-              ],
-            ),
+              ),
+            ],
           ),
         ),
       ),
