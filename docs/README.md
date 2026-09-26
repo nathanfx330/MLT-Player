@@ -86,5 +86,12 @@ This guide stands on its own; it is not chapter one of the POC history.
    Windows-1252 handling, keyboard/focus ownership, file-chooser handoff
    debugging, CI compatibility, and the final stability rules.
 
+7. [Rocky MLT 7.40 Compatibility Journey](rocky-mlt-740-compatibility-journey.md)
+   — the cross-version verification pass that started as a thumbnail check and
+   uncovered three separate compatibility layers: a deprecated MLT API, private
+   runtime-library discovery, and an FFmpeg-dependent frame-sampling bug in the
+   conform smoke test. Includes the diagnostic wrong turns, pixel-level proof,
+   final native suite, and the rules worth carrying forward.
+
 Unless a document explicitly says otherwise, the implementation history here
 was developed against **MLT 7.22.0 on Linux**.
