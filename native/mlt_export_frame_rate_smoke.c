@@ -116,38 +116,33 @@ static int generate_overlay_fixture(
 }
 
 /*
- * Sample the area-averaged RGB value of one encoded output frame.
+ * Return 1 when the selected encoded output frame is predominantly magenta,
+ * 0 when it is not, and -1 when the frame could not be sampled.
  *
- * Keeping the raw sample available lets the frame-rate conform smoke explain
- * boundary failures instead of reducing them immediately to a boolean. That is
- * useful when comparing MLT releases because a base frame can otherwise look
- * like a false-positive overlay to a coarse color threshold.
+ * Keep this original boolean probe unchanged while the diagnostic below prints
+ * raw RGB values. That way the diagnostic cannot change the pass/fail behavior
+ * it is trying to explain.
  */
-static int sample_frame_rgb(
+static int frame_is_magenta(
     const char *path,
-    int frame,
-    int *red,
-    int *green,
-    int *blue)
+    int frame)
 {
-    if (path == NULL ||
-        frame < 0 ||
-        red == NULL ||
-        green == NULL ||
-        blue == NULL) {
-        return 0;
+    if (path == NULL || frame < 0) {
+        return -1;
     }
 
     char *quoted_path = g_shell_quote(path);
     if (quoted_path == NULL) {
-        return 0;
+        return -1;
     }
 
     char *command = g_strdup_printf(
         "ffmpeg -hide_banner -loglevel error -i %s "
         "-vf \"select='eq(n\\,%d)',scale=1:1:flags=area,format=rgb24\" "
         "-frames:v 1 -fps_mode passthrough -f rawvideo - 2>/dev/null | "
-        "od -An -tu1 -N3",
+        "od -An -tu1 -N3 | "
+        "awk '{ if (NF < 3) exit 2; "
+        "exit !( $1 > 150 && $2 < 110 && $3 > 150 ) }'",
         quoted_path,
         frame
     );
@@ -155,84 +150,65 @@ static int sample_frame_rgb(
     g_free(quoted_path);
 
     if (command == NULL) {
-        return 0;
-    }
-
-    FILE *pipe = popen(command, "r");
-    g_free(command);
-
-    if (pipe == NULL) {
-        return 0;
-    }
-
-    int sampled_red = 0;
-    int sampled_green = 0;
-    int sampled_blue = 0;
-    const int parsed =
-        fscanf(
-            pipe,
-            "%d %d %d",
-            &sampled_red,
-            &sampled_green,
-            &sampled_blue
-        );
-    const int status = pclose(pipe);
-
-    if (parsed != 3 ||
-        status == -1 ||
-        !WIFEXITED(status) ||
-        WEXITSTATUS(status) != 0) {
-        return 0;
-    }
-
-    *red = sampled_red;
-    *green = sampled_green;
-    *blue = sampled_blue;
-    return 1;
-}
-
-/*
- * Return 1 when the selected encoded output frame is predominantly magenta,
- * 0 when it is not, and -1 when the frame could not be sampled.
- */
-static int frame_is_magenta(
-    const char *path,
-    int frame)
-{
-    int red = 0;
-    int green = 0;
-    int blue = 0;
-
-    if (!sample_frame_rgb(path, frame, &red, &green, &blue)) {
         return -1;
     }
 
-    return red > 150 && green < 110 && blue > 150 ? 1 : 0;
+    const int exit_code = command_exit_code(command);
+    g_free(command);
+
+    if (exit_code == 0) {
+        return 1;
+    }
+    if (exit_code == 1) {
+        return 0;
+    }
+    return -1;
 }
 
+/*
+ * Print the same 1x1 area-averaged RGB sample directly to stdout. This is
+ * intentionally observation-only: it does not feed the smoke-test assertions.
+ */
 static void print_frame_rgb_probe(
     const char *path,
     int frame)
 {
-    int red = 0;
-    int green = 0;
-    int blue = 0;
-
-    if (!sample_frame_rgb(path, frame, &red, &green, &blue)) {
+    if (path == NULL || frame < 0) {
         printf("    frame %d: RGB sample unavailable\n", frame);
         return;
     }
 
-    printf(
-        "    frame %d: RGB %d %d %d -> %s\n",
+    char *quoted_path = g_shell_quote(path);
+    if (quoted_path == NULL) {
+        printf("    frame %d: RGB sample unavailable\n", frame);
+        return;
+    }
+
+    char *command = g_strdup_printf(
+        "printf '    frame %d: RGB '; "
+        "ffmpeg -hide_banner -loglevel error -i %s "
+        "-vf \"select='eq(n\\,%d)',scale=1:1:flags=area,format=rgb24\" "
+        "-frames:v 1 -fps_mode passthrough -f rawvideo - 2>/dev/null | "
+        "od -An -tu1 -N3",
         frame,
-        red,
-        green,
-        blue,
-        red > 150 && green < 110 && blue > 150
-            ? "magenta"
-            : "not magenta"
+        quoted_path,
+        frame
     );
+
+    g_free(quoted_path);
+
+    if (command == NULL) {
+        printf("    frame %d: RGB sample unavailable\n", frame);
+        return;
+    }
+
+    fflush(stdout);
+    const int exit_code = command_exit_code(command);
+    g_free(command);
+
+    if (exit_code != 0) {
+        printf("    frame %d: RGB probe command failed\n", frame);
+    }
 }
 
 static int run_simple_one_second_export(
