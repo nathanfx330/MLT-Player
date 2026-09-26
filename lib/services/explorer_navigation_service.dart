@@ -326,7 +326,7 @@ class ExplorerNavigationService {
   ) {
     return <String, List<String>>{
       for (final entry in source.entries)
-        if (entry.key != _defaultWorkspaceKey && entry.value.isNotEmpty)
+        if (entry.value.isNotEmpty)
           entry.key: List<String>.from(entry.value),
     };
   }
