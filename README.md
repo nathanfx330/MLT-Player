@@ -367,7 +367,8 @@ identity beyond the current path-based model is intentionally not claimed yet.
 - In and Out marking
 - Play Selection
 - Non-destructive Trim with full Undo and Redo
-- Storyboard view at 5, 10, 30, or 60 second intervals
+- Storyboard view at 5, 10, 30, or 60 second intervals, with continuous
+  whole-grid thumbnail backfill and live processed/total progress
 - Exact-frame Bookmarks with generated frame previews
 - Bookmark profiles with a large frame view and contextual SRT transcript cues;
   right-click any cue to save that bookmark's highlighted transcript line

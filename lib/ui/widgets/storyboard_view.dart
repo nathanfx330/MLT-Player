@@ -1,5 +1,6 @@
 // lib/ui/widgets/storyboard_view.dart
 
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -99,18 +100,29 @@ class _StoryboardViewState extends State<StoryboardView> {
   static const List<int> _intervalChoices = <int>[5, 10, 30, 60];
 
   int _intervalSeconds = 10;
+  int _backgroundSerial = 0;
+  final Set<int> _processedMomentIndexes = <int>{};
+  int _processingTotal = 0;
 
   @override
   void initState() {
     super.initState();
     widget.thumbnailService.beginSource(widget.media.path);
+    _resetBackgroundProgress();
+    _scheduleBackgroundProcessing();
   }
 
   @override
   void didUpdateWidget(covariant StoryboardView oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.media.path != widget.media.path) {
+
+    final sourceChanged = oldWidget.media.path != widget.media.path;
+    final durationChanged = oldWidget.durationMs != widget.durationMs;
+
+    if (sourceChanged || durationChanged) {
       widget.thumbnailService.beginSource(widget.media.path);
+      _resetBackgroundProgress();
+      _scheduleBackgroundProcessing();
     }
   }
 
@@ -124,17 +136,117 @@ class _StoryboardViewState extends State<StoryboardView> {
       return;
     }
 
-    setState(() => _intervalSeconds = seconds);
+    setState(() {
+      _intervalSeconds = seconds;
+      _resetBackgroundProgress();
+    });
     widget.thumbnailService.restartSource(widget.media.path);
+    _scheduleBackgroundProcessing();
+  }
+
+  int _storyboardItemCount() {
+    final durationMs = widget.durationMs < 0 ? 0 : widget.durationMs;
+    final intervalMs = _intervalSeconds * 1000;
+    return durationMs <= 0 ? 0 : ((durationMs - 1) ~/ intervalMs) + 1;
+  }
+
+  void _resetBackgroundProgress() {
+    _backgroundSerial += 1;
+    _processedMomentIndexes.clear();
+    _processingTotal = _storyboardItemCount();
+  }
+
+  void _markMomentProcessed(int serial, int momentIndex) {
+    if (!mounted ||
+        serial != _backgroundSerial ||
+        momentIndex < 0 ||
+        momentIndex >= _processingTotal ||
+        _processedMomentIndexes.contains(momentIndex)) {
+      return;
+    }
+
+    setState(() {
+      _processedMomentIndexes.add(momentIndex);
+    });
+  }
+
+  void _scheduleBackgroundProcessing() {
+    final serial = _backgroundSerial;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || serial != _backgroundSerial) {
+        return;
+      }
+
+      unawaited(_processAllMoments(serial));
+    });
+  }
+
+  Future<void> _processAllMoments(int serial) async {
+    final sourcePath = widget.media.path;
+    final intervalMs = _intervalSeconds * 1000;
+    final total = _storyboardItemCount();
+
+    if (serial != _backgroundSerial || total != _processingTotal) {
+      return;
+    }
+
+    // Keep only one small background window queued at a time. Visible tiles
+    // issue their own requests, so a user who scrolls ahead can still get those
+    // moments in front of the next background window instead of waiting behind
+    // the entire movie.
+    const backgroundWindow = 8;
+    for (var start = 0; start < total; start += backgroundWindow) {
+      if (!mounted || serial != _backgroundSerial) {
+        return;
+      }
+
+      final end = (start + backgroundWindow) < total
+          ? start + backgroundWindow
+          : total;
+      final work = <Future<void>>[];
+
+      for (var index = start; index < end; index++) {
+        final clipMs = index * intervalMs;
+        final sourceFrame = widget.sourceFrameForPositionMs(clipMs);
+        work.add(
+          _processMoment(
+            serial: serial,
+            momentIndex: index,
+            sourcePath: sourcePath,
+            sourceFrame: sourceFrame,
+          ),
+        );
+      }
+
+      await Future.wait(work);
+    }
+  }
+
+  Future<void> _processMoment({
+    required int serial,
+    required int momentIndex,
+    required String sourcePath,
+    required int sourceFrame,
+  }) async {
+    try {
+      await widget.thumbnailService.prefetchAtFrame(
+        sourcePath: sourcePath,
+        requestedFrame: sourceFrame,
+      );
+    } catch (_) {
+      // The tile itself will render the normal failed-thumbnail placeholder.
+      // Progress tracks completed work, not only successful images.
+    } finally {
+      _markMomentProcessed(serial, momentIndex);
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     final durationMs = widget.durationMs < 0 ? 0 : widget.durationMs;
     final intervalMs = _intervalSeconds * 1000;
-    final itemCount = durationMs <= 0
-        ? 0
-        : ((durationMs - 1) ~/ intervalMs) + 1;
+    final itemCount = _storyboardItemCount();
 
     return ColoredBox(
       color: const Color(0xFF0D0D0D),
@@ -147,6 +259,7 @@ class _StoryboardViewState extends State<StoryboardView> {
               intervalSeconds: _intervalSeconds,
               choices: _intervalChoices,
               itemCount: itemCount,
+              processedMoments: _processedMomentIndexes.length,
               onChanged: _setInterval,
             ),
             const SizedBox(height: 12),
@@ -180,16 +293,21 @@ class _StoryboardViewState extends State<StoryboardView> {
                           durationMs,
                         );
 
+                        final progressSerial = _backgroundSerial;
+
                         return _StoryboardTile(
                           key: ValueKey<String>(
                             '${widget.media.path}:$_intervalSeconds:$sourceFrame',
                           ),
+                          momentIndex: index,
                           sourcePath: widget.media.path,
                           sourceFrame: sourceFrame,
                           clipMs: clipMs,
                           selected: selected,
                           bookmarked: widget.bookmarkedFrames.contains(sourceFrame),
                           service: widget.thumbnailService,
+                          onProcessed: (momentIndex) =>
+                              _markMomentProcessed(progressSerial, momentIndex),
                           onTap: () => widget.onSeek(clipMs),
                           onDoubleTap: () => widget.onOpenVideo(clipMs),
                           onToggleBookmark: () =>
@@ -223,12 +341,14 @@ class _StoryboardToolbar extends StatelessWidget {
     required this.intervalSeconds,
     required this.choices,
     required this.itemCount,
+    required this.processedMoments,
     required this.onChanged,
   });
 
   final int intervalSeconds;
   final List<int> choices;
   final int itemCount;
+  final int processedMoments;
   final ValueChanged<int?> onChanged;
 
   @override
@@ -265,7 +385,10 @@ class _StoryboardToolbar extends StatelessWidget {
         ),
         const Spacer(),
         Text(
-          '$itemCount ${itemCount == 1 ? 'moment' : 'moments'}',
+          itemCount == 0
+              ? '0 moments'
+              : '$processedMoments of $itemCount '
+                    '${itemCount == 1 ? 'moment' : 'moments'} processed',
           style: const TextStyle(fontSize: 11, color: Colors.white38),
         ),
       ],
@@ -276,23 +399,27 @@ class _StoryboardToolbar extends StatelessWidget {
 class _StoryboardTile extends StatefulWidget {
   const _StoryboardTile({
     super.key,
+    required this.momentIndex,
     required this.sourcePath,
     required this.sourceFrame,
     required this.clipMs,
     required this.selected,
     required this.bookmarked,
     required this.service,
+    required this.onProcessed,
     required this.onTap,
     required this.onDoubleTap,
     required this.onToggleBookmark,
   });
 
+  final int momentIndex;
   final String sourcePath;
   final int sourceFrame;
   final int clipMs;
   final bool selected;
   final bool bookmarked;
   final StoryboardThumbnailService service;
+  final ValueChanged<int> onProcessed;
   final VoidCallback onTap;
   final VoidCallback onDoubleTap;
   final VoidCallback onToggleBookmark;
@@ -320,10 +447,17 @@ class _StoryboardTileState extends State<_StoryboardTile> {
     }
   }
 
-  Future<String?> _load() => widget.service.thumbnailAtFrame(
-    sourcePath: widget.sourcePath,
-    requestedFrame: widget.sourceFrame,
-  );
+  Future<String?> _load() {
+    final momentIndex = widget.momentIndex;
+    final onProcessed = widget.onProcessed;
+
+    return widget.service
+        .thumbnailAtFrame(
+          sourcePath: widget.sourcePath,
+          requestedFrame: widget.sourceFrame,
+        )
+        .whenComplete(() => onProcessed(momentIndex));
+  }
 
   @override
   Widget build(BuildContext context) {

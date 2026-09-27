@@ -97,6 +97,59 @@ source/interval changed?
 
 This is less dramatic than forcibly cancelling native work, but it is much easier to reason about.
 
+## 1.1 Continuous backfill and the thumbnail-island problem
+
+The first Storyboard implementation generated thumbnails only for tiles that
+Flutter actually built. Because the grid is lazy, sitting at the top of a long
+Storyboard eventually emptied the thumbnail queue even though later moments had
+never been generated.
+
+The follow-up behavior is deliberately different:
+
+```text
+open Storyboard
+      ↓
+visible / nearby tiles request foreground work
+      ↓
+background walker keeps requesting the remaining moments
+      ↓
+processed count converges on the full interval set
+```
+
+That exposed a second problem during manual testing. Rapidly scrolling to several
+distant places creates already-rendered thumbnail "islands." If all newly visible
+requests are treated as the only important work, those islands can keep stealing
+admission from the sequential fill and make the top-to-bottom backfill appear
+stuck.
+
+The service now keeps two Dart-side queues over the same serialized native MLT
+thumbnail lane:
+
+```text
+foreground: visible / scrolled-to moments
+background: sequential whole-Storyboard backfill
+```
+
+Foreground requests are favored so interaction stays responsive, but mixed
+batches guarantee background admission. If a background request becomes visible
+before it runs, it is promoted instead of duplicated.
+
+Progress is tracked by unique Storyboard moment index rather than by queue order.
+That means a moment rendered through a distant visible island is counted
+immediately, and the later sequential walk does not count it twice.
+
+This preserves the release-safety rule established earlier: native thumbnail
+decode is still serialized. The improvement is scheduling and accounting above
+that boundary, not new MLT concurrency.
+
+Rocky verification deliberately exercised the pathological case: scroll through
+several distant regions, return to the top, then stop interacting. The live
+processed/total count continued climbing and the sequential blank region kept
+filling through the scattered islands. Focused tests covered background
+generation, queue fairness, island progress, and Storyboard/Bookmarks ownership;
+the full Flutter suite passed 155 tests and `flutter analyze` reported no
+issues.
+
 ---
 
 # 2. A refactor that passed tests and still made the release worse

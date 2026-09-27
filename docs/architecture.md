@@ -447,6 +447,18 @@ one native thumbnail generation lane at a time
 This is intentionally conservative. Stable release behavior is more valuable
 than maximizing parallel thumbnail decode.
 
+Storyboard adds one more Dart-side scheduling rule on top of that single native
+lane. Visible/scrolled-to tiles enter a foreground queue while continuous
+whole-Storyboard backfill enters a background queue. Foreground requests are
+favored, but a mixed native batch reserves background admission so interactive
+thumbnail "islands" cannot starve sequential progress indefinitely. Duplicate
+requests still share the same in-flight result, and a background request is
+promoted if its tile becomes visible.
+
+Storyboard progress is counted by unique moment index rather than by queue
+position. A moment completed through foreground scrolling and the same moment
+later encountered by sequential backfill is therefore counted once.
+
 Still-image thumbnails explicitly prefer `pixbuf`, with `avformat` as fallback,
 so the browser does not accidentally select a Qt `qimage` path with unsuitable
 thread/application assumptions.

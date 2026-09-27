@@ -1,5 +1,35 @@
 # Changes
 
+## 2026-09-26 — Continuous Storyboard thumbnail backfill and progress
+
+- Storyboard now keeps generating exact-frame thumbnails for the full current
+  interval set even when the user stays at the top of the grid and never
+  scrolls.
+- The upper-right Storyboard status now reports live unique-moment progress,
+  such as `18 of 73 moments processed`, instead of only the total number of
+  moments.
+- Visible and newly scrolled-to tiles use a foreground request lane while the
+  sequential whole-Storyboard fill uses a background lane. Foreground work gets
+  priority, but mixed native batches reserve background admission so scattered
+  thumbnail "islands" cannot indefinitely starve the top-to-bottom fill.
+- A frame already queued for background work is promoted when it becomes
+  visible, and in-flight/cache deduplication remains intact.
+- Progress is tracked by Storyboard moment identity, so moments completed through
+  visible islands and moments completed through sequential backfill count once
+  and converge on the same final total.
+- Changing the 5 / 10 / 30 / 60 second interval restarts the active generation
+  session and progress total through the existing stale-generation invalidation
+  rules.
+- Native thumbnail decoding remains serialized through the existing process-wide
+  MLT thumbnail lane; this change only improves Dart-side admission/fairness.
+- Focused verification passed the background-generation, queue-fairness, and
+  Storyboard/Bookmarks ownership tests. The full Flutter suite passed 155 tests,
+  `flutter analyze` reported no issues, and a Rocky manual torture test with
+  repeated scrolling to create scattered thumbnail islands still completed the
+  sequential backfill normally.
+
+---
+
 ## 2026-09-26 — Rocky MLT 7.40 compatibility hardening
 
 - The Linux bridge now uses the supported `mlt_image_calculate_size()` API
