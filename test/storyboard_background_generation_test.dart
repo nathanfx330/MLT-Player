@@ -140,7 +140,11 @@ void main() {
       expect(find.text('0 of 12 moments processed'), findsOneWidget);
 
       await tester.drag(find.byType(GridView), const Offset(0, -1200));
-      await tester.pump();
+      // Storyboard tiles have a double-tap recognizer. A synthetic drag starts
+      // its short tap-tracking timer even though the gesture resolves as a
+      // scroll. Advance fake time past that recognizer timer so the widget test
+      // does not fail teardown with an unrelated pending-timer invariant.
+      await tester.pump(const Duration(milliseconds: 50));
 
       final islandFrames = service.requestedFrames
           .where((frame) => frame >= 80)
