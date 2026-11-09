@@ -201,14 +201,21 @@ An existing Redleaf instance is reopened rather than duplicated. You can also
 edit its MLT Player display name when reopening it. This is not provisioning
 a new Redleaf server or renaming a Redleaf database.
 
-**Redleaf Cloud Trash:** Settings lists the saved Redleaf projects and a
-separate Trash section. Moving a project to Trash hides it from the project
-switcher but keeps its identity, display name, Redleaf connection information
-and cached snapshot. Restoring brings back that same project. Signing in to
-a trashed instance does not restore it; the Settings import action offers
-**RESTORE AND IMPORT REDLEAF CLOUD PROJECT** instead. A project name already
-used by another Redleaf project, including one in Trash, is rejected with an
-explanation. Trash is reversible and never deletes the Redleaf source.
+**Redleaf project options:** the same three-dot menu sits beside the
+project dropdown in both local and Redleaf Explorer views. For a Redleaf
+project, it provides **New Project**, **Rename Project**, **Move to Trash**,
+and **Redleaf Trash**. In a local project, it keeps the existing local options
+and adds **Redleaf Trash** to make restoration accessible even when a trashed
+Redleaf project is no longer selectable. The Trash dialog restores the
+original project record without modifying its source database or snapshot.
+Settings remains the place to sign in and explicitly import a Redleaf server,
+not to manage projects.
+
+Signing in to a trashed instance does not silently restore it; the Settings
+import action offers **RESTORE AND IMPORT REDLEAF CLOUD PROJECT** instead.
+A project name already used by another Redleaf project, including one in
+Trash, is rejected with an explanation. Trash is reversible and never deletes
+the Redleaf source.
 
 Redleaf is a first-class **workspace-project source**, not a separate top-level
 application tab and not a fake Local Project.
