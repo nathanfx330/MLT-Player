@@ -1260,92 +1260,121 @@ class _RedleafPageState extends State<RedleafPage> {
   }
 
   Widget _buildSearchRow(BuildContext context) {
-    return Container(
-      height: 52,
-      color: const Color(0xFF121212),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-      child: Row(
-        children: [
-          SizedBox(
-            width: 360,
-            child: TextField(
-              controller: _searchController,
-              style: const TextStyle(fontSize: 12),
-              decoration: InputDecoration(
-                isDense: true,
-                hintText: 'Filter SRTs by filename, path, or doc ID…',
-                hintStyle: const TextStyle(
-                  fontSize: 11,
-                  color: Colors.white30,
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final compact = constraints.maxWidth < 900;
+        final tight = constraints.maxWidth < 560;
+        return Container(
+          height: 52,
+          color: const Color(0xFF121212),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+          child: Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _searchController,
+                  style: const TextStyle(fontSize: 12),
+                  decoration: InputDecoration(
+                    isDense: true,
+                    hintText: 'Filter SRTs by filename, path, or doc ID…',
+                    hintStyle: const TextStyle(
+                      fontSize: 11,
+                      color: Colors.white30,
+                    ),
+                    prefixIcon: const Icon(
+                      Icons.search,
+                      size: 17,
+                    ),
+                    suffixIcon: _query.isEmpty
+                        ? null
+                        : IconButton(
+                            tooltip: 'Clear filter',
+                            onPressed: _searchController.clear,
+                            icon: const Icon(Icons.close, size: 16),
+                          ),
+                    border: const OutlineInputBorder(),
+                    contentPadding: const EdgeInsets.symmetric(vertical: 9),
+                  ),
                 ),
-                prefixIcon: const Icon(
-                  Icons.search,
-                  size: 17,
+              ),
+              if (!compact) ...[
+                const SizedBox(width: 12),
+                SizedBox(
+                  width: 210,
+                  child: Text(
+                    _catalogMembershipLoading
+                        ? 'Loading ${_selectedCatalog?.name ?? 'catalog'}…'
+                        : _selectedCatalog != null
+                            ? '${_filteredDocuments.length} SRTs in ${_selectedCatalog!.name}'
+                            : _query.isEmpty
+                                ? '${_discovery.documentCount} indexed SRTs'
+                                : '${_filteredDocuments.length} of ${_discovery.documentCount} SRTs',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 10.5,
+                      color: Colors.white38,
+                    ),
+                  ),
                 ),
-                suffixIcon: _query.isEmpty
-                    ? null
-                    : IconButton(
-                        tooltip: 'Clear filter',
-                        onPressed: _searchController.clear,
-                        icon: const Icon(Icons.close, size: 16),
+              ],
+              if (_thumbnailMode && !tight) ...[
+                const SizedBox(width: 8),
+                SizedBox(
+                  width: 120,
+                  child: Slider(
+                    key: const ValueKey('redleaf-thumbnail-size'),
+                    min: ExplorerViewPreferencesService.minDensityIndex
+                        .toDouble(),
+                    max: ExplorerViewPreferencesService.maxDensityIndex
+                        .toDouble(),
+                    divisions:
+                        ExplorerViewPreferencesService.maxDensityIndex -
+                            ExplorerViewPreferencesService.minDensityIndex,
+                    value: _thumbnailPrefs.densityIndex.toDouble(),
+                    label: _thumbnailPrefs.densityLabel,
+                    onChanged: _changeThumbnailDensity,
+                  ),
+                ),
+              ],
+              const SizedBox(width: 8),
+              Tooltip(
+                message: _thumbnailMode
+                    ? 'Show SRT table'
+                    : 'Show linked video thumbnails',
+                child: tight
+                    ? IconButton(
+                        key: const ValueKey('redleaf-view-toggle'),
+                        onPressed: () => setState(
+                          () => _thumbnailMode = !_thumbnailMode,
+                        ),
+                        icon: Icon(
+                          _thumbnailMode
+                              ? Icons.view_list_outlined
+                              : Icons.grid_view,
+                        ),
+                      )
+                    : OutlinedButton.icon(
+                        key: const ValueKey('redleaf-view-toggle'),
+                        onPressed: () => setState(
+                          () => _thumbnailMode = !_thumbnailMode,
+                        ),
+                        icon: Icon(
+                          _thumbnailMode
+                              ? Icons.view_list_outlined
+                              : Icons.grid_view,
+                          size: 17,
+                        ),
+                        label: Text(
+                          _thumbnailMode ? 'SRT TABLE' : 'THUMBNAILS',
+                          style: const TextStyle(fontSize: 10),
+                        ),
                       ),
-                border: const OutlineInputBorder(),
-                contentPadding: const EdgeInsets.symmetric(vertical: 9),
               ),
-            ),
+            ],
           ),
-          const SizedBox(width: 12),
-          Text(
-            _catalogMembershipLoading
-                ? 'Loading ${_selectedCatalog?.name ?? 'catalog'}…'
-                : _selectedCatalog != null
-                    ? '${_filteredDocuments.length} SRTs in ${_selectedCatalog!.name}'
-                    : _query.isEmpty
-                        ? '${_discovery.documentCount} indexed SRTs'
-                        : '${_filteredDocuments.length} of ${_discovery.documentCount} SRTs',
-            style: const TextStyle(
-              fontSize: 10.5,
-              color: Colors.white38,
-            ),
-          ),
-          const Spacer(),
-          if (_thumbnailMode) ...[
-            SizedBox(
-              width: 130,
-              child: Slider(
-                key: const ValueKey('redleaf-thumbnail-size'),
-                min: ExplorerViewPreferencesService.minDensityIndex.toDouble(),
-                max: ExplorerViewPreferencesService.maxDensityIndex.toDouble(),
-                divisions: ExplorerViewPreferencesService.maxDensityIndex -
-                    ExplorerViewPreferencesService.minDensityIndex,
-                value: _thumbnailPrefs.densityIndex.toDouble(),
-                label: _thumbnailPrefs.densityLabel,
-                onChanged: _changeThumbnailDensity,
-              ),
-            ),
-            const SizedBox(width: 6),
-          ],
-          Tooltip(
-            message: _thumbnailMode
-                ? 'Show SRT table'
-                : 'Show linked video thumbnails',
-            child: OutlinedButton.icon(
-              key: const ValueKey('redleaf-view-toggle'),
-              onPressed: () => setState(
-                () => _thumbnailMode = !_thumbnailMode,
-              ),
-              icon: Icon(
-                _thumbnailMode ? Icons.view_list_outlined : Icons.grid_view,
-                size: 17,
-              ),
-              label: Text(
-                _thumbnailMode ? 'SRT TABLE' : 'THUMBNAILS',
-                style: const TextStyle(fontSize: 10),
-              ),
-            ),
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 
