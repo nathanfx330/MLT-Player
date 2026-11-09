@@ -220,11 +220,17 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
     });
   }
 
-  Future<void> _importConnectedRedleafProject() async {
+  Future<void> _importConnectedRedleafProject(
+    String displayName,
+    bool restoreFromTrash,
+  ) async {
     if (!_workspaceProjectService.loaded) {
       await _workspaceProjectService.load();
     }
-    await _workspaceProjectService.importConnectedRedleafProject();
+    await _workspaceProjectService.importConnectedRedleafProject(
+      displayName: displayName,
+      restoreFromTrash: restoreFromTrash,
+    );
     if (!mounted) return;
 
     setState(() {
@@ -392,6 +398,7 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
           initialPath: _playerPath,
           redleafHandoff: _redleafPlayerHandoff,
           onImportConnectedRedleaf: _importConnectedRedleafProject,
+          workspaceProjects: _workspaceProjectService,
           openRequestSerial: _playerOpenRequest,
           onBack: _returnToExplorer,
         ),
@@ -918,6 +925,7 @@ class PlayerPage extends StatefulWidget {
     this.initialPath,
     this.redleafHandoff,
     this.onImportConnectedRedleaf,
+    this.workspaceProjects,
     this.openRequestSerial = 0,
     this.onBack,
   });
@@ -931,7 +939,8 @@ class PlayerPage extends StatefulWidget {
   final String? startupError;
   final String? initialPath;
   final RedleafPlayerHandoff? redleafHandoff;
-  final Future<void> Function()? onImportConnectedRedleaf;
+  final Future<void> Function(String, bool)? onImportConnectedRedleaf;
+  final WorkspaceProjectService? workspaceProjects;
   final int openRequestSerial;
   final VoidCallback? onBack;
 
@@ -2834,12 +2843,13 @@ class _PlayerPageState extends State<PlayerPage>
                 child: MltPlayerSettingsButton(
                   settings: widget.playerSettings,
                   mltVersion: widget.version,
+                  workspaceProjects: widget.workspaceProjects,
                   onImportConnectedRedleaf: widget.onImportConnectedRedleaf == null
                       ? null
-                      : () async {
+                      : (name, restore) async {
                           if (_engine.playing) _engine.pausePlayback();
                           _storyboardThumbnailService.cancelPending();
-                          await widget.onImportConnectedRedleaf!();
+                          await widget.onImportConnectedRedleaf!(name, restore);
                         },
                   onClosed: _keyboardFocus.requestFocus,
                 ),
