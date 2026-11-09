@@ -457,25 +457,40 @@ The current integration expects Redleaf support for:
 Redleaf itself remains responsible for its database, filesystem discovery,
 `.rlink` resolution, and relationship writes.
 
-## Open a saved Redleaf project from Redleaf Hub
+## Open a Redleaf project from Redleaf Hub
 
-The Linux executable accepts an optional Redleaf workspace identity:
+**Recommended: launch directly from the Redleaf project folder**, which is
+already known by Redleaf Hub. No project instance ID or running Flask server
+is needed for an initialized database.
+
+```bash
+./build/linux/x64/release/bundle/mlt_player --redleaf-project-path "/path/to/Redleaf Project"
+```
+
+MLT Player reads the existing `instance_id` from that folder's
+`knowledge_base.db` using Python 3's standard SQLite library in read-only
+mode. It automatically registers the identity in its local MLT Player project
+list if needed, selects the matching workspace, and opens the **PROJECT** tab.
+Existing saved MLT display names, URLs, and cached snapshots are preserved.
+
+The original ID-based launch remains supported, for users who already have a
+saved MLT Player workspace:
 
 ```bash
 ./build/linux/x64/release/bundle/mlt_player --redleaf-project <instance_id>
 ```
 
-The option also accepts the namespaced `redleaf:<instance_id>` key and
-`--redleaf-project=<instance_id>` syntax. MLT Player loads its saved registry,
-selects the exact Redleaf workspace, and opens the **PROJECT** tab. Launching
-normally without this option remains unchanged.
+Both flags also accept `--option=value` syntax. Normal launches without a
+project request are unchanged.
 
-This is a local process launch, not an HTTP API or a way to redirect an
-already running MLT Player window. The instance must already be saved in MLT
-Player's registry, normally by signing into that Redleaf instance once.
-An unknown instance displays an error rather than silently opening another
-Redleaf project. Launch does not sign in, synchronize, or move any media.
-Offline snapshot access and explicit `SYNC NOW` behavior remain unchanged.
+The selected Redleaf server does not have to be running. A previously synced
+project can display its cached snapshot offline. A newly registered project
+without a snapshot will have an empty archive view until it reconnects and the
+user explicitly chooses `SYNC NOW`. If the database has never been initialized
+and has no `instance_id`, MLT Player reports that clearly rather than
+manufacturing one. Launching does not sign in, sync, start a server, or move
+media. This is a local process launch, not an HTTP API or a command to an
+already running MLT Player window.
 
 ## Build and run
 
