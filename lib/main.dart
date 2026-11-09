@@ -11,6 +11,7 @@ import 'package:flutter/services.dart';
 import 'models/media_info.dart';
 import 'models/redleaf_player_handoff.dart';
 import 'models/workspace_project.dart';
+import 'services/startup_project_request.dart';
 import 'services/project_catalog_service.dart';
 import 'services/project_media_metadata_service.dart';
 import 'services/host_channel.dart';
@@ -35,8 +36,9 @@ import 'ui/widgets/subtitle_overlay.dart';
 // Application
 // ---------------------------------------------------------------------------
 
-void main() {
+void main(List<String> arguments) {
   WidgetsFlutterBinding.ensureInitialized();
+  final startupProjectRequest = StartupProjectRequest.parse(arguments);
 
   final bridge = MltBridge();
   final initialized = bridge.initialize();
@@ -47,6 +49,7 @@ void main() {
       initialized: initialized,
       version: bridge.version,
       startupError: initialized ? null : bridge.lastError,
+      startupProjectRequest: startupProjectRequest,
     ),
   );
 }
@@ -58,12 +61,14 @@ class MltPlayerApp extends StatefulWidget {
     required this.initialized,
     required this.version,
     this.startupError,
+    this.startupProjectRequest,
   });
 
   final MltBridge bridge;
   final bool initialized;
   final String version;
   final String? startupError;
+  final StartupProjectRequest? startupProjectRequest;
 
   @override
   State<MltPlayerApp> createState() => _MltPlayerAppState();
@@ -111,6 +116,7 @@ class _MltPlayerAppState extends State<MltPlayerApp> {
         version: widget.version,
         startupError: widget.startupError,
         playerSettings: _playerSettings,
+        startupProjectRequest: widget.startupProjectRequest,
       ),
     );
   }
@@ -123,6 +129,7 @@ class _MltExplorerShell extends StatefulWidget {
     required this.version,
     required this.playerSettings,
     this.startupError,
+    this.startupProjectRequest,
   });
 
   final MltBridge bridge;
@@ -130,6 +137,7 @@ class _MltExplorerShell extends StatefulWidget {
   final String version;
   final PlayerSettingsService playerSettings;
   final String? startupError;
+  final StartupProjectRequest? startupProjectRequest;
 
   @override
   State<_MltExplorerShell> createState() => _MltExplorerShellState();
@@ -225,6 +233,11 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
     setState(() => _workspaceSection = section);
   }
 
+  void _showStartupRedleafProject() {
+    if (!mounted) return;
+    setState(() => _workspaceSection = _WorkspaceSection.project);
+  }
+
   Future<void> _renameActiveRedleafProject(String name) async {
     final current = _activeWorkspaceProject;
     final instanceId = current?.redleafInstanceId;
@@ -314,6 +327,8 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
                     projectMediaMetadataService:
                         _projectMediaMetadataService,
                     workspaceProjectService: _workspaceProjectService,
+                    startupProjectRequest: widget.startupProjectRequest,
+                    onStartupRedleafSelected: _showStartupRedleafProject,
                     playerSettings: widget.playerSettings,
                     projectViewRequest: _explorerProjectViewRequest,
                     onActiveProjectChanged: _setActiveProject,
