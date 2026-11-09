@@ -103,6 +103,45 @@ Startup does not authenticate, refresh the archive, start Flask, or write
 Redleaf's database. The command launches a new process; it is not IPC to
 an existing MLT Player window.
 
+### Hub launcher: cached project or authenticated onboarding
+
+The compiled Redleaf Hub launcher uses this separate request:
+
+```text
+--redleaf-hub-project-path "/absolute/project/folder"
+--redleaf-hub-server-url http://127.0.0.1:5000
+```
+
+MLT Player resolves the local database's `instance_id` read-only, then uses
+`RedleafHubLaunchService.inspect` to determine the correct path. This is
+**not** the same as the existing offline `--redleaf-project-path` mode,
+which deliberately auto-registers a local database without Flask.
+
+The Hub launch is explicitly classified by identity and snapshot, not by
+folder name, URL, or login session:
+
+1. **Registered, not trashed, valid cached snapshot:** select that saved
+   Redleaf workspace and show the cached Redleaf Explorer immediately. No
+   password and no automatic `SYNC NOW`.
+2. **New or registered without a valid cached snapshot:** open a modal in
+   MLT Player for a local project display name, server URL, Redleaf username,
+   and password. It calls the existing `RedleafConnectionService.signIn`,
+   verifies the authenticated server's instance ID equals the local database
+   instance ID, then calls the existing explicit connected-import callback.
+   The callback persists the project and requests the established sync path
+   to populate SRT documents, catalogs, and memberships.
+3. **Registered in Trash:** never automatically select or recreate it. Offer
+   explicit restore. A valid cached snapshot can be restored without signing
+   in; for a missing snapshot the user must authenticate before restoring
+   and importing.
+
+The server URL from Hub is a convenience hint, not proof of identity. The
+Hub's port-5000 TCP check does not prove which database is running; a wrong
+server is disconnected and rejected before any registry import. Neither
+password nor session cookie is passed in the process arguments or persisted.
+The dialog does not accept empty project names or credentials when needed.
+Canceling leaves the registry untouched. Older startup flags are unchanged.
+
 ### Create New Redleaf Cloud Project from Settings
 
 Signing in identifies a Redleaf instance and authenticates the session, but
