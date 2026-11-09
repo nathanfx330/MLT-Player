@@ -32,6 +32,7 @@ import '../services/redleaf_shared_credential_vault.dart';
 import 'redleaf_page.dart';
 import 'widgets/catalog_child_tile.dart';
 import 'widgets/explorer_media_card.dart';
+import 'widgets/explorer_media_thumbnail.dart';
 import 'widgets/player_settings_button.dart';
 import 'widgets/redleaf_hub_onboarding_dialog.dart';
 import 'widgets/text_prompt_dialog.dart';
