@@ -194,6 +194,136 @@ class _MltPlayerSettingsDialogState extends State<_MltPlayerSettingsDialog> {
     }
   }
 
+  Future<void> _moveToTrash(RedleafProjectRecord record) async {
+    final workspace = widget.workspaceProjects;
+    if (workspace == null) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Move Redleaf project to Trash?'),
+        content: Text(
+          'Move "${record.name}" to MLT Player Trash? '
+          'Its Redleaf database, server, and cached transcripts will not '
+          'be deleted. You can restore it later.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('CANCEL'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('MOVE TO TRASH'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    try {
+      await workspace.trashRedleafProject(record.instanceId);
+      if (mounted) setState(() => _projectActionError = null);
+    } catch (error) {
+      if (mounted) setState(() => _projectActionError = error.toString());
+    }
+  }
+
+  Future<void> _restoreFromTrash(RedleafProjectRecord record) async {
+    final workspace = widget.workspaceProjects;
+    if (workspace == null) return;
+
+    try {
+      await workspace.restoreRedleafProject(record.instanceId);
+      if (mounted) setState(() => _projectActionError = null);
+    } catch (error) {
+      if (mounted) setState(() => _projectActionError = error.toString());
+    }
+  }
+
+  Widget _buildCloudProjects() {
+    final workspace = widget.workspaceProjects;
+    if (workspace == null || !workspace.loaded) {
+      return const SizedBox.shrink();
+    }
+    final active = workspace.savedRedleafProjects;
+    final trash = workspace.trashedRedleafProjects;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SizedBox(height: 16),
+        const _SectionLabel('SAVED REDLEAF CLOUD PROJECTS'),
+        const SizedBox(height: 5),
+        if (active.isEmpty)
+          const Text(
+            'No saved Redleaf projects.',
+            style: TextStyle(fontSize: 12, color: Colors.white54),
+          ),
+        for (final record in active)
+          ListTile(
+            dense: true,
+            contentPadding: const EdgeInsets.symmetric(horizontal: 0),
+            leading: const Icon(Icons.cloud_outlined, size: 19),
+            title: Text(
+              record.name,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            subtitle: Text(
+              record.serverUrl,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            trailing: IconButton(
+              tooltip: 'Move ${record.name} to Trash',
+              icon: const Icon(Icons.delete_outline),
+              onPressed: () => _moveToTrash(record),
+            ),
+          ),
+        const SizedBox(height: 10),
+        _SectionLabel('TRASH (${trash.length})'),
+        const SizedBox(height: 5),
+        if (trash.isEmpty)
+          const Text(
+            'Trash is empty.',
+            style: TextStyle(fontSize: 12, color: Colors.white54),
+          ),
+        for (final record in trash)
+          ListTile(
+            dense: true,
+            contentPadding: const EdgeInsets.symmetric(horizontal: 0),
+            leading: const Icon(Icons.delete_outline, size: 19),
+            title: Text(
+              record.name,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            subtitle: const Text(
+              'Hidden from the project switcher. Cached files kept.',
+            ),
+            trailing: TextButton(
+              onPressed: () => _restoreFromTrash(record),
+              child: const Text('RESTORE'),
+            ),
+          ),
+        if (_projectActionError != null) ...[
+          const SizedBox(height: 6),
+          Text(
+            _projectActionError!,
+            style: const TextStyle(color: Colors.redAccent, fontSize: 12),
+          ),
+        ],
+        const SizedBox(height: 6),
+        const Text(
+          'Trash only hides projects in MLT Player. It never deletes a '
+          'Redleaf server, database, or local snapshot.',
+          style: TextStyle(fontSize: 11, color: Colors.white54),
+        ),
+      ],
+    );
+  }
+
   void _disconnect() {
     widget.redleaf.disconnect();
     _passwordController.clear();
@@ -540,9 +670,8 @@ class _MltPlayerSettingsDialogState extends State<_MltPlayerSettingsDialog> {
           const _SectionLabel('REDLEAF CLOUD PROJECT'),
           const SizedBox(height: 6),
           const Text(
-            'Add this connected Redleaf database to your MLT Player projects '
-            'and import its transcript catalog now. An existing project is '
-            'reused. This does not create a new Redleaf server.',
+            'Name your project in MLT Player before importing. '
+            'This does not rename its Redleaf database.',
             style: TextStyle(
               fontSize: 12,
               height: 1.45,
@@ -550,6 +679,26 @@ class _MltPlayerSettingsDialogState extends State<_MltPlayerSettingsDialog> {
             ),
           ),
           const SizedBox(height: 10),
+          TextField(
+            controller: _cloudProjectNameController,
+            enabled: !_importingRedleaf,
+            maxLength: 120,
+            decoration: const InputDecoration(
+              isDense: true,
+              labelText: 'MLT Player project name',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          if (widget.workspaceProjects?.connectedRedleafRecord?.isTrashed == true)
+            const Padding(
+              padding: EdgeInsets.only(bottom: 8),
+              child: Text(
+                'This Redleaf database is in Trash. '
+                'Restore its original workspace instead of creating a duplicate.',
+                style: TextStyle(fontSize: 12, color: Colors.amberAccent),
+              ),
+            ),
+          const SizedBox(height: 6),
           FilledButton.icon(
             onPressed: _importingRedleaf ? null : _importConnectedRedleaf,
             icon: _importingRedleaf
@@ -561,7 +710,11 @@ class _MltPlayerSettingsDialogState extends State<_MltPlayerSettingsDialog> {
                 : const Icon(Icons.cloud_download_outlined, size: 18),
             label: Text(_importingRedleaf
                 ? 'OPENING REDLEAF PROJECT…'
-                : 'CREATE NEW REDLEAF CLOUD PROJECT'),
+                : widget.workspaceProjects?.connectedRedleafRecord?.isTrashed == true
+                    ? 'RESTORE AND IMPORT REDLEAF CLOUD PROJECT'
+                    : widget.workspaceProjects?.connectedRedleafRecord != null
+                        ? 'OPEN AND SYNC REDLEAF CLOUD PROJECT'
+                        : 'CREATE NEW REDLEAF CLOUD PROJECT'),
           ),
           if (_importError != null) ...[
             const SizedBox(height: 8),
@@ -571,6 +724,7 @@ class _MltPlayerSettingsDialogState extends State<_MltPlayerSettingsDialog> {
             ),
           ],
         ],
+        _buildCloudProjects(),
       ],
     );
   }
