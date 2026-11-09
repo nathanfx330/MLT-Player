@@ -66,10 +66,16 @@ jobs:
         run: |
           flutter config --enable-linux-desktop
           flutter precache --linux
-          flutter pub get
+          flutter pub get --enforce-lockfile
           # A real Linux build is required on a clean runner to generate
           # linux/flutter/ephemeral, which tools/smoke.sh links against.
           flutter build linux --debug --no-pub
+
+      - name: Enforce committed dependency lock
+        run: git diff --exit-code -- pubspec.lock
+
+      - name: Compare cross-repository credential vault
+        run: bash tool/check_shared_vault.sh nathanfx330/Redleaf-Hub
 
       - name: Analyze Dart
         run: flutter analyze
