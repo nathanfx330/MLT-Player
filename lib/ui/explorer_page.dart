@@ -28,6 +28,7 @@ import '../services/workspace_project_service.dart';
 import '../services/startup_project_request.dart';
 import '../services/redleaf_connection_service.dart';
 import '../services/redleaf_hub_launch_service.dart';
+import '../services/redleaf_shared_credential_vault.dart';
 import 'redleaf_page.dart';
 import 'widgets/catalog_child_tile.dart';
 import 'widgets/player_settings_button.dart';
@@ -495,6 +496,66 @@ class _ExplorerPageState extends State<ExplorerPage> {
     });
   }
 
+  /// A cached project opens immediately. Authentication is optional for
+  /// viewing its snapshot, but a saved Hub login can connect live Redleaf
+  /// functions in the same launch, with no password prompt or forced sync.
+  Future<void> _connectSavedHubLogin({
+    required String instanceId,
+    required String serverUrl,
+  }) async {
+    try {
+      final saved = await RedleafSharedCredentialVault().read(instanceId);
+      if (saved == null || !mounted) return;
+
+      // Never send a stored password to a different origin supplied through
+      // a launch argument. The instance ID must also match after login.
+      final target = RedleafSharedCredentialVault.normalizeServerUrl(
+        serverUrl,
+      );
+      if (target != saved.serverUrl) return;
+
+      final connection = RedleafConnectionService.instance;
+      await connection.load();
+      if (!mounted) return;
+      if (connection.isConnected &&
+          connection.instanceId == instanceId &&
+          connection.serverUrl == target) {
+        return;
+      }
+      final signedIn = await connection.signIn(
+        serverUrl: target,
+        username: saved.username,
+        password: saved.password,
+      );
+      if (!mounted) return;
+      if (!signedIn) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'The saved Redleaf login was rejected. Update it in '
+              'Redleaf Hub or sign in through MLT Player Settings.',
+            ),
+          ),
+        );
+        return;
+      }
+      if (connection.instanceId != instanceId) {
+        connection.disconnect();
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'The running Redleaf server belongs to another database. '
+              'The saved project remains available offline.',
+            ),
+          ),
+        );
+      }
+    } catch (_) {
+      // A locked or unavailable keyring must never block cached projects.
+      // Credentials can still be entered through Settings.
+    }
+  }
+
   Future<void> _launchHubProject(StartupProjectRequest request) async {
     final projectPath = request.hubProjectPath;
     if (projectPath == null || !mounted) return;
@@ -506,11 +567,19 @@ class _ExplorerPageState extends State<ExplorerPage> {
       );
       if (!mounted) return;
 
+      final serverUrl = request.hubServerUrl ??
+          resolution.existingRecord?.serverUrl ??
+          RedleafConnectionService.defaultServerUrl;
+
       if (resolution.disposition == RedleafHubLaunchDisposition.openCached) {
         _workspaceProjectService.select(
           WorkspaceProject.redleafKey(resolution.instanceId),
         );
-        // The saved snapshot opens immediately without needing credentials.
+        // Opening the snapshot never waits for the keyring or network.
+        unawaited(_connectSavedHubLogin(
+          instanceId: resolution.instanceId,
+          serverUrl: serverUrl,
+        ));
         return;
       }
 
@@ -525,6 +594,17 @@ class _ExplorerPageState extends State<ExplorerPage> {
           resolution.disposition == RedleafHubLaunchDisposition.restore;
       final connection = RedleafConnectionService.instance;
       await connection.load();
+
+      RedleafSavedCredentials? savedCredentials;
+      String? keyringWarning;
+      try {
+        savedCredentials = await RedleafSharedCredentialVault()
+            .read(resolution.instanceId);
+      } catch (_) {
+        keyringWarning =
+            'The Linux login keyring is unavailable. Sign in manually, '
+            'or install and unlock libsecret-tools.';
+      }
       if (!mounted) return;
 
       await showDialog<bool>(
@@ -533,10 +613,10 @@ class _ExplorerPageState extends State<ExplorerPage> {
         builder: (dialogContext) => RedleafHubOnboardingDialog(
           expectedInstanceId: resolution.instanceId,
           suggestedName: resolution.suggestedName,
-          serverUrl: request.hubServerUrl ??
-              resolution.existingRecord?.serverUrl ??
-              RedleafConnectionService.defaultServerUrl,
+          serverUrl: serverUrl,
           connection: connection,
+          savedCredentials: savedCredentials,
+          keyringWarning: keyringWarning,
           existingInTrash: alreadyInTrash,
           hasCachedSnapshot: resolution.hasCachedSnapshot,
           onImport: import,
