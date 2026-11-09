@@ -1,0 +1,287 @@
+// lib/ui/widgets/redleaf_hub_onboarding_dialog.dart
+
+import 'package:flutter/material.dart';
+
+import '../../services/redleaf_connection_service.dart';
+
+/// Launched by Redleaf Hub for a database that has not yet been imported and
+/// synced into MLT Player. The Hub passes only the project folder and server
+/// URL; authentication is performed inside MLT Player.
+class RedleafHubOnboardingDialog extends StatefulWidget {
+  const RedleafHubOnboardingDialog({
+    super.key,
+    required this.expectedInstanceId,
+    required this.suggestedName,
+    required this.serverUrl,
+    required this.connection,
+    required this.onImport,
+    this.existingInTrash = false,
+    this.hasCachedSnapshot = false,
+    this.onRestoreCached,
+  });
+
+  final String expectedInstanceId;
+  final String suggestedName;
+  final String serverUrl;
+  final RedleafConnectionService connection;
+  final Future<void> Function(String projectName, bool restoreFromTrash)
+      onImport;
+  final bool existingInTrash;
+  final bool hasCachedSnapshot;
+  final Future<void> Function()? onRestoreCached;
+
+  @override
+  State<RedleafHubOnboardingDialog> createState() =>
+      _RedleafHubOnboardingDialogState();
+}
+
+class _RedleafHubOnboardingDialogState
+    extends State<RedleafHubOnboardingDialog> {
+  late final TextEditingController _server;
+  late final TextEditingController _username;
+  late final TextEditingController _password;
+  late final TextEditingController _projectName;
+
+  bool _busy = false;
+  bool _showPassword = false;
+  String? _error;
+
+  bool get _canRestoreOffline =>
+      widget.existingInTrash &&
+      widget.hasCachedSnapshot &&
+      widget.onRestoreCached != null;
+
+  @override
+  void initState() {
+    super.initState();
+    _server = TextEditingController(text: widget.serverUrl);
+    _username = TextEditingController(text: widget.connection.username);
+    _password = TextEditingController();
+    _projectName = TextEditingController(text: widget.suggestedName);
+  }
+
+  @override
+  void dispose() {
+    _server.dispose();
+    _username.dispose();
+    _password.dispose();
+    _projectName.dispose();
+    super.dispose();
+  }
+
+  Future<void> _restoreCached() async {
+    final restore = widget.onRestoreCached;
+    if (_busy || restore == null) return;
+
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await restore();
+      if (mounted) Navigator.of(context).pop(true);
+    } catch (error) {
+      if (mounted) setState(() => _error = error.toString());
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _signInAndImport() async {
+    if (_busy) return;
+    final name = _projectName.text.trim();
+    if (name.isEmpty) {
+      setState(() => _error = 'Choose an MLT Player project name.');
+      return;
+    }
+    final server = _server.text.trim();
+    final alreadyConnected = widget.connection.isConnected &&
+        widget.connection.instanceId == widget.expectedInstanceId &&
+        widget.connection.serverUrl == server;
+
+    if (!alreadyConnected &&
+        (_username.text.trim().isEmpty || _password.text.isEmpty)) {
+      setState(() => _error = 'Enter your Redleaf username and password.');
+      return;
+    }
+
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      if (!alreadyConnected) {
+        final authenticated = await widget.connection.signIn(
+          serverUrl: server,
+          username: _username.text.trim(),
+          password: _password.text,
+        );
+        if (!authenticated) {
+          throw StateError(
+            widget.connection.lastError ??
+                'Could not sign in to this Redleaf server.',
+          );
+        }
+      }
+
+      // Do not trust a server merely because its login succeeded. It must
+      // identify the exact Redleaf database selected by Hub.
+      if (!widget.connection.isConnected ||
+          widget.connection.instanceId != widget.expectedInstanceId) {
+        widget.connection.disconnect();
+        throw StateError(
+          'The signed-in Redleaf server is not the project selected in '
+          'Redleaf Hub. Check which project is running on this port.',
+        );
+      }
+
+      await widget.onImport(name, widget.existingInTrash);
+      if (mounted) {
+        _password.clear();
+        Navigator.of(context).pop(true);
+      }
+    } catch (error) {
+      if (mounted) setState(() => _error = error.toString());
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(
+        widget.existingInTrash
+            ? 'Restore Redleaf project'
+            : 'Add Redleaf project to MLT Player',
+      ),
+      content: SizedBox(
+        width: 500,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                widget.existingInTrash
+                    ? 'This Redleaf project is in MLT Player Trash. '
+                        'Restore the saved project rather than create a duplicate.'
+                    : 'Redleaf Hub opened this project, but MLT Player does not '
+                        'have a synced snapshot yet. Sign in and choose an '
+                        'MLT Player name to import its transcripts and catalogs.',
+                style: const TextStyle(fontSize: 13, color: Colors.white70),
+              ),
+              if (_canRestoreOffline) ...[
+                const SizedBox(height: 12),
+                const Text(
+                  'A cached snapshot exists. You can restore it without '
+                  'signing in, or sign in below to refresh the catalog.',
+                  style: TextStyle(fontSize: 12, color: Colors.white60),
+                ),
+                const SizedBox(height: 10),
+                OutlinedButton.icon(
+                  onPressed: _busy ? null : _restoreCached,
+                  icon: const Icon(Icons.restore),
+                  label: const Text('RESTORE SAVED PROJECT'),
+                ),
+              ],
+              const SizedBox(height: 16),
+              TextField(
+                controller: _projectName,
+                enabled: !_busy,
+                decoration: const InputDecoration(
+                  labelText: 'MLT Player project name',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _server,
+                enabled: !_busy,
+                keyboardType: TextInputType.url,
+                decoration: const InputDecoration(
+                  labelText: 'Redleaf server',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _username,
+                enabled: !_busy,
+                decoration: const InputDecoration(
+                  labelText: 'Redleaf username',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _password,
+                enabled: !_busy,
+                obscureText: !_showPassword,
+                onSubmitted: (_) => _signInAndImport(),
+                decoration: InputDecoration(
+                  labelText: 'Redleaf password',
+                  border: const OutlineInputBorder(),
+                  isDense: true,
+                  suffixIcon: IconButton(
+                    tooltip: _showPassword ? 'Hide password' : 'Show password',
+                    onPressed: _busy
+                        ? null
+                        : () => setState(
+                              () => _showPassword = !_showPassword,
+                            ),
+                    icon: Icon(
+                      _showPassword
+                          ? Icons.visibility_off_outlined
+                          : Icons.visibility_outlined,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 10),
+              const Text(
+                'The password is used only to sign in to Redleaf. '
+                'It is not saved or passed from Redleaf Hub. MLT Player '
+                'verifies the Redleaf database identity before importing.',
+                style: TextStyle(fontSize: 11, color: Colors.white54),
+              ),
+              if (_error != null) ...[
+                const SizedBox(height: 12),
+                Text(
+                  _error!,
+                  style: const TextStyle(color: Colors.redAccent),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _busy ? null : () => Navigator.of(context).pop(false),
+          child: const Text('CANCEL'),
+        ),
+        FilledButton.icon(
+          onPressed: _busy ? null : _signInAndImport,
+          icon: _busy
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.cloud_download_outlined),
+          label: Text(
+            _busy
+                ? 'CONNECTING…'
+                : widget.existingInTrash
+                    ? 'SIGN IN AND RESTORE'
+                    : 'SIGN IN AND IMPORT',
+          ),
+        ),
+      ],
+    );
+  }
+}
