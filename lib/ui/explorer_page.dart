@@ -25,6 +25,7 @@ import '../services/player_settings_service.dart';
 import '../services/redleaf_link_service.dart';
 import '../services/thumbnail_service.dart';
 import '../services/workspace_project_service.dart';
+import '../services/startup_project_request.dart';
 import 'redleaf_page.dart';
 import 'widgets/catalog_child_tile.dart';
 import 'widgets/player_settings_button.dart';
@@ -174,6 +175,8 @@ class ExplorerPage extends StatefulWidget {
     required this.onActiveProjectChanged,
     this.onWorkspaceProjectChanged,
     this.workspaceProjectService,
+    this.startupProjectRequest,
+    this.onStartupRedleafSelected,
     this.playerSettings,
     this.projectViewRequest,
     this.startupError,
@@ -189,6 +192,8 @@ class ExplorerPage extends StatefulWidget {
   final ProjectMediaMetadataService projectMediaMetadataService;
   final ValueChanged<WorkspaceProject?>? onWorkspaceProjectChanged;
   final WorkspaceProjectService? workspaceProjectService;
+  final StartupProjectRequest? startupProjectRequest;
+  final VoidCallback? onStartupRedleafSelected;
   final PlayerSettingsService? playerSettings;
   final ExplorerProjectViewRequest? projectViewRequest;
   final ValueChanged<String> onActiveProjectChanged;
@@ -503,6 +508,26 @@ class _ExplorerPageState extends State<ExplorerPage> {
 
     if (!mounted) {
       return;
+    }
+
+    // A saved Redleaf workspace can be selected only after the registry loads.
+    // Startup selection never signs in or triggers SYNC NOW.
+    final startupRequest = widget.startupProjectRequest;
+    if (startupRequest != null) {
+      final selectionError = startupRequest.selectIn(_workspaceProjectService);
+      if (selectionError == null && startupRequest.redleafInstanceId != null) {
+        widget.onStartupRedleafSelected?.call();
+      } else if (selectionError != null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(selectionError),
+              duration: const Duration(seconds: 9),
+            ),
+          );
+        });
+      }
     }
 
     setState(() {
