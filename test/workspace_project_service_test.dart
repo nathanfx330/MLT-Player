@@ -157,6 +157,87 @@ void main() {
       redleaf.dispose();
     });
 
+    test('Trash hides the selected cloud project and requires restoration',
+        () async {
+      unawaited(_serveRedleaf(server));
+
+      final localProjects = ProjectCatalogService(
+        configDirectory: tempDirectory,
+      );
+      final redleaf = RedleafConnectionService(
+        configDirectory: tempDirectory,
+      );
+      final registry = RedleafProjectRegistryService(
+        configDirectory: tempDirectory,
+      );
+      final workspace = WorkspaceProjectService(
+        localProjects: localProjects,
+        redleafConnection: redleaf,
+        redleafProjects: registry,
+      );
+      await workspace.load();
+
+      final serverUrl = 'http://${server.address.address}:${server.port}';
+      expect(
+        await redleaf.signIn(
+          serverUrl: serverUrl,
+          username: 'tester',
+          password: 'secret',
+        ),
+        isTrue,
+      );
+      expect(registry.projects, isEmpty);
+      expect(workspace.projects.where((p) => p.isRedleaf), isEmpty);
+
+      await workspace.importConnectedRedleafProject(
+        displayName: 'Wartime Archive',
+      );
+      expect(workspace.activeProject?.name, 'Wartime Archive');
+      expect(workspace.activeIsRedleaf, isTrue);
+      expect(registry.projects.single.name, 'Wartime Archive');
+
+      await workspace.trashRedleafProject('radio-test-instance');
+      expect(workspace.activeIsLocal, isTrue);
+      expect(workspace.projects.where((p) => p.isRedleaf), isEmpty);
+      expect(registry.trashedProjects.single.name, 'Wartime Archive');
+      expect(workspace.connectedRedleafRecord?.isTrashed, isTrue);
+
+      await expectLater(
+        workspace.importConnectedRedleafProject(
+          displayName: 'Attempted Duplicate',
+        ),
+        throwsA(isA<StateError>()),
+      );
+      expect(registry.trashedProjects, hasLength(1));
+
+      redleaf.disconnect();
+      expect(workspace.projects.where((p) => p.isRedleaf), isEmpty);
+
+      expect(
+        await redleaf.signIn(
+          serverUrl: serverUrl,
+          username: 'tester',
+          password: 'secret',
+        ),
+        isTrue,
+      );
+      expect(registry.trashedProjects, hasLength(1));
+      expect(workspace.projects.where((p) => p.isRedleaf), isEmpty);
+
+      await workspace.importConnectedRedleafProject(
+        displayName: 'Restored Wartime Archive',
+        restoreFromTrash: true,
+      );
+      expect(workspace.activeKey, 'redleaf:radio-test-instance');
+      expect(workspace.activeProject?.name, 'Restored Wartime Archive');
+      expect(registry.projects, hasLength(1));
+      expect(registry.trashedProjects, isEmpty);
+
+      workspace.dispose();
+      registry.dispose();
+      redleaf.dispose();
+    });
+
     test(
       'remembers a connected Redleaf instance as a separate workspace project',
       () async {
