@@ -520,6 +520,36 @@ manufacturing one. Launching does not sign in, sync, start a server, or move
 media. This is a local process launch, not an HTTP API or a command to an
 already running MLT Player window.
 
+### Redleaf Hub launcher with automatic onboarding
+
+Redleaf Hub's **Launch MLT Player** button starts the compiled MLT Player
+desktop application with a separate, Hub-specific launch request:
+
+```bash
+./build/linux/x64/release/bundle/mlt_player \
+  --redleaf-hub-project-path "/path/to/Redleaf Project" \
+  --redleaf-hub-server-url http://127.0.0.1:5000
+```
+
+The new flag deliberately **does not** behave like the older offline
+`--redleaf-project-path` option. MLT Player reads the local database's stable
+`instance_id`, checks whether the exact instance already has a saved MLT
+workspace **and** a valid synced snapshot, and then:
+
+- **Synced:** opens the existing Redleaf Explorer and cached catalog without
+  prompting for credentials or forcing an archive refresh.
+- **New or unsynced:** shows a name, server URL, username, and password
+  onboarding dialog. MLT Player authenticates, verifies that Redleaf reports
+  the same `instance_id` as the folder Hub selected, then saves the chosen
+  workspace and starts the normal one-time transcript/catalog import.
+- **In Trash:** never silently restores it. If a cached snapshot is available,
+  offers **RESTORE SAVED PROJECT** offline; otherwise requires explicit sign-in
+  and restore/import.
+
+Hub passes only the local project folder and server URL, not credentials.
+MLT Player does not save Redleaf passwords. Canceling onboarding leaves the
+MLT project registry unchanged.
+
 ## Build and run
 
 ```bash
