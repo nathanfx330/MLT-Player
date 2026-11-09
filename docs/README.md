@@ -24,6 +24,16 @@ be treated as current reference documentation when they conflict with
 
 ## Start here
 
+### Development overview and latest update
+
+[**Development Overview and November 2026 Update**](development-journey.md)
+
+The continuous history from the precise MLT-backed Player through Explorer,
+Projects, Storyboard and Redleaf integration. Its November 9 chapter records
+Redleaf Hub onboarding, explicit project management, the rejected external
+keyring dependency, the final shared encrypted vault and thumbnail parity with
+local Explorer. The earlier POC chapters below preserve the detailed proofs.
+
 ### Current architecture
 
 [**MLT Player Architecture**](architecture.md)
