@@ -18,10 +18,13 @@ class RedleafSavedCredentials {
   const RedleafSavedCredentials({
     required this.username,
     required this.password,
+    required this.serverUrl,
   });
 
   final String username;
   final String password;
+  /// The exact trusted login origin. Secrets are NEVER sent elsewhere.
+  final String serverUrl;
 }
 
 class SecretToolResult {
@@ -44,6 +47,21 @@ class RedleafSharedCredentialVault {
   static const String namespace = 'redleaf-hub-mlt-auth-v1';
   static const String _label = 'Redleaf Hub / MLT Player login';
   static const Duration _timeout = Duration(seconds: 20);
+  static const String defaultServerUrl = 'http://127.0.0.1:5000';
+
+  static String normalizeServerUrl(String raw) {
+    final value = Uri.tryParse(raw.trim());
+    if (value == null ||
+        (value.scheme != 'http' && value.scheme != 'https') ||
+        value.host.isEmpty ||
+        value.userInfo.isNotEmpty ||
+        value.hasQuery ||
+        value.hasFragment ||
+        (value.path.isNotEmpty && value.path != '/')) {
+      throw ArgumentError('Use a Redleaf server origin such as http://127.0.0.1:5000.');
+    }
+    return value.origin;
+  }
 
   final SecretToolRunner _runner;
 
@@ -69,6 +87,7 @@ class RedleafSharedCredentialVault {
     required String instanceId,
     required String username,
     required String password,
+    String serverUrl = defaultServerUrl,
   }) async {
     final user = username.trim();
     if (user.isEmpty || password.isEmpty) {
@@ -80,6 +99,7 @@ class RedleafSharedCredentialVault {
       secret: jsonEncode(<String, String>{
         'username': user,
         'password': password,
+        'serverUrl': normalizeServerUrl(serverUrl),
       }),
     );
     if (result.exitCode != 0) {
@@ -104,18 +124,23 @@ class RedleafSharedCredentialVault {
       }
       final username = record['username'];
       final password = record['password'];
+      final serverUrl = record['serverUrl'];
       if (username is! String ||
           username.trim().isEmpty ||
           password is! String ||
-          password.isEmpty) {
+          password.isEmpty ||
+          serverUrl is! String) {
         throw const FormatException();
       }
       return RedleafSavedCredentials(
         username: username.trim(),
         password: password,
+        serverUrl: normalizeServerUrl(serverUrl),
       );
     } on FormatException {
       throw StateError('Saved Redleaf credentials are invalid. Replace them in Hub.');
+    } on ArgumentError {
+      throw StateError('Saved Redleaf login server is invalid. Replace it in Hub.');
     }
   }
 
