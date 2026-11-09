@@ -192,15 +192,23 @@ than creating image files.
 
 ### Redleaf workspace integration
 
-**Create New Redleaf Cloud Project in Settings:** after signing in to a
-Redleaf server, use this explicit action to import the connected Redleaf
-database into MLT Player. It saves or reuses the exact Redleaf instance,
-selects it in the Project switch, opens its Redleaf Explorer, and starts the
-existing snapshot sync. The button is the authorization for the import; simply
-signing in does not scan the archive. Reimporting the same instance updates its
-cached snapshot without creating a duplicate project or changing its chosen
-MLT Player display name. The term Cloud Project describes the MLT Player
-remote-workspace type; this does not provision a new Redleaf server.
+**Create New Redleaf Cloud Project in Settings:** sign in to the
+Redleaf server, type the MLT Player project name you want, then choose
+**CREATE NEW REDLEAF CLOUD PROJECT**. Sign-in no longer creates a project in
+MLT Player. The explicit import saves the identity and chosen name, selects the
+project, opens the Redleaf Explorer, and starts its transcript/catalog sync.
+An existing Redleaf instance is reopened rather than duplicated. You can also
+edit its MLT Player display name when reopening it. This is not provisioning
+a new Redleaf server or renaming a Redleaf database.
+
+**Redleaf Cloud Trash:** Settings lists the saved Redleaf projects and a
+separate Trash section. Moving a project to Trash hides it from the project
+switcher but keeps its identity, display name, Redleaf connection information
+and cached snapshot. Restoring brings back that same project. Signing in to
+a trashed instance does not restore it; the Settings import action offers
+**RESTORE AND IMPORT REDLEAF CLOUD PROJECT** instead. A project name already
+used by another Redleaf project, including one in Trash, is rejected with an
+explanation. Trash is reversible and never deletes the Redleaf source.
 
 Redleaf is a first-class **workspace-project source**, not a separate top-level
 application tab and not a fake Local Project.
@@ -224,6 +232,7 @@ A saved Redleaf Project records:
 - last-known Redleaf server URL
 - Redleaf source project name for reference
 - created / updated / last-synced timestamps
+- optional Trash timestamp (reversible, local to MLT Player)
 
 Saved Redleaf Project records survive Redleaf disconnects and MLT Player
 restarts.
