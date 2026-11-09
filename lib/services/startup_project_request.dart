@@ -10,19 +10,79 @@ class StartupProjectRequest {
   const StartupProjectRequest._({
     this.redleafInstanceId,
     this.redleafProjectPath,
+    this.hubProjectPath,
+    this.hubServerUrl,
     this.error,
   });
 
   final String? redleafInstanceId;
   final String? redleafProjectPath;
+  /// A Hub launch checks the saved snapshot and onboards unsynced projects.
+  /// This is deliberately separate from the offline --redleaf-project-path.
+  final String? hubProjectPath;
+  final String? hubServerUrl;
   final String? error;
 
   static StartupProjectRequest parse(List<String> arguments) {
     String? instanceId;
     String? projectPath;
+    String? hubPath;
+    String? hubUrl;
 
     for (var index = 0; index < arguments.length; index++) {
       final argument = arguments[index];
+      final isHubPath = argument == '--redleaf-hub-project-path' ||
+          argument.startsWith('--redleaf-hub-project-path=');
+      final isHubUrl = argument == '--redleaf-hub-server-url' ||
+          argument.startsWith('--redleaf-hub-server-url=');
+
+      if (isHubPath || isHubUrl) {
+        final flag = isHubPath
+            ? '--redleaf-hub-project-path'
+            : '--redleaf-hub-server-url';
+        if ((isHubPath && hubPath != null) ||
+            (isHubUrl && hubUrl != null)) {
+          return const StartupProjectRequest._(
+            error: 'Duplicate Redleaf Hub launch option.',
+          );
+        }
+
+        String value;
+        if (argument == flag) {
+          if (index + 1 >= arguments.length ||
+              arguments[index + 1].startsWith('--')) {
+            return const StartupProjectRequest._(
+              error: 'The Redleaf Hub launch option requires a value.',
+            );
+          }
+          value = arguments[++index];
+        } else {
+          value = argument.substring(flag.length + 1);
+        }
+        value = value.trim();
+        if (value.isEmpty) {
+          return const StartupProjectRequest._(
+            error: 'The Redleaf Hub launch option requires a value.',
+          );
+        }
+        if (isHubPath) {
+          hubPath = value;
+        } else {
+          final url = Uri.tryParse(value);
+          if (url == null ||
+              (url.scheme != 'http' && url.scheme != 'https') ||
+              url.host.isEmpty ||
+              url.userInfo.isNotEmpty ||
+              url.hasQuery ||
+              url.hasFragment) {
+            return const StartupProjectRequest._(
+              error: 'The Redleaf Hub server URL must be an HTTP or HTTPS address.',
+            );
+          }
+          hubUrl = value;
+        }
+        continue;
+      }
       final isId = argument == '--redleaf-project' ||
           argument.startsWith('--redleaf-project=');
       final isPath = argument == '--redleaf-project-path' ||
@@ -66,9 +126,22 @@ class StartupProjectRequest {
       }
     }
 
+    if (hubPath != null && (instanceId != null || projectPath != null)) {
+      return const StartupProjectRequest._(
+        error: 'Specify only one Redleaf project launch mode.',
+      );
+    }
+    if (hubUrl != null && hubPath == null) {
+      return const StartupProjectRequest._(
+        error: 'A Hub server URL requires a Hub project path.',
+      );
+    }
+
     return StartupProjectRequest._(
       redleafInstanceId: instanceId,
       redleafProjectPath: projectPath,
+      hubProjectPath: hubPath,
+      hubServerUrl: hubUrl,
     );
   }
 
