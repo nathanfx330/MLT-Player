@@ -279,8 +279,10 @@ class _LinuxPrivateFiles {
 
   static const int _directoryMode = 0x1c0; // 0700
   static const int _fileMode = 0x180; // 0600
-  static const int _writeExclusiveNoFollow =
-      1 | 0x40 | 0x80 | 0x20000; // O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW
+  // Linux O_CREAT|O_EXCL refuses an existing target, including a symlink.
+  // Do not hardcode O_NOFOLLOW: its numerical value differs by architecture.
+  // O_WRONLY | O_CREAT | O_EXCL is portable across Linux x86_64 and aarch64.
+  static const int _writeExclusive = 1 | 0x40 | 0x80;
 
   static T _withPath<T>(String path, T Function(Pointer<Uint8>) action) {
     final utf8Bytes = utf8.encode(path);
@@ -354,7 +356,7 @@ class _LinuxPrivateFiles {
   static Future<void> writeNewFile(File file, List<int> bytes) async {
     _assertNoLink(file.path);
     final fd = _withPath(file.path, (path) =>
-        _open(path, _writeExclusiveNoFollow, _fileMode));
+        _open(path, _writeExclusive, _fileMode));
     if (fd < 0) {
       throw StateError('Could not create a private Redleaf vault file.');
     }
