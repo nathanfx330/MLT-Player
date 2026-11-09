@@ -200,6 +200,40 @@ class WorkspaceProjectService extends ChangeNotifier {
     select(redleaf.key);
   }
 
+  /// Explicitly import the authenticated Redleaf instance as a workspace.
+  /// Save its identity before selecting it so the project is available
+  /// immediately and survives application restart.
+  Future<void> importConnectedRedleafProject() async {
+    _requireLoaded();
+
+    if (!_redleafConnection.isConnected) {
+      throw StateError('Sign in to a Redleaf server before importing.');
+    }
+
+    final instanceId = _redleafConnection.instanceId.trim();
+    if (instanceId.isEmpty) {
+      throw StateError('The connected Redleaf server has no instance ID.');
+    }
+
+    final sourceName = _redleafConnection.projectName.trim();
+    await _redleafProjects.rememberConnectedProject(
+      instanceId: instanceId,
+      suggestedName: sourceName.isEmpty ? 'Redleaf' : sourceName,
+      serverUrl: _redleafConnection.serverUrl,
+      sourceProjectName: sourceName.isEmpty ? null : sourceName,
+    );
+
+    // Sign-in may have changed while the local registry was being saved.
+    if (!_redleafConnection.isConnected ||
+        _redleafConnection.instanceId != instanceId) {
+      throw StateError(
+        'The connected Redleaf project changed before import completed.',
+      );
+    }
+
+    select(WorkspaceProject.redleafKey(instanceId));
+  }
+
   Future<void> renameRedleafProject(
     String instanceId,
     String name,
