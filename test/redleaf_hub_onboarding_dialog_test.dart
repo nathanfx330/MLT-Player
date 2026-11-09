@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mlt_player/services/redleaf_connection_service.dart';
+import 'package:mlt_player/services/redleaf_shared_credential_vault.dart';
 import 'package:mlt_player/ui/widgets/redleaf_hub_onboarding_dialog.dart';
 
 class _FakeConnection extends RedleafConnectionService {
@@ -15,6 +16,9 @@ class _FakeConnection extends RedleafConnectionService {
   bool connected = false;
   int signInCalls = 0;
   int disconnectCalls = 0;
+  String? lastUsername;
+  String? lastPassword;
+  String? lastServerUrl;
 
   @override
   bool get isConnected => connected;
@@ -38,6 +42,9 @@ class _FakeConnection extends RedleafConnectionService {
     required String password,
   }) async {
     signInCalls += 1;
+    lastUsername = username;
+    lastPassword = password;
+    lastServerUrl = serverUrl;
     connected = true;
     currentInstanceId = answeredInstanceId;
     notifyListeners();
@@ -73,6 +80,8 @@ void main() {
     bool trashed = false,
     bool cached = false,
     Future<void> Function()? onRestoreCached,
+    RedleafSavedCredentials? savedCredentials,
+    String serverUrl = 'http://127.0.0.1:5000',
   }) async {
     await tester.pumpWidget(
       MaterialApp(
@@ -84,8 +93,9 @@ void main() {
                 builder: (_) => RedleafHubOnboardingDialog(
                   expectedInstanceId: 'expected-instance',
                   suggestedName: 'Hub Research',
-                  serverUrl: 'http://127.0.0.1:5000',
+                  serverUrl: serverUrl,
                   connection: connection,
+                  savedCredentials: savedCredentials,
                   onImport: onImport,
                   existingInTrash: trashed,
                   hasCachedSnapshot: cached,
@@ -180,4 +190,51 @@ void main() {
     expect(connection.signInCalls, 0);
     expect(find.text('Restore Redleaf project'), findsNothing);
   });
+  testWidgets('Hub saved login authenticates without retyping password',
+      (tester) async {
+    String? imported;
+    await open(
+      tester,
+      savedCredentials: const RedleafSavedCredentials(
+        username: 'keyring-user',
+        password: 'keyring-password',
+        serverUrl: 'http://127.0.0.1:5000',
+      ),
+      onImport: (name, restore) async => imported = name,
+    );
+
+    expect(find.text('Use saved Redleaf login from Hub'), findsOneWidget);
+    expect(find.text('Account: keyring-user'), findsOneWidget);
+
+    await tester.tap(find.text('SIGN IN AND IMPORT'));
+    await tester.pumpAndSettle();
+
+    expect(imported, 'Hub Research');
+    expect(connection.lastUsername, 'keyring-user');
+    expect(connection.lastPassword, 'keyring-password');
+    expect(connection.signInCalls, 1);
+  });
+
+  testWidgets('saved password cannot be sent to another server origin',
+      (tester) async {
+    await open(
+      tester,
+      serverUrl: 'http://127.0.0.1:9876',
+      savedCredentials: const RedleafSavedCredentials(
+        username: 'trusted-user',
+        password: 'trusted-password',
+        serverUrl: 'http://127.0.0.1:5000',
+      ),
+      onImport: (name, restore) async {},
+    );
+
+    await tester.tap(find.text('SIGN IN AND IMPORT'));
+    await tester.pumpAndSettle();
+
+    expect(connection.signInCalls, 0);
+    expect(connection.lastPassword, isNull);
+    expect(find.text('Enter your Redleaf username and password.'),
+        findsOneWidget);
+  });
+
 }
