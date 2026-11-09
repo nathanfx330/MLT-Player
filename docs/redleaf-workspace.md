@@ -105,24 +105,45 @@ an existing MLT Player window.
 
 ### Create New Redleaf Cloud Project from Settings
 
-After successful sign-in, Settings presents **CREATE NEW REDLEAF CLOUD
-PROJECT**. This action explicitly imports the authenticated Redleaf instance
-into MLT Player. `WorkspaceProjectService.importConnectedRedleafProject`
-saves or reuses the registry entry by Redleaf `instance_id`, preserving an
-existing MLT display name, then selects that workspace.
+Signing in identifies a Redleaf instance and authenticates the session, but
+**does not create an MLT Player workspace**. Settings offers a project-name
+field prefilled from the Redleaf source name. The user can edit it before
+choosing **CREATE NEW REDLEAF CLOUD PROJECT**. The selected name belongs to
+MLT Player only; it never renames Redleaf's database.
 
-The app opens its existing Redleaf Explorer and forwards a one-time import
-request to `RedleafPage`. Once any saved snapshot has been loaded, the page
-runs its established `SYNC NOW` path: refresh inventory, SRT documents,
-catalogs and memberships, then persist a new snapshot. Import status and any
-error remain visible in the Redleaf Explorer. Import failure does not delete
-a previous snapshot.
+`WorkspaceProjectService.importConnectedRedleafProject` uses the authenticated
+`instance_id` and chosen display name to persist or reuse the registry entry
+atomically. It then selects that workspace and opens the Redleaf Explorer,
+where an explicit one-time import request runs the existing `SYNC NOW`
+snapshot logic. Reimporting a known instance refreshes that same project.
+If the user enters a different display name, that MLT Player name is updated.
 
-Signing in alone continues to save the connection identity without silently
-scanning the archive. Repeating **CREATE NEW REDLEAF CLOUD PROJECT** for the
-same instance refreshes that same project, not a duplicate. This is a local
-MLT Player remote-workspace record, not provisioning of a Redleaf host or an
-account on an external cloud service.
+### Redleaf Cloud Trash and conflict rules
+
+Trash is a **soft-delete in the MLT Player registry**, never a deletion of
+Redleaf itself. Each saved record has an optional `trashedAt` timestamp.
+Older registry files without that field load as active projects. A record
+in Trash:
+
+- is absent from the active project switcher, including while its Redleaf
+  instance is authenticated;
+- retains its instance ID, chosen name, server URL, and cached snapshot;
+- is shown in Settings under **TRASH**, with an explicit **RESTORE** control;
+- cannot be recreated by signing in or launching its folder. An import of
+  that same `instance_id` instead offers **RESTORE AND IMPORT REDLEAF CLOUD
+  PROJECT**, returning the original workspace record;
+- reserves its display name. Another Redleaf instance cannot take that name
+  while it remains in Trash, and name comparisons ignore letter case.
+
+Moving the currently selected Redleaf project to Trash returns selection to
+the previous local workspace. No server database, media file, snapshot, or
+credential is deleted. There is intentionally no permanent-delete action in
+this iteration.
+
+`RedleafProjectRegistryService` owns the canonical identity and display-name
+uniqueness checks. `WorkspaceProjectService` owns selector visibility and
+fallback. The local folder launch respects Trash instead of silently
+restoring it. Sign-in alone never restores a trashed workspace.
 
 ## 4. Authentication and instance identity
 
