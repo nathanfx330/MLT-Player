@@ -514,8 +514,12 @@ class _ExplorerPageState extends State<ExplorerPage> {
     // Startup selection never signs in or triggers SYNC NOW.
     final startupRequest = widget.startupProjectRequest;
     if (startupRequest != null) {
-      final selectionError = startupRequest.selectIn(_workspaceProjectService);
-      if (selectionError == null && startupRequest.redleafInstanceId != null) {
+      final selectionError =
+          await startupRequest.applyTo(_workspaceProjectService);
+      if (!mounted) return;
+      if (selectionError == null &&
+          (startupRequest.redleafInstanceId != null ||
+              startupRequest.redleafProjectPath != null)) {
         widget.onStartupRedleafSelected?.call();
       } else if (selectionError != null) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
