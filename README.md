@@ -457,6 +457,26 @@ The current integration expects Redleaf support for:
 Redleaf itself remains responsible for its database, filesystem discovery,
 `.rlink` resolution, and relationship writes.
 
+## Open a saved Redleaf project from Redleaf Hub
+
+The Linux executable accepts an optional Redleaf workspace identity:
+
+```bash
+./build/linux/x64/release/bundle/mlt_player --redleaf-project <instance_id>
+```
+
+The option also accepts the namespaced `redleaf:<instance_id>` key and
+`--redleaf-project=<instance_id>` syntax. MLT Player loads its saved registry,
+selects the exact Redleaf workspace, and opens the **PROJECT** tab. Launching
+normally without this option remains unchanged.
+
+This is a local process launch, not an HTTP API or a way to redirect an
+already running MLT Player window. The instance must already be saved in MLT
+Player's registry, normally by signing into that Redleaf instance once.
+An unknown instance displays an error rather than silently opening another
+Redleaf project. Launch does not sign in, synchronize, or move any media.
+Offline snapshot access and explicit `SYNC NOW` behavior remain unchanged.
+
 ## Build and run
 
 ```bash
