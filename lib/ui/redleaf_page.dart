@@ -147,7 +147,10 @@ class _RedleafPageState extends State<RedleafPage> {
     }
 
     if (widget.active && (!oldWidget.active || oldKey != newKey)) {
+      _thumbnailService.resume();
       _maybeLoad();
+    } else if (!widget.active && oldWidget.active) {
+      unawaited(_thumbnailService.pauseAndDrain());
     }
     _maybeStartRequestedImport();
   }
@@ -860,6 +863,8 @@ class _RedleafPageState extends State<RedleafPage> {
 
     final transcriptAwareCallback = widget.onOpenRedleafHandoff;
     if (transcriptAwareCallback == null) {
+      await _thumbnailService.pauseAndDrain();
+      if (!mounted || _selectedDocId != document.docId) return;
       widget.onOpenVerifiedMedia?.call(resource);
       return;
     }
@@ -900,6 +905,8 @@ class _RedleafPageState extends State<RedleafPage> {
         _handoffError = null;
       });
 
+      await _thumbnailService.pauseAndDrain();
+      if (!mounted || _selectedDocId != docId) return;
       transcriptAwareCallback(handoff);
     } catch (error) {
       if (!mounted || serial != _handoffSerial || _selectedDocId != docId) {
