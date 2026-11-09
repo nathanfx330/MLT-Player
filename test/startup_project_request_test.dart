@@ -46,6 +46,57 @@ void main() {
       expect(equals.redleafProjectPath, '/home/user/Archive Two');
     });
 
+    test('Hub launch accepts a folder and HTTP server without credentials',
+        () {
+      final request = StartupProjectRequest.parse(
+        const <String>[
+          '--redleaf-hub-project-path',
+          '/home/user/Redleaf Research',
+          '--redleaf-hub-server-url=http://127.0.0.1:5000',
+        ],
+      );
+      expect(request.error, isNull);
+      expect(request.hubProjectPath, '/home/user/Redleaf Research');
+      expect(request.hubServerUrl, 'http://127.0.0.1:5000');
+      expect(request.redleafProjectPath, isNull);
+      expect(request.redleafInstanceId, isNull);
+
+      final equals = StartupProjectRequest.parse(
+        const <String>['--redleaf-hub-project-path=/home/user/Research'],
+      );
+      expect(equals.hubProjectPath, '/home/user/Research');
+      expect(equals.hubServerUrl, isNull);
+    });
+
+    test('Hub flags reject mixed modes and unsafe or missing URLs', () {
+      final malformed = <List<String>>[
+        <String>[
+          '--redleaf-hub-project-path', '/archive',
+          '--redleaf-project-path', '/archive',
+        ],
+        <String>[
+          '--redleaf-hub-project-path', '/archive',
+          '--redleaf-project', 'id',
+        ],
+        <String>['--redleaf-hub-server-url', 'http://127.0.0.1:5000'],
+        <String>[
+          '--redleaf-hub-project-path', '/archive',
+          '--redleaf-hub-server-url', 'file:///etc/passwd',
+        ],
+        <String>[
+          '--redleaf-hub-project-path', '/archive',
+          '--redleaf-hub-server-url', 'http://user:pass@127.0.0.1:5000',
+        ],
+        <String>[
+          '--redleaf-hub-project-path', '/archive',
+          '--redleaf-hub-project-path', '/archive',
+        ],
+      ];
+      for (final args in malformed) {
+        expect(StartupProjectRequest.parse(args).error, isNotNull);
+      }
+    });
+
     test('rejects duplicate or mixed Redleaf project options', () {
       expect(
         StartupProjectRequest.parse(
