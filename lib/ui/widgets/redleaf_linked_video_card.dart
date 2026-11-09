@@ -99,9 +99,9 @@ class _RedleafLinkedVideoCardState extends State<RedleafLinkedVideoCard> {
         final ready = localPath != null && localPath.isNotEmpty;
 
         final item = ExplorerItem(
-          path: ready ? localPath : widget.document.media.path ?? '',
+          path: ready ? localPath! : (widget.document.media.path ?? ''),
           name: ready
-              ? ExplorerItem.basename(localPath)
+              ? ExplorerItem.basename(localPath!)
               : _mediaName(widget.document),
           kind: ExplorerItemKind.video,
         );
