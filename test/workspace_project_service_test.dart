@@ -239,7 +239,7 @@ void main() {
     });
 
     test(
-      'remembers a connected Redleaf instance as a separate workspace project',
+      'creates a named Redleaf workspace only after explicit import',
       () async {
         unawaited(_serveRedleaf(server));
 
@@ -276,9 +276,10 @@ void main() {
           isTrue,
         );
 
-        // Sign-in alone does not create an MLT Player cloud workspace.
+        // Authentication alone does not steal the active local project.
         expect(registry.projectByInstanceId('radio-test-instance'), isNull);
         expect(workspace.projects.where((p) => p.isRedleaf), isEmpty);
+        expect(workspace.activeProject!.localProjectId, documentary.id);
 
         await workspace.importConnectedRedleafProject(
           displayName: 'Radio Archive',
@@ -318,12 +319,9 @@ void main() {
         expect(saved.serverUrl, baseUrl);
         expect(saved.sourceProjectName, 'Radio Archive');
 
-        // Connecting Redleaf does not steal the active local project.
-        expect(workspace.activeProject!.isLocal, isTrue);
-        expect(
-          workspace.activeProject!.localProjectId,
-          documentary.id,
-        );
+        // Import does select the newly named remote workspace.
+        expect(workspace.activeIsRedleaf, isTrue);
+        expect(workspace.activeProject!.key, 'redleaf:radio-test-instance');
 
         workspace.dispose();
         registry.dispose();
