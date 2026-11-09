@@ -552,32 +552,33 @@ the operating-system keyring by the exact database instance ID. MLT Player
 does not write passwords into its project registry or configuration.
 Canceling onboarding leaves the MLT project registry unchanged.
 
-### Optional automatic Redleaf login through Hub's keyring
+### Built-in encrypted Redleaf login for Hub launches
 
-On Linux, Redleaf Hub's Project Library now has a **Credentials** button on
-each project row. Users can explicitly save or remove their Redleaf login
-in the desktop keyring (GNOME Keyring or KWallet). The apps share a versioned
-Secret Service entry keyed to Redleaf's canonical database `instance_id`.
-No password appears in command-line arguments, project JSON files, app
-settings, logs, or environment variables. Hub's saved login is also bound to
-the origin `http://127.0.0.1:5000` and cannot be silently sent to a
-different server URL.
+Redleaf Hub's Project Library includes a **Credentials** button for saving
+login information for each initialized Redleaf database. MLT Player reads
+the same built-in encrypted vault directly. Neither app requires
+`secret-tool`, GNOME Keyring, KWallet or a separately installed service.
 
-When Hub opens an existing synced MLT Player project, its cached transcript
-catalog opens immediately. If a matching saved login is available, MLT Player
-also authenticates to Redleaf automatically in the same session, without
-triggering an automatic archive refresh. When onboarding a new project, the
-dialog can use the keyring credential so the user still chooses an MLT
-project name but does not need to type the Redleaf password again. The server
-validates the password and MLT Player verifies the returned database instance
-ID before importing.
+The apps bundle AES-256-GCM encryption. The shared vault lives under the
+user's XDG data directory, defaults to
+`$HOME/.local/share/redleaf-hub-mlt-auth/v2`, and uses Linux `0700`
+directory permissions with `0600` key and encrypted record files.
+Each secret is bound to a database `instance_id` and trusted server origin.
+No password is passed in the launch arguments, app settings or logs.
 
-On Ubuntu, the `secret-tool` utility is provided by `libsecret-tools`.
-A running, unlocked desktop Secret Service keyring is also required.
-If it is absent or rejects a saved login, MLT Player falls back to manual
-sign-in. The first version of shared credentials is Linux-only; **there
-is no insecure plaintext fallback**. Browser password managers remain
-separate from the desktop keyring.
+An existing synced MLT workspace opens its cached catalog immediately.
+MLT Player can then sign in automatically using the saved login without
+forcing a catalog refresh. An unsynced project asks for the MLT project
+name and offers **Use saved Redleaf login from Hub**. Redleaf verifies the
+credential and MLT Player confirms the exact database identity before
+importing. If a password is outdated or unavailable, manual login remains
+available.
+
+**Tradeoff:** Automatic login needs a locally readable encryption key.
+The key and ciphertext are protected by Linux user file permissions but
+are not safe from malicious software with those same user privileges.
+This is not an OS keyring or hardware-backed password store. The desktop
+vault does not import browser passwords. No manual system dependencies.
 
 ## Build and run
 
