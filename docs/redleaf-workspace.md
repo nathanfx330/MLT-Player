@@ -397,6 +397,14 @@ The current Redleaf Explorer view contains:
 - live Redleaf user catalog names;
 - catalog filtering by canonical Redleaf `doc_id`;
 - the SRT table with doc ID, path, tag count, color, and media state;
+- a **THUMBNAILS** switch that shows only SRTs explicitly linked to video;
+- identical local Explorer media-card visuals, slider density, MLT thumbnail
+  generation and representative-frame cache for verified local video files;
+- thumbnails filtered by the same SRT search and catalog membership;
+- an explicit offline/unavailable fallback rather than decoding an unverified
+  URL or guessed file location;
+- single-click SRT selection, with double-click using the existing verified,
+  transcript-aware Player handoff after thumbnail jobs drain;
 - a read-only inspector for the selected SRT.
 
 The PROJECT tab follows the same workspace switch.

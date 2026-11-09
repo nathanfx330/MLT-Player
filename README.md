@@ -33,6 +33,16 @@ media database first. For Redleaf Projects it browses a saved Redleaf
 catalog/SRT snapshot and can reconnect to Redleaf only when live data or a
 controlled media-link action is needed.
 
+**Redleaf video thumbnails:** Redleaf Explorer now has **THUMBNAILS** and
+**SRT TABLE** modes. Thumbnails include only Redleaf SRTs explicitly linked
+to video, honor the current search and catalog filter, and use the identical
+media card, thumbnail image renderer, size metrics and cached MLT
+representative-frame generator as normal Explorer projects. Only verified
+local files are decoded, never unverified Redleaf URLs. Single click selects
+the SRT for its existing inspector, and double click uses the verified,
+transcript-aware Player handoff. Offline or unavailable video links display
+the normal fallback artwork. The original SRT table remains the default.
+
 **Project** is the organizational layer. Local Projects summarize Catalogs,
 ratings, tags, color labels, and bookmarks. Redleaf Projects have their own
 persistent MLT Player identity, name, last-known server, source identity, and
