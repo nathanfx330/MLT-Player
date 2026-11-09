@@ -8,6 +8,7 @@ import 'explorer_media_thumbnail.dart';
 
 class ExplorerMediaCard extends StatelessWidget {
   const ExplorerMediaCard({
+    super.key,
     required this.item,
     required this.thumbnailService,
     required this.active,
