@@ -145,34 +145,40 @@ instance ID and an approved server origin. The dialog does not accept empty
 project names or credentials when needed. Canceling leaves the registry
 untouched. Older startup flags are unchanged.
 
-#### Shared keyring sign-in for Hub launches
+#### Shared encrypted vault for Hub launches
 
-`RedleafSharedCredentialVault` is identical in both desktop apps and uses
-Linux `secret-tool` with GNOME Keyring or KDE KWallet via the Secret Service
-API. A single secret item, identified by a versioned application namespace
-and Redleaf `instance_id`, holds the username, password and approved server
-origin. The password is sent to `secret-tool store` through **stdin only**;
-lookup and delete commands use nonsecret ID attributes. A saved password
-is never passed through Hub launch arguments, environment variables, JSON
-project settings or application logs.
+`RedleafSharedCredentialVault` is implemented identically in Redleaf Hub and
+MLT Player, using bundled Dart AES-256-GCM encryption. No external keyring
+command, secret service, native package installation or unlocked keyring is
+required. Each canonical `instance_id` maps to a separate authenticated
+encrypted record with a fresh random nonce. The trusted Redleaf server origin
+and username are inside the ciphertext.
 
-For a cached Redleaf project, the snapshot opens first. MLT Player then
-attempts an optional background login from the keyring, without forcing a
-catalog sync. For an unsynced project, onboarding offers a checkbox to use
-the saved login, while still requiring the user to approve the MLT name and
-import. Credentials are used only if the current server URL matches the
-origin stored with the secret. If the keyring is unavailable, locked or
-returns an outdated password, MLT Player falls back to manual login.
-Successful authentication must return the same `instance_id` as the
-local Redleaf database; mismatched instances are disconnected.
+Both programs use the same private Linux directory:
+`$XDG_DATA_HOME/redleaf-hub-mlt-auth/v2` or
+`$HOME/.local/share/redleaf-hub-mlt-auth/v2`. The vault folder and entries
+folder have mode `0700`, and the randomly generated encryption key and
+individual encrypted records have mode `0600`. The implementation uses the
+existing Linux libc directly through Dart FFI to create files privately and
+atomically, avoiding a temporary world-readable password file. The key itself
+is never sent in the launch arguments or environment.
 
-This integration currently targets Linux desktop keyrings only, using the
-`secret-tool` executable from `libsecret-tools`. It does not import
-browser-stored passwords and does not provide an unencrypted fallback.
-The keyring itself is accessible to programs permitted by the user's
-unlocked desktop session, so this protects against accidental credential
-exposure in process arguments and project files, not against malicious
-software already running as the same desktop user.
+For an already synced project, MLT Player opens its cached snapshot immediately,
+then optionally authenticates in the background using the saved credential.
+For onboarding, the user can choose the saved login and still select the
+MLT Player project name. The server origin must match exactly and the Redleaf
+authentication response must carry the selected database's `instance_id`.
+Wrong credentials fall back to manual login and no wrong database is imported.
+
+**Security model:** The goal is a self-contained, zero-install automatic login.
+Since unattended login requires decryption without a separate unlock secret,
+the encryption key is stored under the same Linux account as the ciphertext.
+This protects against incidental disclosure, other unprivileged Linux users,
+and passwords appearing in process arguments, but **does not** protect
+against malware running as the same user, compromise of the account, or an
+attacker with both files. Use a separate, unlocked OS keyring or hardware
+credential store for those stronger protections. The vault does not import
+browser passwords and does not use plaintext storage.
 
 ### Create New Redleaf Cloud Project from Settings
 
