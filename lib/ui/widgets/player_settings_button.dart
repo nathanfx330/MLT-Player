@@ -171,16 +171,16 @@ class _MltPlayerSettingsDialogState extends State<_MltPlayerSettingsDialog> {
       return;
     }
 
-    setState(() {
-      _importingRedleaf = true;
-      _importError = null;
-    });
-
     final name = _cloudProjectNameController.text.trim();
     if (name.isEmpty) {
       setState(() => _importError = 'Enter a project name before importing.');
       return;
     }
+
+    setState(() {
+      _importingRedleaf = true;
+      _importError = null;
+    });
 
     try {
       final trashed = widget.workspaceProjects?.connectedRedleafRecord?.isTrashed ?? false;
