@@ -77,7 +77,10 @@ void main() {
 
     // Simulate sign-in through a deterministic fake. HTTP authentication has
     // its own service tests and must not run inside a widget test's fake clock.
-    await tester.tap(find.text('SIGN IN'));
+    final signIn = find.text('SIGN IN', skipOffstage: false);
+    await tester.ensureVisible(signIn);
+    await tester.pumpAndSettle();
+    await tester.tap(signIn);
     await tester.pumpAndSettle();
     expect(connection.signInCalls, 1);
     expect(connection.isConnected, isTrue);
