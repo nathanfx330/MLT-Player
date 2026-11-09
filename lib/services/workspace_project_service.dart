@@ -32,6 +32,17 @@ class WorkspaceProjectService extends ChangeNotifier {
 
   bool get loaded => _loaded;
 
+  List<RedleafProjectRecord> get savedRedleafProjects =>
+      _loaded ? _redleafProjects.projects : const <RedleafProjectRecord>[];
+
+  List<RedleafProjectRecord> get trashedRedleafProjects =>
+      _loaded ? _redleafProjects.trashedProjects : const <RedleafProjectRecord>[];
+
+  RedleafProjectRecord? get connectedRedleafRecord => _loaded &&
+          _redleafConnection.isConnected
+      ? _redleafProjects.projectByInstanceId(_redleafConnection.instanceId)
+      : null;
+
   String? get activeKey => activeProject?.key;
 
   WorkspaceProject? get activeProject {
@@ -110,6 +121,7 @@ class WorkspaceProjectService extends ChangeNotifier {
     }
 
     final saved = _redleafProjects.projectByInstanceId(instanceId);
+    if (saved?.isTrashed == true) return null;
     final sourceProjectName = _redleafConnection.projectName.trim();
 
     return WorkspaceProject.redleaf(
@@ -172,6 +184,9 @@ class WorkspaceProjectService extends ChangeNotifier {
     required String suggestedName,
   }) async {
     _requireLoaded();
+    if (_redleafProjects.projectByInstanceId(instanceId)?.isTrashed == true) {
+      throw StateError('This Redleaf project is in Trash. Restore it first.');
+    }
     await _redleafProjects.rememberLocalProject(
       instanceId: instanceId,
       suggestedName: suggestedName,
@@ -203,7 +218,10 @@ class WorkspaceProjectService extends ChangeNotifier {
   /// Explicitly import the authenticated Redleaf instance as a workspace.
   /// Save its identity before selecting it so the project is available
   /// immediately and survives application restart.
-  Future<void> importConnectedRedleafProject() async {
+  Future<void> importConnectedRedleafProject({
+    String? displayName,
+    bool restoreFromTrash = false,
+  }) async {
     _requireLoaded();
 
     if (!_redleafConnection.isConnected) {
@@ -216,11 +234,14 @@ class WorkspaceProjectService extends ChangeNotifier {
     }
 
     final sourceName = _redleafConnection.projectName.trim();
-    await _redleafProjects.rememberConnectedProject(
+    final saved = _redleafProjects.projectByInstanceId(instanceId);
+    await _redleafProjects.importConnectedProject(
       instanceId: instanceId,
-      suggestedName: sourceName.isEmpty ? 'Redleaf' : sourceName,
+      displayName: displayName ?? saved?.name ??
+          (sourceName.isEmpty ? 'Redleaf' : sourceName),
       serverUrl: _redleafConnection.serverUrl,
       sourceProjectName: sourceName.isEmpty ? null : sourceName,
+      restoreFromTrash: restoreFromTrash,
     );
 
     // Sign-in may have changed while the local registry was being saved.
@@ -232,6 +253,16 @@ class WorkspaceProjectService extends ChangeNotifier {
     }
 
     select(WorkspaceProject.redleafKey(instanceId));
+  }
+
+  Future<void> trashRedleafProject(String instanceId) async {
+    _requireLoaded();
+    await _redleafProjects.trashProject(instanceId);
+  }
+
+  Future<void> restoreRedleafProject(String instanceId) async {
+    _requireLoaded();
+    await _redleafProjects.restoreProject(instanceId);
   }
 
   Future<void> renameRedleafProject(
