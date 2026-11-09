@@ -41,7 +41,7 @@ class StartupProjectRequest {
         );
       }
 
-      var normalized = requestedId.trim();
+      var normalized = (requestedId ?? '').trim();
       if (normalized.startsWith('redleaf:')) {
         normalized = normalized.substring('redleaf:'.length).trim();
       }
