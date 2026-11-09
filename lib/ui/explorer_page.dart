@@ -31,7 +31,7 @@ import '../services/redleaf_hub_launch_service.dart';
 import '../services/redleaf_shared_credential_vault.dart';
 import 'redleaf_page.dart';
 import 'widgets/catalog_child_tile.dart';
-import 'widgets/explorer_media_thumbnail.dart';
+import 'widgets/explorer_media_card.dart';
 import 'widgets/player_settings_button.dart';
 import 'widgets/redleaf_hub_onboarding_dialog.dart';
 import 'widgets/text_prompt_dialog.dart';
@@ -3199,7 +3199,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
                                     details.globalPosition,
                                   ),
                                 ),
-                        child: _ExplorerCard(
+                        child: ExplorerMediaCard(
                           item: item,
                           thumbnailService: _thumbnailService,
                           active: widget.active,
@@ -3210,11 +3210,14 @@ class _ExplorerPageState extends State<ExplorerPage> {
                                   item.path,
                                 )
                               : 0,
-                          colorHex: _annotationsLoaded
-                              ? widget.projectMediaMetadataService.colorHexFor(
-                                  _projectCatalogService.activeProjectId,
-                                  item.path,
-                                )
+                          colorStripe: _annotationsLoaded
+                              ? (() {
+                                  final hex = widget.projectMediaMetadataService.colorHexFor(
+                                    _projectCatalogService.activeProjectId,
+                                    item.path,
+                                  );
+                                  return hex == null ? null : _colorFromHex(hex);
+                                })()
                               : null,
                           favorite: favorite,
                           onTap: () {
@@ -3878,173 +3881,6 @@ class _ExplorerLocationRow extends StatelessWidget {
             ],
           ),
         ),
-      ),
-    );
-  }
-}
-
-class _ExplorerCard extends StatelessWidget {
-  const _ExplorerCard({
-    required this.item,
-    required this.thumbnailService,
-    required this.active,
-    required this.selected,
-    required this.rating,
-    required this.colorHex,
-    required this.favorite,
-    required this.onTap,
-    required this.onDoubleTap,
-  });
-
-  final ExplorerItem item;
-  final ThumbnailService thumbnailService;
-  final bool active;
-  final bool selected;
-  final int rating;
-  final String? colorHex;
-  final bool favorite;
-  final VoidCallback onTap;
-  final VoidCallback onDoubleTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final isRedleafLink =
-        item.isDirectory && item.path.toLowerCase().endsWith('.rlink');
-
-    final icon = isRedleafLink
-        ? Icons.link
-        : switch (item.kind) {
-      ExplorerItemKind.directory => Icons.folder,
-      ExplorerItemKind.video => Icons.movie_outlined,
-      ExplorerItemKind.audio => Icons.graphic_eq,
-      ExplorerItemKind.image => Icons.image_outlined,
-      ExplorerItemKind.project => Icons.account_tree_outlined,
-    };
-
-    return Material(
-      color: selected
-          ? const Color(0x33E8A33D)
-          : const Color(0xFF1B1B1B),
-      borderRadius: BorderRadius.circular(8),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: onTap,
-        onDoubleTap: onDoubleTap,
-        child: Container(
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(
-              color: selected
-                  ? const Color(0xFFE8A33D)
-                  : Colors.white10,
-            ),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Expanded(
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    ExplorerMediaThumbnail(
-                      item: item,
-                      thumbnailService: thumbnailService,
-                      fallbackIcon: icon,
-                      active: active,
-                    ),
-                    if (favorite && !item.isDirectory)
-                      const Positioned(
-                        top: 7,
-                        left: 7,
-                        child: Icon(
-                          Icons.star,
-                          size: 16,
-                          color: Color(0xFFE8A33D),
-                          shadows: [
-                            Shadow(
-                              blurRadius: 4,
-                              color: Colors.black87,
-                            ),
-                          ],
-                        ),
-                      ),
-                    if (!item.isDirectory && rating > 0)
-                      Positioned(
-                        top: 7,
-                        right: 7,
-                        child: _ExplorerRatingBadge(rating: rating),
-                      ),
-                  ],
-                ),
-              ),
-              if (colorHex != null)
-                Container(
-                  height: 4,
-                  color: _colorFromHex(colorHex!),
-                ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(9, 8, 9, 3),
-                child: Text(
-                  item.name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style:
-                      const TextStyle(fontSize: 12, color: Colors.white70),
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(9, 0, 9, 8),
-                child: Text(
-                  isRedleafLink
-                      ? 'R.LINK VIRTUAL FOLDER'
-                      : item.isDirectory
-                          ? 'Folder'
-                          : item.extension.toUpperCase(),
-                  style:
-                      const TextStyle(fontSize: 9, color: Colors.white30),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _ExplorerRatingBadge extends StatelessWidget {
-  const _ExplorerRatingBadge({required this.rating});
-
-  final int rating;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding:
-          const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-      decoration: BoxDecoration(
-        color: const Color(0xCC111111),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: Colors.white12),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const Icon(
-            Icons.star,
-            size: 11,
-            color: Color(0xFFE8A33D),
-          ),
-          const SizedBox(width: 3),
-          Text(
-            '$rating',
-            style: const TextStyle(
-              fontSize: 9,
-              fontWeight: FontWeight.w700,
-              color: Colors.white70,
-            ),
-          ),
-        ],
       ),
     );
   }
