@@ -1408,6 +1408,32 @@ class _ExplorerPageState extends State<ExplorerPage> {
     );
   }
 
+  int _cloudImportRequestSerial = 0;
+
+  /// Create or reopen the connected Redleaf workspace, then request one
+  /// user-initiated snapshot import in the existing Redleaf Explorer.
+  Future<void> _importConnectedRedleafProject() async {
+    if (!_projectCatalogsLoaded || !_workspaceProjectService.loaded) {
+      throw StateError('Projects are still loading. Try again shortly.');
+    }
+
+    await _workspaceProjectService.importConnectedRedleafProject();
+
+    if (!mounted) return;
+
+    _expandedCatalogIds.clear();
+    _filterController.clear();
+    setState(() {
+      _cloudImportRequestSerial += 1;
+      _filterQuery = '';
+      _ratingFilter = _RatingFilterChoice.any;
+      _tagFilter = null;
+      _colorFilter = null;
+      _selectedPath = null;
+    });
+    await _thumbnailService.pauseAndDrain();
+  }
+
   Future<void> _switchWorkspaceProject(
     String workspaceProjectKey,
   ) async {
@@ -2210,6 +2236,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
                 workspaceProject: _workspaceProjectService.activeProject,
                 onOpenVerifiedMedia: widget.onOpenMedia,
                 onOpenRedleafHandoff: widget.onOpenRedleafMedia,
+                importRequestSerial: _cloudImportRequestSerial,
               ),
             ),
           ],
@@ -2277,6 +2304,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
                   settings: widget.playerSettings!,
                   mltVersion: widget.version,
                   explorerNavigation: _navigationService,
+                  onImportConnectedRedleaf: _importConnectedRedleafProject,
                   onOpenHistoryPath: _openHistoryPath,
                   onClosed: _handleSettingsClosed,
                 ),
@@ -2452,6 +2480,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
                   settings: widget.playerSettings!,
                   mltVersion: widget.version,
                   explorerNavigation: _navigationService,
+                  onImportConnectedRedleaf: _importConnectedRedleafProject,
                   onOpenHistoryPath: _openHistoryPath,
                   onClosed: _handleSettingsClosed,
                 ),
