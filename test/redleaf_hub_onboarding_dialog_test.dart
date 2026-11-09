@@ -14,6 +14,7 @@ class _FakeConnection extends RedleafConnectionService {
   String answeredInstanceId = 'expected-instance';
   String currentInstanceId = '';
   bool connected = false;
+  bool acceptLogin = true;
   int signInCalls = 0;
   int disconnectCalls = 0;
   String? lastUsername;
@@ -33,7 +34,8 @@ class _FakeConnection extends RedleafConnectionService {
   String get serverUrl => RedleafConnectionService.defaultServerUrl;
 
   @override
-  String? get lastError => null;
+  String? get lastError =>
+      acceptLogin ? null : 'Incorrect Redleaf credentials.';
 
   @override
   Future<bool> signIn({
@@ -42,6 +44,7 @@ class _FakeConnection extends RedleafConnectionService {
     required String password,
   }) async {
     signInCalls += 1;
+    if (!acceptLogin) return false;
     lastUsername = username;
     lastPassword = password;
     lastServerUrl = serverUrl;
@@ -235,6 +238,41 @@ void main() {
     expect(connection.lastPassword, isNull);
     expect(find.text('Enter your Redleaf username and password.'),
         findsOneWidget);
+  });
+
+  testWidgets('rejected keyring login falls back to manual sign-in',
+      (tester) async {
+    connection.acceptLogin = false;
+    var imports = 0;
+    await open(
+      tester,
+      savedCredentials: const RedleafSavedCredentials(
+        username: 'saved-user',
+        password: 'expired-password',
+        serverUrl: 'http://127.0.0.1:5000',
+      ),
+      onImport: (name, restore) async => imports += 1,
+    );
+
+    await tester.tap(find.text('SIGN IN AND IMPORT'));
+    await tester.pumpAndSettle();
+    expect(imports, 0);
+    expect(connection.signInCalls, 1);
+    expect(find.textContaining('Incorrect Redleaf credentials'),
+        findsOneWidget);
+
+    final checkbox = tester.widget<CheckboxListTile>(
+      find.byType(CheckboxListTile),
+    );
+    expect(checkbox.value, isFalse);
+
+    connection.acceptLogin = true;
+    await tester.enterText(find.byType(TextField).at(3), 'new-correct-password');
+    await tester.tap(find.text('SIGN IN AND IMPORT'));
+    await tester.pumpAndSettle();
+    expect(imports, 1);
+    expect(connection.signInCalls, 2);
+    expect(connection.lastPassword, 'new-correct-password');
   });
 
 }
