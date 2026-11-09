@@ -116,7 +116,7 @@ class RedleafSharedCredentialVault {
   Future<SecretKey?> _getKey({required bool create}) async {
     final file = _keyFile;
     if (!await file.exists() && create) {
-      final temp = File('${file.path}.tmp.${pid}.${base64Url.encode(_randomBytes(12))}');
+      final temp = File('${file.path}.tmp.$pid.${base64Url.encode(_randomBytes(12))}');
       await _LinuxPrivateFiles.writeNewFile(
         temp,
         _randomBytes(32),
@@ -379,7 +379,7 @@ class _LinuxPrivateFiles {
   static Future<void> atomicWrite(File target, List<int> bytes) async {
     _assertNoLink(target.path);
     final temporary = File(
-      '${target.path}.tmp.${pid}.${base64Url.encode(RedleafSharedCredentialVault._randomBytes(12))}',
+      '${target.path}.tmp.$pid.${base64Url.encode(RedleafSharedCredentialVault._randomBytes(12))}',
     );
     await writeNewFile(temporary, bytes);
     try {
