@@ -120,7 +120,7 @@ class _RedleafHubOnboardingDialogState
         widget.connection.serverUrl == server;
 
     // A Hub launch argument can be user-controlled. Never send a saved
-    // password to an origin other than the one approved in Hub's keyring.
+    // password to an origin other than the one approved in Hub's vault.
     final useSavedLogin = _useSavedLogin && _savedOriginMatches(server);
     if (!alreadyConnected &&
         !useSavedLogin &&
@@ -146,7 +146,7 @@ class _RedleafHubOnboardingDialogState
         );
         if (!authenticated) {
           // An outdated saved secret should never cause an endless retry
-          // loop. Switch to manual entry while leaving Hub's keyring alone.
+          // loop. Switch to manual entry while leaving Hub's vault unchanged.
           if (useSavedLogin && mounted) {
             setState(() => _useSavedLogin = false);
           }
@@ -319,7 +319,7 @@ class _RedleafHubOnboardingDialogState
               const SizedBox(height: 10),
               const Text(
                 'Saved credentials, when selected, are read from the '
-                'Linux login keyring, not passed in the Hub launch command. '
+                'shared encrypted local vault, not passed in the Hub launch command. '
                 'MLT Player verifies the Redleaf database identity before importing.',
                 style: TextStyle(fontSize: 11, color: Colors.white54),
               ),
