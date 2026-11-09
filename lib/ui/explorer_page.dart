@@ -31,6 +31,7 @@ import '../services/redleaf_hub_launch_service.dart';
 import '../services/redleaf_shared_credential_vault.dart';
 import 'redleaf_page.dart';
 import 'widgets/catalog_child_tile.dart';
+import 'widgets/explorer_media_thumbnail.dart';
 import 'widgets/player_settings_button.dart';
 import 'widgets/redleaf_hub_onboarding_dialog.dart';
 import 'widgets/text_prompt_dialog.dart';
@@ -3945,7 +3946,7 @@ class _ExplorerCard extends StatelessWidget {
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
-                    _ExplorerThumbnail(
+                    ExplorerMediaThumbnail(
                       item: item,
                       thumbnailService: thumbnailService,
                       fallbackIcon: icon,
@@ -4172,7 +4173,7 @@ class _ExplorerSelectionPaneState
             aspectRatio: 16 / 9,
             child: ClipRRect(
               borderRadius: BorderRadius.circular(8),
-              child: _ExplorerThumbnail(
+              child: ExplorerMediaThumbnail(
                 item: item,
                 thumbnailService: widget.thumbnailService,
                 fallbackIcon: icon,
@@ -4698,125 +4699,5 @@ class _ExplorerMetadataTable extends StatelessWidget {
 
     return '${local.year}-${two(local.month)}-${two(local.day)} '
         '${two(local.hour)}:${two(local.minute)}';
-  }
-}
-
-class _ExplorerThumbnail extends StatefulWidget {
-  const _ExplorerThumbnail({
-    required this.item,
-    required this.thumbnailService,
-    required this.fallbackIcon,
-    required this.active,
-  });
-
-  final ExplorerItem item;
-  final ThumbnailService thumbnailService;
-  final IconData fallbackIcon;
-  final bool active;
-
-  @override
-  State<_ExplorerThumbnail> createState() =>
-      _ExplorerThumbnailState();
-}
-
-class _ExplorerThumbnailState
-    extends State<_ExplorerThumbnail> {
-  Future<String?>? _thumbnailFuture;
-
-  @override
-  void initState() {
-    super.initState();
-    _requestThumbnail();
-  }
-
-  @override
-  void didUpdateWidget(
-    covariant _ExplorerThumbnail oldWidget,
-  ) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.item.path != widget.item.path ||
-        oldWidget.item.kind != widget.item.kind ||
-        !identical(
-          oldWidget.thumbnailService,
-          widget.thumbnailService,
-        ) ||
-        oldWidget.active != widget.active) {
-      _requestThumbnail();
-    }
-  }
-
-  void _requestThumbnail() {
-    if (!widget.active) {
-      _thumbnailFuture = null;
-      return;
-    }
-
-    _thumbnailFuture =
-        widget.thumbnailService.supports(widget.item)
-            ? widget.thumbnailService.thumbnailFor(widget.item)
-            : null;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final future = _thumbnailFuture;
-    if (future == null) {
-      return _buildFallback(loading: false);
-    }
-
-    return FutureBuilder<String?>(
-      future: future,
-      builder: (context, snapshot) {
-        final path = snapshot.data;
-        if (path != null && path.isNotEmpty) {
-          return Image.file(
-            File(path),
-            fit: BoxFit.cover,
-            filterQuality: FilterQuality.medium,
-            gaplessPlayback: true,
-            errorBuilder: (context, error, stackTrace) {
-              return _buildFallback(loading: false);
-            },
-          );
-        }
-
-        return _buildFallback(
-          loading:
-              snapshot.connectionState ==
-                  ConnectionState.waiting,
-        );
-      },
-    );
-  }
-
-  Widget _buildFallback({required bool loading}) {
-    return ColoredBox(
-      color: Colors.black26,
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          Center(
-            child: Icon(
-              widget.fallbackIcon,
-              size: 52,
-              color: Colors.white30,
-            ),
-          ),
-          if (loading)
-            const Positioned(
-              right: 8,
-              bottom: 8,
-              child: SizedBox(
-                width: 14,
-                height: 14,
-                child: CircularProgressIndicator(
-                  strokeWidth: 1.5,
-                  color: Colors.white38,
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
   }
 }
