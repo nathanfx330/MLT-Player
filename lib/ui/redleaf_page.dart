@@ -1522,7 +1522,7 @@ class _RedleafPageState extends State<RedleafPage> {
       itemBuilder: (context, index) {
         final document = videos[index];
         return RedleafLinkedVideoCard(
-          key: ValueKey('redleaf-video-${_workspaceInstanceId}-${document.docId}'),
+          key: ValueKey('redleaf-video-$_workspaceInstanceId-${document.docId}'),
           document: document,
           mediaResources: _mediaResources,
           thumbnailService: _thumbnailService,
