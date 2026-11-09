@@ -129,7 +129,10 @@ void main() {
         isTrue,
       );
 
-      await workspace.importConnectedRedleafProject();
+      expect(registry.projects, isEmpty);
+      await workspace.importConnectedRedleafProject(
+        displayName: 'My Research Archive',
+      );
 
       expect(workspace.activeKey, 'redleaf:radio-test-instance');
       expect(workspace.activeIsRedleaf, isTrue);
@@ -142,12 +145,11 @@ void main() {
       // Sign-in and project selection must not start a hidden archive scan.
       expect(redleaf.inventoryLoaded, isFalse);
 
-      await registry.renameProject('radio-test-instance', 'My Research');
       workspace.selectLocalProject(localId);
       await workspace.importConnectedRedleafProject();
 
       expect(workspace.activeKey, 'redleaf:radio-test-instance');
-      expect(workspace.activeProject?.name, 'My Research');
+      expect(workspace.activeProject?.name, 'My Research Archive');
       expect(registry.projects, hasLength(1));
 
       workspace.dispose();
@@ -193,13 +195,13 @@ void main() {
           isTrue,
         );
 
-        await _waitFor(
-          () => registry.projectByInstanceId(
-            'radio-test-instance',
-          ) !=
-              null,
+        // Sign-in alone does not create an MLT Player cloud workspace.
+        expect(registry.projectByInstanceId('radio-test-instance'), isNull);
+        expect(workspace.projects.where((p) => p.isRedleaf), isEmpty);
+
+        await workspace.importConnectedRedleafProject(
+          displayName: 'Radio Archive',
         );
-        await registry.save();
 
         final projects = workspace.projects;
 
@@ -282,11 +284,8 @@ void main() {
           isTrue,
         );
 
-        await _waitFor(
-          () => registry.projectByInstanceId(
-            'radio-test-instance',
-          ) !=
-              null,
+        await workspace.importConnectedRedleafProject(
+          displayName: 'Radio Archive',
         );
 
         workspace.selectRedleaf();
@@ -355,18 +354,9 @@ void main() {
           isTrue,
         );
 
-        await _waitFor(
-          () => firstRegistry.projectByInstanceId(
-            'radio-test-instance',
-          ) !=
-              null,
+        await firstWorkspace.importConnectedRedleafProject(
+          displayName: 'Rustbelt Research Archive',
         );
-
-        await firstRegistry.renameProject(
-          'radio-test-instance',
-          'Rustbelt Research Archive',
-        );
-        await firstRegistry.save();
 
         expect(
           firstWorkspace.projects
@@ -433,22 +423,6 @@ void main() {
       },
     );
   });
-}
-
-Future<void> _waitFor(
-  bool Function() condition, {
-  Duration timeout = const Duration(seconds: 2),
-}) async {
-  final deadline = DateTime.now().add(timeout);
-
-  while (!condition()) {
-    if (DateTime.now().isAfter(deadline)) {
-      fail('Timed out waiting for asynchronous workspace state.');
-    }
-    await Future<void>.delayed(
-      const Duration(milliseconds: 10),
-    );
-  }
 }
 
 Future<void> _serveRedleaf(HttpServer server) async {
