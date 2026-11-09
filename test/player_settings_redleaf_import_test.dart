@@ -176,21 +176,13 @@ void main() {
 
   testWidgets('Cloud Trash hides a project and Restore returns it',
       (tester) async {
-    final local = ProjectCatalogService(
-      configDirectory: Directory('${tempDirectory.path}/local'),
-    );
-    final registry = RedleafProjectRegistryService(
-      configDirectory: Directory('${tempDirectory.path}/projects'),
-    );
-    final workspace = WorkspaceProjectService(
-      localProjects: local,
-      redleafConnection: connection,
-      redleafProjects: registry,
-    );
-    await workspace.load();
+    // Widget tests use fake asynchronous time. Test the UI with an in-memory
+    // workspace; real registry writes and restart are covered separately in
+    // redleaf_project_trash_test.dart using ordinary Dart tests.
     connection.connect();
-    await workspace.importConnectedRedleafProject(
-      displayName: 'My Cloud Archive',
+    final workspace = _FakeWorkspaceProjectService(
+      directory: tempDirectory,
+      redleafConnection: connection,
     );
 
     await tester.pumpWidget(
@@ -231,10 +223,11 @@ void main() {
 
     expect(workspace.savedRedleafProjects, hasLength(1));
     expect(workspace.trashedRedleafProjects, isEmpty);
+    expect(workspace.trashCalls, 1);
+    expect(workspace.restoreCalls, 1);
 
     await tester.pumpWidget(const SizedBox.shrink());
     workspace.dispose();
-    registry.dispose();
   });
 
   testWidgets('failed project import leaves Settings open with an error',
@@ -275,6 +268,73 @@ void main() {
       findsOneWidget,
     );
   });
+}
+
+/// In-memory workspace for widget tests. Registry persistence is exercised
+/// by normal Dart tests, never inside the widget test's simulated async clock.
+class _FakeWorkspaceProjectService extends WorkspaceProjectService {
+  _FakeWorkspaceProjectService({
+    required Directory directory,
+    required RedleafConnectionService redleafConnection,
+  }) : super(
+          localProjects: ProjectCatalogService(
+            configDirectory: Directory('${directory.path}/local'),
+          ),
+          redleafConnection: redleafConnection,
+          redleafProjects: RedleafProjectRegistryService(
+            configDirectory: Directory('${directory.path}/registry'),
+          ),
+        );
+
+  late final RedleafProjectRecord _record = RedleafProjectRecord(
+    instanceId: 'settings-import-test',
+    name: 'My Cloud Archive',
+    serverUrl: RedleafConnectionService.defaultServerUrl,
+    createdAt: DateTime.utc(2026, 11, 9),
+    updatedAt: DateTime.utc(2026, 11, 9),
+  );
+
+  bool _trashed = false;
+  int trashCalls = 0;
+  int restoreCalls = 0;
+
+  @override
+  bool get loaded => true;
+
+  @override
+  List<RedleafProjectRecord> get savedRedleafProjects =>
+      _trashed ? <RedleafProjectRecord>[] : <RedleafProjectRecord>[_record];
+
+  @override
+  List<RedleafProjectRecord> get trashedRedleafProjects =>
+      _trashed
+          ? <RedleafProjectRecord>[
+              _record.copyWith(trashedAt: DateTime.utc(2026, 11, 9))
+            ]
+          : <RedleafProjectRecord>[];
+
+  @override
+  RedleafProjectRecord? get connectedRedleafRecord =>
+      _trashed ? trashedRedleafProjects.single : _record;
+
+  @override
+  bool get activeIsLocal => _trashed;
+
+  @override
+  Future<void> trashRedleafProject(String instanceId) async {
+    expect(instanceId, _record.instanceId);
+    trashCalls += 1;
+    _trashed = true;
+    notifyListeners();
+  }
+
+  @override
+  Future<void> restoreRedleafProject(String instanceId) async {
+    expect(instanceId, _record.instanceId);
+    restoreCalls += 1;
+    _trashed = false;
+    notifyListeners();
+  }
 }
 
 /// Widget-test double. Real Redleaf login HTTP behavior is covered by the
