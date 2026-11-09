@@ -140,8 +140,9 @@ Hub's port-5000 TCP check does not prove which database is running; a wrong
 server is disconnected and rejected before any registry import. Neither
 password nor session cookie is passed in the process arguments or persisted
 in MLT Player's configuration. Credentials saved explicitly in Redleaf Hub
-may be retrieved from the Linux login keyring, bound to the same database
-instance ID and an approved server origin. The dialog does not accept empty
+may be retrieved from the shared app-managed encrypted vault, bound to the
+same database instance ID and an approved server origin. No external Linux
+keyring utility or daemon is needed. The dialog does not accept empty
 project names or credentials when needed. Canceling leaves the registry
 untouched. Older startup flags are unchanged.
 
