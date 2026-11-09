@@ -126,6 +126,7 @@ void main() {
     final resources = _FakeMediaResolver(
       const RedleafMediaResourceResolution(
         state: RedleafMediaResourceState.localFileReady,
+        redleafReference: '/serve_doc/my-media.rlink/interview.mp4',
         resolvedResource: '/media/archive/interview.mp4',
         message: 'Verified',
       ),
