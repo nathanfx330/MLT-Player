@@ -251,6 +251,11 @@ class WorkspaceProjectService extends ChangeNotifier {
     await _redleafProjects.restoreProject(instanceId);
   }
 
+  Future<int> emptyRedleafTrash() async {
+    _requireLoaded();
+    return _redleafProjects.emptyTrash();
+  }
+
   Future<void> renameRedleafProject(
     String instanceId,
     String name,
