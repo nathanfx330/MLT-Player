@@ -3,6 +3,7 @@
 import 'package:flutter/material.dart';
 
 import '../../services/redleaf_connection_service.dart';
+import '../../services/redleaf_shared_credential_vault.dart';
 
 /// Launched by Redleaf Hub for a database that has not yet been imported and
 /// synced into MLT Player. The Hub passes only the project folder and server
@@ -18,6 +19,8 @@ class RedleafHubOnboardingDialog extends StatefulWidget {
     this.existingInTrash = false,
     this.hasCachedSnapshot = false,
     this.onRestoreCached,
+    this.savedCredentials,
+    this.keyringWarning,
   });
 
   final String expectedInstanceId;
@@ -29,6 +32,8 @@ class RedleafHubOnboardingDialog extends StatefulWidget {
   final bool existingInTrash;
   final bool hasCachedSnapshot;
   final Future<void> Function()? onRestoreCached;
+  final RedleafSavedCredentials? savedCredentials;
+  final String? keyringWarning;
 
   @override
   State<RedleafHubOnboardingDialog> createState() =>
@@ -44,6 +49,7 @@ class _RedleafHubOnboardingDialogState
 
   bool _busy = false;
   bool _showPassword = false;
+  bool _useSavedLogin = false;
   String? _error;
 
   bool get _canRestoreOffline =>
@@ -55,9 +61,12 @@ class _RedleafHubOnboardingDialogState
   void initState() {
     super.initState();
     _server = TextEditingController(text: widget.serverUrl);
-    _username = TextEditingController(text: widget.connection.username);
+    _username = TextEditingController(
+      text: widget.savedCredentials?.username ?? widget.connection.username,
+    );
     _password = TextEditingController();
     _projectName = TextEditingController(text: widget.suggestedName);
+    _useSavedLogin = widget.savedCredentials != null;
   }
 
   @override
@@ -99,7 +108,9 @@ class _RedleafHubOnboardingDialogState
         widget.connection.instanceId == widget.expectedInstanceId &&
         widget.connection.serverUrl == server;
 
+    final useSavedLogin = _useSavedLogin && widget.savedCredentials != null;
     if (!alreadyConnected &&
+        !useSavedLogin &&
         (_username.text.trim().isEmpty || _password.text.isEmpty)) {
       setState(() => _error = 'Enter your Redleaf username and password.');
       return;
@@ -113,10 +124,19 @@ class _RedleafHubOnboardingDialogState
       if (!alreadyConnected) {
         final authenticated = await widget.connection.signIn(
           serverUrl: server,
-          username: _username.text.trim(),
-          password: _password.text,
+          username: useSavedLogin
+              ? widget.savedCredentials!.username
+              : _username.text.trim(),
+          password: useSavedLogin
+              ? widget.savedCredentials!.password
+              : _password.text,
         );
         if (!authenticated) {
+          // An outdated saved secret should never cause an endless retry
+          // loop. Switch to manual entry while leaving Hub's keyring alone.
+          if (useSavedLogin && mounted) {
+            setState(() => _useSavedLogin = false);
+          }
           throw StateError(
             widget.connection.lastError ??
                 'Could not sign in to this Redleaf server.',
@@ -207,9 +227,38 @@ class _RedleafHubOnboardingDialogState
                 ),
               ),
               const SizedBox(height: 12),
+              if (widget.savedCredentials != null) ...[
+                CheckboxListTile(
+                  value: _useSavedLogin,
+                  onChanged: _busy
+                      ? null
+                      : (value) => setState(
+                            () => _useSavedLogin = value ?? false,
+                          ),
+                  controlAffinity: ListTileControlAffinity.leading,
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  title: const Text('Use saved Redleaf login from Hub'),
+                  subtitle: Text(
+                    'Account: ${widget.savedCredentials!.username}',
+                    style: const TextStyle(color: Colors.white60),
+                  ),
+                ),
+                const SizedBox(height: 8),
+              ],
+              if (widget.keyringWarning != null) ...[
+                Text(
+                  widget.keyringWarning!,
+                  style: const TextStyle(
+                    color: Colors.amberAccent,
+                    fontSize: 12,
+                  ),
+                ),
+                const SizedBox(height: 8),
+              ],
               TextField(
                 controller: _username,
-                enabled: !_busy,
+                enabled: !_busy && !_useSavedLogin,
                 decoration: const InputDecoration(
                   labelText: 'Redleaf username',
                   border: OutlineInputBorder(),
@@ -219,7 +268,7 @@ class _RedleafHubOnboardingDialogState
               const SizedBox(height: 12),
               TextField(
                 controller: _password,
-                enabled: !_busy,
+                enabled: !_busy && !_useSavedLogin,
                 obscureText: !_showPassword,
                 onSubmitted: (_) => _signInAndImport(),
                 decoration: InputDecoration(
@@ -243,9 +292,9 @@ class _RedleafHubOnboardingDialogState
               ),
               const SizedBox(height: 10),
               const Text(
-                'The password is used only to sign in to Redleaf. '
-                'It is not saved or passed from Redleaf Hub. MLT Player '
-                'verifies the Redleaf database identity before importing.',
+                'Saved credentials, when selected, are read from the '
+                'Linux login keyring, not passed in the Hub launch command. '
+                'MLT Player verifies the Redleaf database identity before importing.',
                 style: TextStyle(fontSize: 11, color: Colors.white54),
               ),
               if (_error != null) ...[
