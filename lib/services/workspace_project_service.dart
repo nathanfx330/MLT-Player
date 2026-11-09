@@ -165,6 +165,20 @@ class WorkspaceProjectService extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Open the Redleaf workspace for an existing local database.
+  /// Does not require the Redleaf server or scan for documents.
+  Future<void> selectLocalRedleafProject({
+    required String instanceId,
+    required String suggestedName,
+  }) async {
+    _requireLoaded();
+    await _redleafProjects.rememberLocalProject(
+      instanceId: instanceId,
+      suggestedName: suggestedName,
+    );
+    select(WorkspaceProject.redleafKey(instanceId));
+  }
+
   void selectLocalProject(String projectId) {
     select(WorkspaceProject.localKey(projectId));
   }
