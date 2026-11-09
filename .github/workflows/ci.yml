@@ -66,18 +66,10 @@ jobs:
         run: |
           flutter config --enable-linux-desktop
           flutter precache --linux
-          flutter pub get
+          flutter pub get --enforce-lockfile
           # A real Linux build is required on a clean runner to generate
           # linux/flutter/ephemeral, which tools/smoke.sh links against.
           flutter build linux --debug --no-pub
-
-      - name: Capture resolved dependency lock (temporary bootstrap)
-        shell: bash
-        run: |
-          echo 'LOCKFILE_B64_BEGIN'
-          base64 -w0 pubspec.lock
-          echo
-          echo 'LOCKFILE_B64_END'
 
       - name: Enforce committed dependency lock
         run: git diff --exit-code -- pubspec.lock
