@@ -214,6 +214,31 @@ void main() {
       expect(workspace.activeKey, 'redleaf:existing-id');
     });
 
+    test('local folder launch does not silently restore a trashed project',
+        () async {
+      final project = Directory('${tempDirectory.path}/Trashed Archive');
+      await project.create();
+      await _createRedleafDatabase(
+        project,
+        instanceId: 'trashed-local-instance',
+      );
+
+      await registry.rememberLocalProject(
+        instanceId: 'trashed-local-instance',
+        suggestedName: 'Trashed Archive',
+      );
+      await registry.trashProject('trashed-local-instance');
+
+      final request = StartupProjectRequest.parse(
+        <String>['--redleaf-project-path', project.path],
+      );
+      final original = workspace.activeKey;
+      expect(await request.applyTo(workspace), contains('Trash'));
+      expect(workspace.activeKey, original);
+      expect(registry.trashedProjects, hasLength(1));
+      expect(registry.projects, isEmpty);
+    });
+
     test('refuses a folder with no database and leaves state unchanged',
         () async {
       final emptyFolder = Directory('${tempDirectory.path}/Empty');
