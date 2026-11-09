@@ -174,11 +174,8 @@ void main() {
     expect(imports, 1);
   });
 
-  testWidgets('Cloud Trash hides a project and Restore returns it',
+  testWidgets('Settings points to the standard project options menu',
       (tester) async {
-    // Widget tests use fake asynchronous time. Test the UI with an in-memory
-    // workspace; real registry writes and restart are covered separately in
-    // redleaf_project_trash_test.dart using ordinary Dart tests.
     connection.connect();
     final workspace = _FakeWorkspaceProjectService(
       directory: tempDirectory,
@@ -201,30 +198,19 @@ void main() {
     await tester.tap(find.byTooltip('Settings'));
     await tester.pumpAndSettle();
 
-    final trash = find.byTooltip('Move My Cloud Archive to Trash');
-    await tester.ensureVisible(trash);
-    await tester.pumpAndSettle();
-    await tester.tap(trash);
-    await tester.pumpAndSettle();
-    expect(find.text('Move Redleaf project to Trash?'), findsOneWidget);
-    await tester.tap(find.text('MOVE TO TRASH'));
-    await tester.pumpAndSettle();
-
-    expect(workspace.savedRedleafProjects, isEmpty);
-    expect(workspace.trashedRedleafProjects, hasLength(1));
-    expect(workspace.activeIsLocal, isTrue);
-    expect(find.text('TRASH (1)', skipOffstage: false), findsOneWidget);
-
-    final restore = find.text('RESTORE', skipOffstage: false);
-    await tester.ensureVisible(restore);
-    await tester.pumpAndSettle();
-    await tester.tap(restore);
-    await tester.pumpAndSettle();
-
-    expect(workspace.savedRedleafProjects, hasLength(1));
-    expect(workspace.trashedRedleafProjects, isEmpty);
-    expect(workspace.trashCalls, 1);
-    expect(workspace.restoreCalls, 1);
+    expect(
+      find.textContaining(
+        'use the three-dot menu',
+        skipOffstage: false,
+      ),
+      findsOneWidget,
+    );
+    // Management belongs beside the project dropdown, not in Settings.
+    expect(
+      find.byTooltip('Move My Cloud Archive to Trash'),
+      findsNothing,
+    );
+    expect(find.text('TRASH (0)', skipOffstage: false), findsNothing);
 
     await tester.pumpWidget(const SizedBox.shrink());
     workspace.dispose();
