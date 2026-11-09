@@ -1,7 +1,5 @@
 // lib/services/workspace_project_service.dart
 
-import 'dart:async';
-
 import 'package:flutter/foundation.dart';
 
 import '../models/workspace_project.dart';
@@ -86,14 +84,6 @@ class WorkspaceProjectService extends ChangeNotifier {
       redleafByKey[project.key] = project;
     }
 
-    // A newly connected instance is visible immediately, even before its
-    // persistence write has completed. If it is already known, the saved
-    // MLT Player name wins over Redleaf's source-side project name.
-    final connected = redleafProject;
-    if (connected != null) {
-      redleafByKey[connected.key] = connected;
-    }
-
     final redleafProjects = redleafByKey.values.toList(growable: false)
       ..sort(
         (a, b) => a.name.toLowerCase().compareTo(
@@ -145,10 +135,6 @@ class WorkspaceProjectService extends ChangeNotifier {
       _localProjects.activeProjectId,
     );
     _loaded = true;
-
-    if (_redleafConnection.isConnected) {
-      unawaited(_rememberConnectedRedleaf());
-    }
 
     notifyListeners();
   }
@@ -325,13 +311,9 @@ class WorkspaceProjectService extends ChangeNotifier {
       return;
     }
 
-    if (_redleafConnection.isConnected) {
-      unawaited(_rememberConnectedRedleaf());
-    }
-
-    // Disconnecting Redleaf no longer removes the project or forces the
-    // workspace back to a local project. The saved Redleaf project remains a
-    // first-class workspace project; only its live connection is gone.
+    // Signing in only establishes a connection. A cloud workspace is
+    // persisted after the user names it and explicitly chooses Import.
+    // Disconnecting keeps existing saved Redleaf workspaces intact.
     notifyListeners();
   }
 
@@ -350,34 +332,6 @@ class WorkspaceProjectService extends ChangeNotifier {
     }
 
     notifyListeners();
-  }
-
-  Future<void> _rememberConnectedRedleaf() async {
-    if (!_loaded || !_redleafConnection.isConnected) {
-      return;
-    }
-
-    final instanceId = _redleafConnection.instanceId.trim();
-    if (instanceId.isEmpty) {
-      return;
-    }
-
-    final sourceProjectName = _redleafConnection.projectName.trim();
-    final suggestedName =
-        sourceProjectName.isEmpty ? 'Redleaf' : sourceProjectName;
-
-    try {
-      await _redleafProjects.rememberConnectedProject(
-        instanceId: instanceId,
-        suggestedName: suggestedName,
-        serverUrl: _redleafConnection.serverUrl,
-        sourceProjectName:
-            sourceProjectName.isEmpty ? null : sourceProjectName,
-      );
-    } catch (_) {
-      // The live Redleaf session remains usable even if local workspace
-      // persistence fails. A later connection can retry remembering it.
-    }
   }
 
   void _requireLoaded() {
