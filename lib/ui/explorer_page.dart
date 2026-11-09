@@ -25,9 +25,14 @@ import '../services/player_settings_service.dart';
 import '../services/redleaf_link_service.dart';
 import '../services/thumbnail_service.dart';
 import '../services/workspace_project_service.dart';
+import '../services/startup_project_request.dart';
+import '../services/redleaf_connection_service.dart';
+import '../services/redleaf_hub_launch_service.dart';
+import '../services/redleaf_shared_credential_vault.dart';
 import 'redleaf_page.dart';
 import 'widgets/catalog_child_tile.dart';
 import 'widgets/player_settings_button.dart';
+import 'widgets/redleaf_hub_onboarding_dialog.dart';
 import 'widgets/text_prompt_dialog.dart';
 import 'widgets/workspace_project_switcher.dart';
 
@@ -142,7 +147,7 @@ _RatingFilterChoice _exactRatingFilterChoice(int? rating) {
   };
 }
 
-enum _ProjectMenuAction { create, rename, delete }
+enum _ProjectMenuAction { create, rename, delete, trashRedleaf, redleafTrash }
 
 enum _CatalogMenuAction { createChild, rename, delete }
 
@@ -174,6 +179,10 @@ class ExplorerPage extends StatefulWidget {
     required this.onActiveProjectChanged,
     this.onWorkspaceProjectChanged,
     this.workspaceProjectService,
+    this.importRequestSerial = 0,
+    this.onImportConnectedRedleaf,
+    this.startupProjectRequest,
+    this.onStartupRedleafSelected,
     this.playerSettings,
     this.projectViewRequest,
     this.startupError,
@@ -189,6 +198,10 @@ class ExplorerPage extends StatefulWidget {
   final ProjectMediaMetadataService projectMediaMetadataService;
   final ValueChanged<WorkspaceProject?>? onWorkspaceProjectChanged;
   final WorkspaceProjectService? workspaceProjectService;
+  final int importRequestSerial;
+  final Future<void> Function(String, bool)? onImportConnectedRedleaf;
+  final StartupProjectRequest? startupProjectRequest;
+  final VoidCallback? onStartupRedleafSelected;
   final PlayerSettingsService? playerSettings;
   final ExplorerProjectViewRequest? projectViewRequest;
   final ValueChanged<String> onActiveProjectChanged;
@@ -213,6 +226,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
   late final WorkspaceProjectService _workspaceProjectService;
   late final bool _ownsWorkspaceProjectService;
   String? _lastReportedWorkspaceProjectKey;
+  String? _lastReportedWorkspaceProjectName;
   String? _lastReportedLocalProjectId;
 
   ProjectCatalogService get _projectCatalogService =>
@@ -412,11 +426,14 @@ class _ExplorerPageState extends State<ExplorerPage> {
 
   void _reportWorkspaceProject(WorkspaceProject? project) {
     final projectKey = project?.key;
-    if (_lastReportedWorkspaceProjectKey == projectKey) {
+    final name = project?.name;
+    if (_lastReportedWorkspaceProjectKey == projectKey &&
+        _lastReportedWorkspaceProjectName == name) {
       return;
     }
 
     _lastReportedWorkspaceProjectKey = projectKey;
+    _lastReportedWorkspaceProjectName = name;
     widget.onWorkspaceProjectChanged?.call(project);
   }
 
@@ -479,6 +496,151 @@ class _ExplorerPageState extends State<ExplorerPage> {
     });
   }
 
+  /// A cached project opens immediately. Authentication is optional for
+  /// viewing its snapshot, but a saved Hub login can connect live Redleaf
+  /// functions in the same launch, with no password prompt or forced sync.
+  Future<void> _connectSavedHubLogin({
+    required String instanceId,
+    required String serverUrl,
+  }) async {
+    try {
+      final saved = await RedleafSharedCredentialVault().read(instanceId);
+      if (saved == null || !mounted) return;
+
+      // Never send a stored password to a different origin supplied through
+      // a launch argument. The instance ID must also match after login.
+      final target = RedleafSharedCredentialVault.normalizeServerUrl(
+        serverUrl,
+      );
+      if (target != saved.serverUrl) return;
+
+      final connection = RedleafConnectionService.instance;
+      await connection.load();
+      if (!mounted) return;
+      if (connection.isConnected &&
+          connection.instanceId == instanceId &&
+          connection.serverUrl == target) {
+        return;
+      }
+      final signedIn = await connection.signIn(
+        serverUrl: target,
+        username: saved.username,
+        password: saved.password,
+      );
+      if (!mounted) return;
+      if (!signedIn) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'The saved Redleaf login was rejected. Update it in '
+              'Redleaf Hub or sign in through MLT Player Settings.',
+            ),
+          ),
+        );
+        return;
+      }
+      if (connection.instanceId != instanceId) {
+        connection.disconnect();
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'The running Redleaf server belongs to another database. '
+              'The saved project remains available offline.',
+            ),
+          ),
+        );
+      }
+    } catch (_) {
+      // An unreadable or missing local vault must never block cached projects.
+      // Credentials can still be entered through Settings.
+    }
+  }
+
+  Future<void> _launchHubProject(StartupProjectRequest request) async {
+    final projectPath = request.hubProjectPath;
+    if (projectPath == null || !mounted) return;
+
+    try {
+      final resolution = await RedleafHubLaunchService().inspect(
+        projectPath: projectPath,
+        workspace: _workspaceProjectService,
+      );
+      if (!mounted) return;
+
+      final serverUrl = request.hubServerUrl ??
+          resolution.existingRecord?.serverUrl ??
+          RedleafConnectionService.defaultServerUrl;
+
+      if (resolution.disposition == RedleafHubLaunchDisposition.openCached) {
+        _workspaceProjectService.select(
+          WorkspaceProject.redleafKey(resolution.instanceId),
+        );
+        // Opening the snapshot never waits for the vault or network.
+        unawaited(_connectSavedHubLogin(
+          instanceId: resolution.instanceId,
+          serverUrl: serverUrl,
+        ));
+        return;
+      }
+
+      final import = widget.onImportConnectedRedleaf;
+      if (import == null) {
+        throw StateError(
+          'MLT Player cannot import Redleaf projects from this screen.',
+        );
+      }
+
+      final alreadyInTrash =
+          resolution.disposition == RedleafHubLaunchDisposition.restore;
+      final connection = RedleafConnectionService.instance;
+      await connection.load();
+
+      RedleafSavedCredentials? savedCredentials;
+      String? keyringWarning;
+      try {
+        savedCredentials = await RedleafSharedCredentialVault()
+            .read(resolution.instanceId);
+      } catch (_) {
+        keyringWarning =
+            'Saved Redleaf credentials could not be read from the local vault. '
+            'Sign in manually or replace them in Redleaf Hub.';
+      }
+      if (!mounted) return;
+
+      await showDialog<bool>(
+        context: context,
+        barrierDismissible: false,
+        builder: (dialogContext) => RedleafHubOnboardingDialog(
+          expectedInstanceId: resolution.instanceId,
+          suggestedName: resolution.suggestedName,
+          serverUrl: serverUrl,
+          connection: connection,
+          savedCredentials: savedCredentials,
+          keyringWarning: keyringWarning,
+          existingInTrash: alreadyInTrash,
+          hasCachedSnapshot: resolution.hasCachedSnapshot,
+          onImport: import,
+          onRestoreCached: alreadyInTrash && resolution.hasCachedSnapshot
+              ? () async {
+                  await _workspaceProjectService.restoreRedleafProject(
+                    resolution.instanceId,
+                  );
+                  _workspaceProjectService.select(
+                    WorkspaceProject.redleafKey(resolution.instanceId),
+                  );
+                  unawaited(_connectSavedHubLogin(
+                    instanceId: resolution.instanceId,
+                    serverUrl: serverUrl,
+                  ));
+                }
+              : null,
+        ),
+      );
+    } catch (error) {
+      if (mounted) _showProjectCatalogError(error);
+    }
+  }
+
   Future<void> _initializeProjectCatalogs() async {
     try {
       await _workspaceProjectService.load();
@@ -505,11 +667,43 @@ class _ExplorerPageState extends State<ExplorerPage> {
       return;
     }
 
+    // A saved Redleaf workspace can be selected only after the registry loads.
+    // Startup selection never signs in or triggers SYNC NOW.
+    final startupRequest = widget.startupProjectRequest;
+    if (startupRequest != null && startupRequest.hubProjectPath == null) {
+      final selectionError =
+          await startupRequest.applyTo(_workspaceProjectService);
+      if (!mounted) return;
+      if (selectionError == null &&
+          (startupRequest.redleafInstanceId != null ||
+              startupRequest.redleafProjectPath != null)) {
+        widget.onStartupRedleafSelected?.call();
+      } else if (selectionError != null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(selectionError),
+              duration: const Duration(seconds: 9),
+            ),
+          );
+        });
+      }
+    }
+
     setState(() {
       _projectCatalogsLoaded = true;
       _annotationsLoaded = widget.projectMediaMetadataService.loaded;
       _refreshVisibleItems();
     });
+
+    if (startupRequest?.hubProjectPath != null) {
+      // Show the modal after the Explorer has completed its first frame.
+      // Never auto-register an unsynced project or request a password in Hub.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) unawaited(_launchHubProject(startupRequest!));
+      });
+    }
 
     final activeWorkspaceProject = _workspaceProjectService.activeProject;
     _reportWorkspaceProject(activeWorkspaceProject);
@@ -1460,6 +1654,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
       final project = _projectCatalogService.createProject(name);
       _projectCatalogService.setActiveProject(project.id);
       _workspaceProjectService.synchronizeLocalProjects();
+      _workspaceProjectService.selectLocalProject(project.id);
       _expandedCatalogIds.clear();
       await _persistProjectCatalogs();
 
@@ -1571,16 +1766,255 @@ class _ExplorerPageState extends State<ExplorerPage> {
     }
   }
 
+  Future<void> _renameActiveRedleafProject() async {
+    final project = _workspaceProjectService.activeProject;
+    if (project == null || !project.isRedleaf) return;
+
+    final name = await _promptText(
+      title: 'Rename Project',
+      hint: 'Project name',
+      initialValue: project.name,
+    );
+    if (name == null) return;
+
+    try {
+      await _workspaceProjectService.renameRedleafProject(
+        project.redleafInstanceId!,
+        name,
+      );
+    } catch (error) {
+      _showProjectCatalogError(error);
+    }
+  }
+
+  Future<void> _trashActiveRedleafProject() async {
+    final project = _workspaceProjectService.activeProject;
+    if (project == null || !project.isRedleaf) return;
+
+    final confirmed = await _confirm(
+      title: 'Move Project to Trash?',
+      message: 'Move "${project.name}" to MLT Player Trash? '
+          'The Redleaf database and your saved transcript cache will be '
+          'preserved. You can restore this project using the project menu.',
+      confirmLabel: 'MOVE TO TRASH',
+    );
+    if (!confirmed) return;
+
+    try {
+      await _workspaceProjectService.trashRedleafProject(
+        project.redleafInstanceId!,
+      );
+    } catch (error) {
+      _showProjectCatalogError(error);
+    }
+  }
+
+  Future<void> _openRedleafTrash() async {
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) {
+        var emptyingTrash = false;
+
+        return StatefulBuilder(
+          builder: (dialogContext, setDialogState) {
+            final trashed = _workspaceProjectService.trashedRedleafProjects;
+
+            Future<void> emptyTrash() async {
+              if (emptyingTrash || trashed.isEmpty) return;
+
+              final count = trashed.length;
+              final confirmed = await showDialog<bool>(
+                context: dialogContext,
+                builder: (confirmContext) => AlertDialog(
+                  title: const Text('Empty Redleaf Trash?'),
+                  content: Text(
+                    'Permanently remove $count Redleaf project '
+                    '${count == 1 ? 'entry' : 'entries'} from MLT Player? '
+                    'You will no longer be able to restore '
+                    '${count == 1 ? 'it' : 'them'} from Trash. '
+                    'The Redleaf databases, source media, and locally '
+                    'cached snapshots will not be deleted.',
+                  ),
+                  actions: [
+                    TextButton(
+                      onPressed: () => Navigator.of(confirmContext).pop(false),
+                      child: const Text('CANCEL'),
+                    ),
+                    FilledButton(
+                      onPressed: () => Navigator.of(confirmContext).pop(true),
+                      style: FilledButton.styleFrom(
+                        backgroundColor: Colors.red.shade700,
+                      ),
+                      child: const Text('EMPTY TRASH'),
+                    ),
+                  ],
+                ),
+              );
+              if (confirmed != true || !dialogContext.mounted) return;
+
+              setDialogState(() => emptyingTrash = true);
+              try {
+                await _workspaceProjectService.emptyRedleafTrash();
+                if (dialogContext.mounted) setDialogState(() {});
+              } catch (error) {
+                _showProjectCatalogError(error);
+              } finally {
+                if (dialogContext.mounted) {
+                  setDialogState(() => emptyingTrash = false);
+                }
+              }
+            }
+
+            return AlertDialog(
+              title: const Text('Redleaf Trash'),
+              content: SizedBox(
+                width: 490,
+                height: 345,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: trashed.isEmpty
+                          ? const Center(
+                              child: Text('No Redleaf projects in Trash.'),
+                            )
+                          : ListView.separated(
+                              itemCount: trashed.length,
+                              separatorBuilder: (context, index) =>
+                                  const Divider(
+                                height: 1,
+                                color: Colors.white12,
+                              ),
+                              itemBuilder: (context, index) {
+                                final record = trashed[index];
+                                return ListTile(
+                                  dense: true,
+                                  contentPadding: const EdgeInsets.symmetric(
+                                    horizontal: 0,
+                                  ),
+                                  leading: const Icon(Icons.cloud_outlined),
+                                  title: Text(
+                                    record.name,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  subtitle: Text(
+                                    record.serverUrl,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  trailing: TextButton(
+                                    onPressed: emptyingTrash
+                                        ? null
+                                        : () async {
+                                            try {
+                                              await _workspaceProjectService
+                                                  .restoreRedleafProject(
+                                                record.instanceId,
+                                              );
+                                              if (dialogContext.mounted) {
+                                                setDialogState(() {});
+                                              }
+                                            } catch (error) {
+                                              _showProjectCatalogError(error);
+                                            }
+                                          },
+                                    child: const Text('RESTORE'),
+                                  ),
+                                );
+                              },
+                            ),
+                    ),
+                    const SizedBox(height: 10),
+                    const Text(
+                      'Empty Trash removes project entries from MLT Player. '
+                      'Redleaf databases, media, and cached snapshots remain.',
+                      style: TextStyle(
+                        color: Colors.white54,
+                        fontSize: 11,
+                        height: 1.4,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: emptyingTrash
+                      ? null
+                      : () => Navigator.of(dialogContext).pop(),
+                  child: const Text('CLOSE'),
+                ),
+                TextButton.icon(
+                  onPressed:
+                      trashed.isEmpty || emptyingTrash ? null : emptyTrash,
+                  icon: const Icon(Icons.delete_forever_outlined, size: 18),
+                  label: Text(
+                    emptyingTrash ? 'EMPTYING…' : 'EMPTY TRASH',
+                  ),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildProjectOptionsMenu({required bool redleaf}) {
+    return PopupMenuButton<_ProjectMenuAction>(
+      tooltip: 'Project options',
+      icon: const Icon(Icons.more_vert, size: 18),
+      onSelected: (action) => unawaited(_handleProjectAction(action)),
+      itemBuilder: (context) => [
+        const PopupMenuItem(
+          value: _ProjectMenuAction.create,
+          child: Text('New Project…'),
+        ),
+        const PopupMenuItem(
+          value: _ProjectMenuAction.rename,
+          child: Text('Rename Project…'),
+        ),
+        if (redleaf)
+          const PopupMenuItem(
+            value: _ProjectMenuAction.trashRedleaf,
+            child: Text('Move to Trash…'),
+          )
+        else
+          PopupMenuItem(
+            value: _ProjectMenuAction.delete,
+            enabled: _projectCatalogService.projects.length > 1,
+            child: const Text('Delete Project…'),
+          ),
+        const PopupMenuDivider(),
+        const PopupMenuItem(
+          value: _ProjectMenuAction.redleafTrash,
+          child: Text('Redleaf Trash…'),
+        ),
+      ],
+    );
+  }
+
   Future<void> _handleProjectAction(_ProjectMenuAction action) async {
     switch (action) {
       case _ProjectMenuAction.create:
         await _createProject();
         break;
       case _ProjectMenuAction.rename:
-        await _renameActiveProject();
+        if (_workspaceProjectService.activeIsRedleaf) {
+          await _renameActiveRedleafProject();
+        } else {
+          await _renameActiveProject();
+        }
         break;
       case _ProjectMenuAction.delete:
         await _deleteActiveProject();
+        break;
+      case _ProjectMenuAction.trashRedleaf:
+        await _trashActiveRedleafProject();
+        break;
+      case _ProjectMenuAction.redleafTrash:
+        await _openRedleafTrash();
         break;
     }
   }
@@ -2181,6 +2615,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
                 workspaceProject: _workspaceProjectService.activeProject,
                 onOpenVerifiedMedia: widget.onOpenMedia,
                 onOpenRedleafHandoff: widget.onOpenRedleafMedia,
+                importRequestSerial: widget.importRequestSerial,
               ),
             ),
           ],
@@ -2218,6 +2653,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
                 },
               ),
             ),
+            _buildProjectOptionsMenu(redleaf: true),
             const SizedBox(width: 10),
             Container(
               padding: const EdgeInsets.symmetric(
@@ -2248,6 +2684,8 @@ class _ExplorerPageState extends State<ExplorerPage> {
                   settings: widget.playerSettings!,
                   mltVersion: widget.version,
                   explorerNavigation: _navigationService,
+                  workspaceProjects: _workspaceProjectService,
+                  onImportConnectedRedleaf: widget.onImportConnectedRedleaf,
                   onOpenHistoryPath: _openHistoryPath,
                   onClosed: _handleSettingsClosed,
                 ),
@@ -2299,27 +2737,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
                   },
                 ),
               ),
-              PopupMenuButton<_ProjectMenuAction>(
-                tooltip: 'Project options',
-                icon: const Icon(Icons.more_vert, size: 18),
-                onSelected: (action) =>
-                    unawaited(_handleProjectAction(action)),
-                itemBuilder: (context) => [
-                  const PopupMenuItem(
-                    value: _ProjectMenuAction.create,
-                    child: Text('New Project…'),
-                  ),
-                  const PopupMenuItem(
-                    value: _ProjectMenuAction.rename,
-                    child: Text('Rename Project…'),
-                  ),
-                  PopupMenuItem(
-                    value: _ProjectMenuAction.delete,
-                    enabled: _projectCatalogService.projects.length > 1,
-                    child: const Text('Delete Project…'),
-                  ),
-                ],
-              ),
+              _buildProjectOptionsMenu(redleaf: false),
               const SizedBox(width: 4),
             ],
             IconButton(
@@ -2423,6 +2841,8 @@ class _ExplorerPageState extends State<ExplorerPage> {
                   settings: widget.playerSettings!,
                   mltVersion: widget.version,
                   explorerNavigation: _navigationService,
+                  workspaceProjects: _workspaceProjectService,
+                  onImportConnectedRedleaf: widget.onImportConnectedRedleaf,
                   onOpenHistoryPath: _openHistoryPath,
                   onClosed: _handleSettingsClosed,
                 ),

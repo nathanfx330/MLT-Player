@@ -11,6 +11,7 @@ import 'package:flutter/services.dart';
 import 'models/media_info.dart';
 import 'models/redleaf_player_handoff.dart';
 import 'models/workspace_project.dart';
+import 'services/startup_project_request.dart';
 import 'services/project_catalog_service.dart';
 import 'services/project_media_metadata_service.dart';
 import 'services/host_channel.dart';
@@ -35,8 +36,9 @@ import 'ui/widgets/subtitle_overlay.dart';
 // Application
 // ---------------------------------------------------------------------------
 
-void main() {
+void main(List<String> arguments) {
   WidgetsFlutterBinding.ensureInitialized();
+  final startupProjectRequest = StartupProjectRequest.parse(arguments);
 
   final bridge = MltBridge();
   final initialized = bridge.initialize();
@@ -47,6 +49,7 @@ void main() {
       initialized: initialized,
       version: bridge.version,
       startupError: initialized ? null : bridge.lastError,
+      startupProjectRequest: startupProjectRequest,
     ),
   );
 }
@@ -58,12 +61,14 @@ class MltPlayerApp extends StatefulWidget {
     required this.initialized,
     required this.version,
     this.startupError,
+    this.startupProjectRequest,
   });
 
   final MltBridge bridge;
   final bool initialized;
   final String version;
   final String? startupError;
+  final StartupProjectRequest? startupProjectRequest;
 
   @override
   State<MltPlayerApp> createState() => _MltPlayerAppState();
@@ -111,6 +116,7 @@ class _MltPlayerAppState extends State<MltPlayerApp> {
         version: widget.version,
         startupError: widget.startupError,
         playerSettings: _playerSettings,
+        startupProjectRequest: widget.startupProjectRequest,
       ),
     );
   }
@@ -123,6 +129,7 @@ class _MltExplorerShell extends StatefulWidget {
     required this.version,
     required this.playerSettings,
     this.startupError,
+    this.startupProjectRequest,
   });
 
   final MltBridge bridge;
@@ -130,6 +137,7 @@ class _MltExplorerShell extends StatefulWidget {
   final String version;
   final PlayerSettingsService playerSettings;
   final String? startupError;
+  final StartupProjectRequest? startupProjectRequest;
 
   @override
   State<_MltExplorerShell> createState() => _MltExplorerShellState();
@@ -150,6 +158,7 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
   String? _activeProjectId;
   WorkspaceProject? _activeWorkspaceProject;
   int _playerOpenRequest = 0;
+  int _cloudImportRequestSerial = 0;
   bool _showPlayer = false;
   _WorkspaceSection _workspaceSection = _WorkspaceSection.explorer;
   ExplorerProjectViewRequest? _explorerProjectViewRequest;
@@ -211,6 +220,26 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
     });
   }
 
+  Future<void> _importConnectedRedleafProject(
+    String displayName,
+    bool restoreFromTrash,
+  ) async {
+    if (!_workspaceProjectService.loaded) {
+      await _workspaceProjectService.load();
+    }
+    await _workspaceProjectService.importConnectedRedleafProject(
+      displayName: displayName,
+      restoreFromTrash: restoreFromTrash,
+    );
+    if (!mounted) return;
+
+    setState(() {
+      _cloudImportRequestSerial += 1;
+      _showPlayer = false;
+      _workspaceSection = _WorkspaceSection.explorer;
+    });
+  }
+
   void _returnToExplorer() {
     setState(() {
       _showPlayer = false;
@@ -223,6 +252,11 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
       return;
     }
     setState(() => _workspaceSection = section);
+  }
+
+  void _showStartupRedleafProject() {
+    if (!mounted) return;
+    setState(() => _workspaceSection = _WorkspaceSection.project);
   }
 
   Future<void> _renameActiveRedleafProject(String name) async {
@@ -314,6 +348,10 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
                     projectMediaMetadataService:
                         _projectMediaMetadataService,
                     workspaceProjectService: _workspaceProjectService,
+                    importRequestSerial: _cloudImportRequestSerial,
+                    onImportConnectedRedleaf: _importConnectedRedleafProject,
+                    startupProjectRequest: widget.startupProjectRequest,
+                    onStartupRedleafSelected: _showStartupRedleafProject,
                     playerSettings: widget.playerSettings,
                     projectViewRequest: _explorerProjectViewRequest,
                     onActiveProjectChanged: _setActiveProject,
@@ -359,6 +397,8 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
           activeProjectId: playerMetadataProjectId,
           initialPath: _playerPath,
           redleafHandoff: _redleafPlayerHandoff,
+          onImportConnectedRedleaf: _importConnectedRedleafProject,
+          workspaceProjects: _workspaceProjectService,
           openRequestSerial: _playerOpenRequest,
           onBack: _returnToExplorer,
         ),
@@ -884,6 +924,8 @@ class PlayerPage extends StatefulWidget {
     this.startupError,
     this.initialPath,
     this.redleafHandoff,
+    this.onImportConnectedRedleaf,
+    this.workspaceProjects,
     this.openRequestSerial = 0,
     this.onBack,
   });
@@ -897,6 +939,8 @@ class PlayerPage extends StatefulWidget {
   final String? startupError;
   final String? initialPath;
   final RedleafPlayerHandoff? redleafHandoff;
+  final Future<void> Function(String, bool)? onImportConnectedRedleaf;
+  final WorkspaceProjectService? workspaceProjects;
   final int openRequestSerial;
   final VoidCallback? onBack;
 
@@ -2799,6 +2843,14 @@ class _PlayerPageState extends State<PlayerPage>
                 child: MltPlayerSettingsButton(
                   settings: widget.playerSettings,
                   mltVersion: widget.version,
+                  workspaceProjects: widget.workspaceProjects,
+                  onImportConnectedRedleaf: widget.onImportConnectedRedleaf == null
+                      ? null
+                      : (name, restore) async {
+                          if (_engine.playing) _engine.pausePlayback();
+                          _storyboardThumbnailService.cancelPending();
+                          await widget.onImportConnectedRedleaf!(name, restore);
+                        },
                   onClosed: _keyboardFocus.requestFocus,
                 ),
               ),

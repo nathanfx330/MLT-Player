@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import '../../services/explorer_navigation_service.dart';
 import '../../services/player_settings_service.dart';
 import '../../services/redleaf_connection_service.dart';
+import '../../services/workspace_project_service.dart';
 
 class MltPlayerSettingsButton extends StatelessWidget {
   const MltPlayerSettingsButton({
@@ -14,6 +15,8 @@ class MltPlayerSettingsButton extends StatelessWidget {
     required this.settings,
     required this.mltVersion,
     this.redleaf,
+    this.workspaceProjects,
+    this.onImportConnectedRedleaf,
     this.explorerNavigation,
     this.onOpenHistoryPath,
     this.onClosed,
@@ -22,6 +25,8 @@ class MltPlayerSettingsButton extends StatelessWidget {
   final PlayerSettingsService settings;
   final String mltVersion;
   final RedleafConnectionService? redleaf;
+  final WorkspaceProjectService? workspaceProjects;
+  final Future<void> Function(String, bool)? onImportConnectedRedleaf;
   final ExplorerNavigationService? explorerNavigation;
   final ValueChanged<String>? onOpenHistoryPath;
   final VoidCallback? onClosed;
@@ -47,6 +52,8 @@ class MltPlayerSettingsButton extends StatelessWidget {
             settings: settings,
             mltVersion: mltVersion,
             redleaf: redleafService,
+            workspaceProjects: workspaceProjects,
+            onImportConnectedRedleaf: onImportConnectedRedleaf,
             explorerNavigation: explorerNavigation,
           ),
         );
@@ -65,12 +72,16 @@ class _MltPlayerSettingsDialog extends StatefulWidget {
     required this.settings,
     required this.mltVersion,
     required this.redleaf,
+    required this.workspaceProjects,
+    required this.onImportConnectedRedleaf,
     required this.explorerNavigation,
   });
 
   final PlayerSettingsService settings;
   final String mltVersion;
   final RedleafConnectionService redleaf;
+  final WorkspaceProjectService? workspaceProjects;
+  final Future<void> Function(String, bool)? onImportConnectedRedleaf;
   final ExplorerNavigationService? explorerNavigation;
 
   @override
@@ -93,7 +104,11 @@ class _MltPlayerSettingsDialogState extends State<_MltPlayerSettingsDialog> {
   late final TextEditingController _serverController;
   late final TextEditingController _usernameController;
   late final TextEditingController _passwordController;
+  late final TextEditingController _cloudProjectNameController;
+  String _lastConnectedInstanceId = '';
   bool _obscurePassword = true;
+  bool _importingRedleaf = false;
+  String? _importError;
 
   @override
   void initState() {
@@ -101,22 +116,39 @@ class _MltPlayerSettingsDialogState extends State<_MltPlayerSettingsDialog> {
     _serverController = TextEditingController(text: widget.redleaf.serverUrl);
     _usernameController = TextEditingController(text: widget.redleaf.username);
     _passwordController = TextEditingController();
+    _cloudProjectNameController = TextEditingController();
     widget.redleaf.addListener(_onRedleafChanged);
+    widget.workspaceProjects?.addListener(_onRedleafChanged);
+    _updateConnectedProjectName();
   }
 
   @override
   void dispose() {
     widget.redleaf.removeListener(_onRedleafChanged);
+    widget.workspaceProjects?.removeListener(_onRedleafChanged);
     _serverController.dispose();
     _usernameController.dispose();
     _passwordController.dispose();
+    _cloudProjectNameController.dispose();
     super.dispose();
   }
 
   void _onRedleafChanged() {
-    if (mounted) {
-      setState(() {});
-    }
+    _updateConnectedProjectName();
+    if (mounted) setState(() {});
+  }
+
+  void _updateConnectedProjectName() {
+    final id =
+        widget.redleaf.isConnected ? widget.redleaf.instanceId.trim() : '';
+    if (id == _lastConnectedInstanceId) return;
+
+    _lastConnectedInstanceId = id;
+    _cloudProjectNameController.text = id.isEmpty
+        ? ''
+        : (widget.workspaceProjects?.connectedRedleafRecord?.name ??
+            widget.redleaf.projectName.trim());
+    _importError = null;
   }
 
   Future<void> _signIn() async {
@@ -128,6 +160,35 @@ class _MltPlayerSettingsDialogState extends State<_MltPlayerSettingsDialog> {
 
     if (success && mounted) {
       _passwordController.clear();
+    }
+  }
+
+  Future<void> _importConnectedRedleaf() async {
+    final import = widget.onImportConnectedRedleaf;
+    if (import == null || _importingRedleaf || !widget.redleaf.isConnected) {
+      return;
+    }
+
+    final name = _cloudProjectNameController.text.trim();
+    if (name.isEmpty) {
+      setState(() => _importError = 'Enter a project name before importing.');
+      return;
+    }
+
+    setState(() {
+      _importingRedleaf = true;
+      _importError = null;
+    });
+
+    try {
+      final trashed = widget.workspaceProjects?.connectedRedleafRecord?.isTrashed ?? false;
+      await import(name, trashed);
+      if (mounted) Navigator.of(context).pop();
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _importError = error.toString());
+    } finally {
+      if (mounted) setState(() => _importingRedleaf = false);
     }
   }
 
@@ -471,6 +532,79 @@ class _MltPlayerSettingsDialogState extends State<_MltPlayerSettingsDialog> {
         ),
         const SizedBox(height: 10),
         _RedleafStatusBlock(redleaf: redleaf),
+        if (redleaf.isConnected &&
+            widget.onImportConnectedRedleaf != null) ...[
+          const SizedBox(height: 14),
+          const _SectionLabel('REDLEAF CLOUD PROJECT'),
+          const SizedBox(height: 6),
+          const Text(
+            'Name your project in MLT Player before importing. '
+            'This does not rename its Redleaf database.',
+            style: TextStyle(
+              fontSize: 12,
+              height: 1.45,
+              color: Colors.white60,
+            ),
+          ),
+          const SizedBox(height: 10),
+          TextField(
+            controller: _cloudProjectNameController,
+            enabled: !_importingRedleaf,
+            maxLength: 120,
+            decoration: const InputDecoration(
+              isDense: true,
+              labelText: 'MLT Player project name',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          if (widget.workspaceProjects?.connectedRedleafRecord?.isTrashed == true)
+            const Padding(
+              padding: EdgeInsets.only(bottom: 8),
+              child: Text(
+                'This Redleaf database is in Trash. '
+                'Restore its original workspace instead of creating a duplicate.',
+                style: TextStyle(fontSize: 12, color: Colors.amberAccent),
+              ),
+            ),
+          const SizedBox(height: 6),
+          FilledButton.icon(
+            onPressed: _importingRedleaf ? null : _importConnectedRedleaf,
+            icon: _importingRedleaf
+                ? const SizedBox(
+                    width: 15,
+                    height: 15,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.cloud_download_outlined, size: 18),
+            label: Text(_importingRedleaf
+                ? 'OPENING REDLEAF PROJECT…'
+                : widget.workspaceProjects?.connectedRedleafRecord?.isTrashed == true
+                    ? 'RESTORE AND IMPORT REDLEAF CLOUD PROJECT'
+                    : widget.workspaceProjects?.connectedRedleafRecord != null
+                        ? 'OPEN AND SYNC REDLEAF CLOUD PROJECT'
+                        : 'CREATE NEW REDLEAF CLOUD PROJECT'),
+          ),
+          if (_importError != null) ...[
+            const SizedBox(height: 8),
+            Text(
+              _importError!,
+              style: const TextStyle(fontSize: 12, color: Colors.redAccent),
+            ),
+          ],
+        ],
+        if (widget.workspaceProjects != null &&
+            widget.workspaceProjects!.loaded) ...[
+          const SizedBox(height: 12),
+          const Text(
+            'To rename, move, or restore projects, use the three-dot menu '
+            'beside the project dropdown in MLT Explorer.',
+            style: TextStyle(
+              fontSize: 11,
+              color: Colors.white54,
+              height: 1.45,
+            ),
+          ),
+        ],
       ],
     );
   }

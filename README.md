@@ -192,6 +192,33 @@ than creating image files.
 
 ### Redleaf workspace integration
 
+**Create New Redleaf Cloud Project in Settings:** sign in to the
+Redleaf server, type the MLT Player project name you want, then choose
+**CREATE NEW REDLEAF CLOUD PROJECT**. Sign-in no longer creates a project in
+MLT Player. The explicit import saves the identity and chosen name, selects the
+project, opens the Redleaf Explorer, and starts its transcript/catalog sync.
+An existing Redleaf instance is reopened rather than duplicated. You can also
+edit its MLT Player display name when reopening it. This is not provisioning
+a new Redleaf server or renaming a Redleaf database.
+
+**Redleaf project options:** the same three-dot menu sits beside the
+project dropdown in both local and Redleaf Explorer views. For a Redleaf
+project, it provides **New Project**, **Rename Project**, **Move to Trash**,
+and **Redleaf Trash**. In a local project, it keeps the existing local options
+and adds **Redleaf Trash** to make restoration accessible even when a trashed
+Redleaf project is no longer selectable. The Trash dialog restores the original project record. Its confirmed
+**EMPTY TRASH** action permanently removes only the trashed MLT Player project
+entries and releases their reserved names. It leaves active projects, remote
+Redleaf databases, source media, and locally cached snapshots untouched.
+Settings remains the place to sign in and explicitly import a Redleaf server,
+not to manage projects.
+
+Signing in to a trashed instance does not silently restore it; the Settings
+import action offers **RESTORE AND IMPORT REDLEAF CLOUD PROJECT** instead.
+A project name already used by another Redleaf project, including one in
+Trash, is rejected with an explanation. Trash is reversible and never deletes
+the Redleaf source.
+
 Redleaf is a first-class **workspace-project source**, not a separate top-level
 application tab and not a fake Local Project.
 
@@ -214,6 +241,7 @@ A saved Redleaf Project records:
 - last-known Redleaf server URL
 - Redleaf source project name for reference
 - created / updated / last-synced timestamps
+- optional Trash timestamp (reversible, local to MLT Player)
 
 Saved Redleaf Project records survive Redleaf disconnects and MLT Player
 restarts.
@@ -456,6 +484,101 @@ The current integration expects Redleaf support for:
 
 Redleaf itself remains responsible for its database, filesystem discovery,
 `.rlink` resolution, and relationship writes.
+
+## Open a Redleaf project from Redleaf Hub
+
+**Recommended: launch directly from the Redleaf project folder**, which is
+already known by Redleaf Hub. No project instance ID or running Flask server
+is needed for an initialized database.
+
+```bash
+./build/linux/x64/release/bundle/mlt_player --redleaf-project-path "/path/to/Redleaf Project"
+```
+
+MLT Player reads the existing `instance_id` from that folder's
+`knowledge_base.db` using Python 3's standard SQLite library in read-only
+mode. It automatically registers the identity in its local MLT Player project
+list if needed, selects the matching workspace, and opens the **PROJECT** tab.
+Existing saved MLT display names, URLs, and cached snapshots are preserved.
+
+The original ID-based launch remains supported, for users who already have a
+saved MLT Player workspace:
+
+```bash
+./build/linux/x64/release/bundle/mlt_player --redleaf-project <instance_id>
+```
+
+Both flags also accept `--option=value` syntax. Normal launches without a
+project request are unchanged.
+
+The selected Redleaf server does not have to be running. A previously synced
+project can display its cached snapshot offline. A newly registered project
+without a snapshot will have an empty archive view until it reconnects and the
+user explicitly chooses `SYNC NOW`. If the database has never been initialized
+and has no `instance_id`, MLT Player reports that clearly rather than
+manufacturing one. Launching does not sign in, sync, start a server, or move
+media. This is a local process launch, not an HTTP API or a command to an
+already running MLT Player window.
+
+### Redleaf Hub launcher with automatic onboarding
+
+Redleaf Hub's **Launch MLT Player** button starts the compiled MLT Player
+desktop application with a separate, Hub-specific launch request:
+
+```bash
+./build/linux/x64/release/bundle/mlt_player \
+  --redleaf-hub-project-path "/path/to/Redleaf Project" \
+  --redleaf-hub-server-url http://127.0.0.1:5000
+```
+
+The new flag deliberately **does not** behave like the older offline
+`--redleaf-project-path` option. MLT Player reads the local database's stable
+`instance_id`, checks whether the exact instance already has a saved MLT
+workspace **and** a valid synced snapshot, and then:
+
+- **Synced:** opens the existing Redleaf Explorer and cached catalog without
+  prompting for credentials or forcing an archive refresh.
+- **New or unsynced:** shows a name, server URL, username, and password
+  onboarding dialog. MLT Player authenticates, verifies that Redleaf reports
+  the same `instance_id` as the folder Hub selected, then saves the chosen
+  workspace and starts the normal one-time transcript/catalog import.
+- **In Trash:** never silently restores it. If a cached snapshot is available,
+  offers **RESTORE SAVED PROJECT** offline; otherwise requires explicit sign-in
+  and restore/import.
+
+Hub passes only the local project folder and server URL, never a
+password or cookie. A saved Redleaf Hub login may be retrieved directly from
+the operating-system keyring by the exact database instance ID. MLT Player
+does not write passwords into its project registry or configuration.
+Canceling onboarding leaves the MLT project registry unchanged.
+
+### Built-in encrypted Redleaf login for Hub launches
+
+Redleaf Hub's Project Library includes a **Credentials** button for saving
+login information for each initialized Redleaf database. MLT Player reads
+the same built-in encrypted vault directly. Neither app requires
+`secret-tool`, GNOME Keyring, KWallet or a separately installed service.
+
+The apps bundle AES-256-GCM encryption. The shared vault lives under the
+user's XDG data directory, defaults to
+`$HOME/.local/share/redleaf-hub-mlt-auth/v2`, and uses Linux `0700`
+directory permissions with `0600` key and encrypted record files.
+Each secret is bound to a database `instance_id` and trusted server origin.
+No password is passed in the launch arguments, app settings or logs.
+
+An existing synced MLT workspace opens its cached catalog immediately.
+MLT Player can then sign in automatically using the saved login without
+forcing a catalog refresh. An unsynced project asks for the MLT project
+name and offers **Use saved Redleaf login from Hub**. Redleaf verifies the
+credential and MLT Player confirms the exact database identity before
+importing. If a password is outdated or unavailable, manual login remains
+available.
+
+**Tradeoff:** Automatic login needs a locally readable encryption key.
+The key and ciphertext are protected by Linux user file permissions but
+are not safe from malicious software with those same user privileges.
+This is not an OS keyring or hardware-backed password store. The desktop
+vault does not import browser passwords. No manual system dependencies.
 
 ## Build and run
 

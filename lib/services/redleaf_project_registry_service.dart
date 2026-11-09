@@ -5,6 +5,8 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
+import 'redleaf_connection_service.dart';
+
 class RedleafProjectRecord {
   const RedleafProjectRecord({
     required this.instanceId,
@@ -14,6 +16,7 @@ class RedleafProjectRecord {
     required this.updatedAt,
     this.sourceProjectName,
     this.lastSyncedAt,
+    this.trashedAt,
   });
 
   final String instanceId;
@@ -33,6 +36,9 @@ class RedleafProjectRecord {
   final DateTime createdAt;
   final DateTime updatedAt;
   final DateTime? lastSyncedAt;
+  final DateTime? trashedAt;
+
+  bool get isTrashed => trashedAt != null;
 
   String get workspaceKey => 'redleaf:$instanceId';
 
@@ -44,6 +50,8 @@ class RedleafProjectRecord {
     DateTime? lastSyncedAt,
     bool clearSourceProjectName = false,
     bool clearLastSyncedAt = false,
+    DateTime? trashedAt,
+    bool clearTrashedAt = false,
   }) {
     return RedleafProjectRecord(
       instanceId: instanceId,
@@ -56,6 +64,7 @@ class RedleafProjectRecord {
       updatedAt: updatedAt ?? this.updatedAt,
       lastSyncedAt:
           clearLastSyncedAt ? null : lastSyncedAt ?? this.lastSyncedAt,
+      trashedAt: clearTrashedAt ? null : trashedAt ?? this.trashedAt,
     );
   }
 
@@ -68,6 +77,7 @@ class RedleafProjectRecord {
       'createdAt': createdAt.toUtc().toIso8601String(),
       'updatedAt': updatedAt.toUtc().toIso8601String(),
       'lastSyncedAt': lastSyncedAt?.toUtc().toIso8601String(),
+      'trashedAt': trashedAt?.toUtc().toIso8601String(),
     };
   }
 
@@ -97,6 +107,7 @@ class RedleafProjectRecord {
 
     final rawSourceName = raw['sourceProjectName']?.toString().trim();
     final rawLastSyncedAt = raw['lastSyncedAt']?.toString().trim();
+    final rawTrashedAt = raw['trashedAt']?.toString().trim();
 
     return RedleafProjectRecord(
       instanceId: instanceId,
@@ -109,6 +120,9 @@ class RedleafProjectRecord {
       lastSyncedAt: rawLastSyncedAt == null || rawLastSyncedAt.isEmpty
           ? null
           : DateTime.tryParse(rawLastSyncedAt)?.toUtc(),
+      trashedAt: rawTrashedAt == null || rawTrashedAt.isEmpty
+          ? null
+          : DateTime.tryParse(rawTrashedAt)?.toUtc(),
     );
   }
 }
@@ -130,12 +144,18 @@ class RedleafProjectRegistryService extends ChangeNotifier {
   bool get loaded => _loaded;
 
   List<RedleafProjectRecord> get projects {
-    final values = _records.values.toList(growable: false)
+    final values = _records.values.where((item) => !item.isTrashed).toList(growable: false)
       ..sort(
         (a, b) => a.name.toLowerCase().compareTo(
               b.name.toLowerCase(),
             ),
       );
+    return List<RedleafProjectRecord>.unmodifiable(values);
+  }
+
+  List<RedleafProjectRecord> get trashedProjects {
+    final values = _records.values.where((item) => item.isTrashed).toList()
+      ..sort((a, b) => b.trashedAt!.compareTo(a.trashedAt!));
     return List<RedleafProjectRecord>.unmodifiable(values);
   }
 
@@ -230,6 +250,132 @@ class RedleafProjectRegistryService extends ChangeNotifier {
     return record;
   }
 
+  /// Register a local Redleaf database without contacting its Flask server.
+  /// Existing display names, connection URLs, and snapshots stay intact.
+  Future<RedleafProjectRecord> rememberLocalProject({
+    required String instanceId,
+    required String suggestedName,
+  }) async {
+    _requireLoaded();
+
+    final id = _cleanRequired(instanceId, label: 'Redleaf instance ID');
+    final existing = _records[id];
+    if (existing != null) return existing;
+
+    final name = _cleanRequired(suggestedName, label: 'Project name');
+    // Folder launches must also respect names reserved in Trash. Do not
+    // silently manufacture an alternate name when a conflict exists.
+    _ensureNameAvailable(name);
+    final now = DateTime.now().toUtc();
+    final record = RedleafProjectRecord(
+      instanceId: id,
+      name: name,
+      serverUrl: RedleafConnectionService.defaultServerUrl,
+      sourceProjectName: name,
+      createdAt: now,
+      updatedAt: now,
+    );
+
+    _records[id] = record;
+    notifyListeners();
+    await save();
+    return record;
+  }
+
+  /// An explicit Settings import. Unlike background connection discovery,
+  /// this applies the user's chosen name and can optionally restore Trash.
+  Future<RedleafProjectRecord> importConnectedProject({
+    required String instanceId,
+    required String displayName,
+    required String serverUrl,
+    String? sourceProjectName,
+    bool restoreFromTrash = false,
+  }) async {
+    _requireLoaded();
+    final id = _cleanRequired(instanceId, label: 'Redleaf instance ID');
+    final name = _cleanRequired(displayName, label: 'Project name');
+    final url = _cleanRequired(serverUrl, label: 'Redleaf server URL');
+    final existing = _records[id];
+    if (existing != null && existing.isTrashed && !restoreFromTrash) {
+      throw StateError(
+        'This Redleaf project is in Trash. Restore it instead of '
+        'creating a duplicate.',
+      );
+    }
+
+    _ensureNameAvailable(name, excludingInstanceId: id);
+    final sourceName = sourceProjectName?.trim();
+    final now = DateTime.now().toUtc();
+    final record = existing == null
+        ? RedleafProjectRecord(
+            instanceId: id,
+            name: name,
+            serverUrl: url,
+            sourceProjectName:
+                sourceName == null || sourceName.isEmpty ? null : sourceName,
+            createdAt: now,
+            updatedAt: now,
+          )
+        : existing.copyWith(
+            name: name,
+            serverUrl: url,
+            sourceProjectName: sourceName == null || sourceName.isEmpty
+                ? existing.sourceProjectName
+                : sourceName,
+            updatedAt: now,
+            clearTrashedAt: restoreFromTrash,
+          );
+    _records[id] = record;
+    notifyListeners();
+    await save();
+    return record;
+  }
+
+  /// Trashing only hides the MLT Player workspace. Redleaf server data,
+  /// registry identity and cached snapshots are never deleted.
+  Future<void> trashProject(String instanceId) async {
+    _requireLoaded();
+    final id = instanceId.trim();
+    final record = _records[id];
+    if (record == null) {
+      throw ArgumentError.value(instanceId, 'instanceId', 'Unknown project.');
+    }
+    if (record.isTrashed) return;
+
+    _records[id] = record.copyWith(
+      trashedAt: DateTime.now().toUtc(),
+      updatedAt: DateTime.now().toUtc(),
+    );
+    notifyListeners();
+    await save();
+  }
+
+  Future<void> restoreProject(String instanceId, {String? displayName}) async {
+    _requireLoaded();
+    final id = instanceId.trim();
+    final record = _records[id];
+    if (record == null || !record.isTrashed) {
+      throw ArgumentError.value(
+        instanceId,
+        'instanceId',
+        'No matching project in Trash.',
+      );
+    }
+
+    final name = _cleanRequired(
+      displayName ?? record.name,
+      label: 'Project name',
+    );
+    _ensureNameAvailable(name, excludingInstanceId: id);
+    _records[id] = record.copyWith(
+      name: name,
+      clearTrashedAt: true,
+      updatedAt: DateTime.now().toUtc(),
+    );
+    notifyListeners();
+    await save();
+  }
+
   Future<RedleafProjectRecord> renameProject(
     String instanceId,
     String name,
@@ -293,6 +439,28 @@ class RedleafProjectRegistryService extends ChangeNotifier {
     notifyListeners();
     await save();
     return updated;
+  }
+
+  /// Permanently remove only trashed workspace registry records.
+  ///
+  /// This does not delete source-side Redleaf data, media files, or local
+  /// snapshot caches. Removing an entry releases its display name and allows
+  /// a later explicit import to create a fresh MLT Player project record.
+  Future<int> emptyTrash() async {
+    _requireLoaded();
+
+    final ids = _records.values
+        .where((record) => record.isTrashed)
+        .map((record) => record.instanceId)
+        .toList(growable: false);
+    if (ids.isEmpty) return 0;
+
+    for (final id in ids) {
+      _records.remove(id);
+    }
+    notifyListeners();
+    await save();
+    return ids.length;
   }
 
   Future<bool> forgetProject(String instanceId) async {
@@ -371,10 +539,17 @@ class RedleafProjectRegistryService extends ChangeNotifier {
       return;
     }
 
+    final conflict = _records.values.firstWhere(
+      (item) => item.instanceId != excludingInstanceId &&
+          item.name.toLowerCase() == name.toLowerCase(),
+    );
     throw ArgumentError.value(
       name,
       'name',
-      'Another Redleaf project already uses this name.',
+      conflict.isTrashed
+          ? 'A Redleaf project with this name is in Trash. '
+              'Restore or rename that project first, or choose another name.'
+          : 'Another Redleaf project already uses this name.',
     );
   }
 
