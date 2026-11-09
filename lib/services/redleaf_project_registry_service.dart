@@ -5,6 +5,8 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
+import 'redleaf_connection_service.dart';
+
 class RedleafProjectRecord {
   const RedleafProjectRecord({
     required this.instanceId,
@@ -225,6 +227,35 @@ class RedleafProjectRegistryService extends ChangeNotifier {
           );
 
     _records[normalizedInstanceId] = record;
+    notifyListeners();
+    await save();
+    return record;
+  }
+
+  /// Register a local Redleaf database without contacting its Flask server.
+  /// Existing display names, connection URLs, and snapshots stay intact.
+  Future<RedleafProjectRecord> rememberLocalProject({
+    required String instanceId,
+    required String suggestedName,
+  }) async {
+    _requireLoaded();
+
+    final id = _cleanRequired(instanceId, label: 'Redleaf instance ID');
+    final existing = _records[id];
+    if (existing != null) return existing;
+
+    final name = _cleanRequired(suggestedName, label: 'Project name');
+    final now = DateTime.now().toUtc();
+    final record = RedleafProjectRecord(
+      instanceId: id,
+      name: _uniqueName(name),
+      serverUrl: RedleafConnectionService.defaultServerUrl,
+      sourceProjectName: name,
+      createdAt: now,
+      updatedAt: now,
+    );
+
+    _records[id] = record;
     notifyListeners();
     await save();
     return record;
