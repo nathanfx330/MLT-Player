@@ -20,12 +20,14 @@ class RedleafHubLaunchResolution {
     required this.suggestedName,
     required this.disposition,
     this.existingRecord,
+    this.hasCachedSnapshot = false,
   });
 
   final String instanceId;
   final String suggestedName;
   final RedleafHubLaunchDisposition disposition;
   final RedleafProjectRecord? existingRecord;
+  final bool hasCachedSnapshot;
 
   bool get requiresOnboarding =>
       disposition != RedleafHubLaunchDisposition.openCached;
@@ -54,24 +56,27 @@ class RedleafHubLaunchService {
     final local = await _localProjects.read(projectPath);
     final record = workspace.redleafRecordByInstanceId(local.instanceId);
 
+    // An entry alone is not evidence of a completed sync. Require a valid
+    // persistent snapshot for this exact database instance ID.
+    final snapshot =
+        record == null ? null : await _snapshots.load(local.instanceId);
+    final cached = record != null && snapshot != null;
+
     if (record?.isTrashed == true) {
       return RedleafHubLaunchResolution(
         instanceId: local.instanceId,
         suggestedName: record!.name,
         existingRecord: record,
+        hasCachedSnapshot: cached,
         disposition: RedleafHubLaunchDisposition.restore,
       );
     }
-
-    // An entry alone is not evidence of a completed sync. Require a valid
-    // persistent snapshot for this exact database instance ID.
-    final snapshot = record == null ? null : await _snapshots.load(local.instanceId);
-    final cached = record != null && snapshot != null;
 
     return RedleafHubLaunchResolution(
       instanceId: local.instanceId,
       suggestedName: record?.name ?? local.projectName,
       existingRecord: record,
+      hasCachedSnapshot: cached,
       disposition: cached
           ? RedleafHubLaunchDisposition.openCached
           : RedleafHubLaunchDisposition.onboard,
