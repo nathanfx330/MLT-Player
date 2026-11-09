@@ -158,6 +158,7 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
   String? _activeProjectId;
   WorkspaceProject? _activeWorkspaceProject;
   int _playerOpenRequest = 0;
+  int _cloudImportRequestSerial = 0;
   bool _showPlayer = false;
   _WorkspaceSection _workspaceSection = _WorkspaceSection.explorer;
   ExplorerProjectViewRequest? _explorerProjectViewRequest;
@@ -216,6 +217,20 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
       _playerPath = handoff.mediaPath;
       _playerOpenRequest += 1;
       _showPlayer = true;
+    });
+  }
+
+  Future<void> _importConnectedRedleafProject() async {
+    if (!_workspaceProjectService.loaded) {
+      await _workspaceProjectService.load();
+    }
+    await _workspaceProjectService.importConnectedRedleafProject();
+    if (!mounted) return;
+
+    setState(() {
+      _cloudImportRequestSerial += 1;
+      _showPlayer = false;
+      _workspaceSection = _WorkspaceSection.explorer;
     });
   }
 
@@ -327,6 +342,8 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
                     projectMediaMetadataService:
                         _projectMediaMetadataService,
                     workspaceProjectService: _workspaceProjectService,
+                    importRequestSerial: _cloudImportRequestSerial,
+                    onImportConnectedRedleaf: _importConnectedRedleafProject,
                     startupProjectRequest: widget.startupProjectRequest,
                     onStartupRedleafSelected: _showStartupRedleafProject,
                     playerSettings: widget.playerSettings,
@@ -374,6 +391,7 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
           activeProjectId: playerMetadataProjectId,
           initialPath: _playerPath,
           redleafHandoff: _redleafPlayerHandoff,
+          onImportConnectedRedleaf: _importConnectedRedleafProject,
           openRequestSerial: _playerOpenRequest,
           onBack: _returnToExplorer,
         ),
@@ -899,6 +917,7 @@ class PlayerPage extends StatefulWidget {
     this.startupError,
     this.initialPath,
     this.redleafHandoff,
+    this.onImportConnectedRedleaf,
     this.openRequestSerial = 0,
     this.onBack,
   });
@@ -912,6 +931,7 @@ class PlayerPage extends StatefulWidget {
   final String? startupError;
   final String? initialPath;
   final RedleafPlayerHandoff? redleafHandoff;
+  final Future<void> Function()? onImportConnectedRedleaf;
   final int openRequestSerial;
   final VoidCallback? onBack;
 
@@ -2814,6 +2834,12 @@ class _PlayerPageState extends State<PlayerPage>
                 child: MltPlayerSettingsButton(
                   settings: widget.playerSettings,
                   mltVersion: widget.version,
+                  onImportConnectedRedleaf: widget.onImportConnectedRedleaf == null
+                      ? null
+                      : () async {
+                          if (_engine.playing) _engine.pausePlayback();
+                          await widget.onImportConnectedRedleaf!();
+                        },
                   onClosed: _keyboardFocus.requestFocus,
                 ),
               ),
