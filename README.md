@@ -192,6 +192,16 @@ than creating image files.
 
 ### Redleaf workspace integration
 
+**Create New Redleaf Cloud Project in Settings:** after signing in to a
+Redleaf server, use this explicit action to import the connected Redleaf
+database into MLT Player. It saves or reuses the exact Redleaf instance,
+selects it in the Project switch, opens its Redleaf Explorer, and starts the
+existing snapshot sync. The button is the authorization for the import; simply
+signing in does not scan the archive. Reimporting the same instance updates its
+cached snapshot without creating a duplicate project or changing its chosen
+MLT Player display name. The term Cloud Project describes the MLT Player
+remote-workspace type; this does not provision a new Redleaf server.
+
 Redleaf is a first-class **workspace-project source**, not a separate top-level
 application tab and not a fake Local Project.
 
