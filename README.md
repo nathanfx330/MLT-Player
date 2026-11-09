@@ -206,8 +206,10 @@ project dropdown in both local and Redleaf Explorer views. For a Redleaf
 project, it provides **New Project**, **Rename Project**, **Move to Trash**,
 and **Redleaf Trash**. In a local project, it keeps the existing local options
 and adds **Redleaf Trash** to make restoration accessible even when a trashed
-Redleaf project is no longer selectable. The Trash dialog restores the
-original project record without modifying its source database or snapshot.
+Redleaf project is no longer selectable. The Trash dialog restores the original project record. Its confirmed
+**EMPTY TRASH** action permanently removes only the trashed MLT Player project
+entries and releases their reserved names. It leaves active projects, remote
+Redleaf databases, source media, and locally cached snapshots untouched.
 Settings remains the place to sign in and explicitly import a Redleaf server,
 not to manage projects.
 
