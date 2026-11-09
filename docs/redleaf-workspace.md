@@ -72,21 +72,36 @@ than inventing a broken local identity.
 
 ## 3. Launch from Redleaf Hub
 
-The Linux desktop app accepts `--redleaf-project <instance_id>` or
-`--redleaf-project=redleaf:<instance_id>` as a startup request. Its existing
-native runner already forwards command-line arguments to Dart, so no native
-MLT engine change or HTTP command endpoint is needed.
+Redleaf Hub already knows each project's local folder. MLT Player accepts
+`--redleaf-project-path "/absolute/path/to/project"` or
+`--redleaf-project-path=/absolute/path/to/project` at startup.
 
-After the saved workspace registry loads, MLT Player selects the matching
-`redleaf:<instance_id>` workspace through `WorkspaceProjectService` and
-opens the **PROJECT** tab. An invalid or unknown identity displays an error,
-and does not select a different Redleaf workspace instead. Without this
-argument, the usual local project startup is unchanged.
+The Linux runner passes command-line arguments to Flutter. MLT Player locates
+`knowledge_base.db` in the supplied project folder and reads
+`app_settings.instance_id` **read-only** through Python 3's standard SQLite
+library. It neither requires a running Redleaf server nor modifies that
+database. An existing MLT Player registry entry is reused, including its
+display name, connection URL and saved snapshot. Otherwise, the identity is
+registered locally with the folder name as its initial display name and
+Redleaf's default local URL as the connection hint.
 
-The Redleaf instance must already be saved in MLT Player's registry. Connecting
-through MLT Player once is currently required for first-time registration.
-The launch does not create an instance ID, sign in, start a Redleaf server, or
-trigger `SYNC NOW`. Cached snapshots remain accessible while disconnected.
+Explorer waits for `WorkspaceProjectService` to load before selecting the
+exact `redleaf:<instance_id>` workspace. The app shell then opens the
+existing **PROJECT** tab. Without an argument, the normal local project
+startup is unchanged.
+
+The older `--redleaf-project <instance_id>` interface remains available for
+already saved projects. Both flags accept equals syntax. Conflicting or empty
+arguments report an error instead of silently selecting a different workspace.
+
+An initialized Redleaf database must have its `instance_id` already stored.
+If that ID is absent, MLT Player refuses to guess or write one, and asks the
+user to initialize the project through Redleaf once. A newly registered
+project with no cached snapshot can open its project view offline, but its
+SRT inventory is empty until the user reconnects and chooses `SYNC NOW`.
+Startup does not authenticate, refresh the archive, start Flask, or write
+Redleaf's database. The command launches a new process; it is not IPC to
+an existing MLT Player window.
 
 ## 4. Authentication and instance identity
 
