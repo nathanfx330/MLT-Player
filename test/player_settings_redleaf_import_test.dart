@@ -5,6 +5,9 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mlt_player/services/player_settings_service.dart';
+import 'package:mlt_player/services/project_catalog_service.dart';
+import 'package:mlt_player/services/redleaf_project_registry_service.dart';
+import 'package:mlt_player/services/workspace_project_service.dart';
 import 'package:mlt_player/services/redleaf_connection_service.dart';
 import 'package:mlt_player/ui/widgets/player_settings_button.dart';
 
@@ -38,7 +41,7 @@ void main() {
             settings: settings,
             mltVersion: '7.22',
             redleaf: connection,
-            onImportConnectedRedleaf: () async {},
+            onImportConnectedRedleaf: (name, restore) async {},
           ),
         ),
       ),
@@ -57,6 +60,8 @@ void main() {
   testWidgets('Settings explicitly imports a connected Redleaf project',
       (tester) async {
     var imports = 0;
+    String? requestedName;
+    bool? requestedRestore;
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
@@ -64,8 +69,10 @@ void main() {
             settings: settings,
             mltVersion: '7.22',
             redleaf: connection,
-            onImportConnectedRedleaf: () async {
+            onImportConnectedRedleaf: (name, restore) async {
               imports += 1;
+              requestedName = name;
+              requestedRestore = restore;
             },
           ),
         ),
@@ -91,12 +98,22 @@ void main() {
     );
     expect(create, findsOneWidget);
 
+    final nameField = find.byWidgetPredicate(
+      (widget) => widget is TextField &&
+          widget.decoration?.labelText == 'MLT Player project name',
+    );
+    await tester.ensureVisible(nameField);
+    await tester.enterText(nameField, 'My Documentary Archive');
+    await tester.pumpAndSettle();
+
     await tester.ensureVisible(create);
     await tester.pumpAndSettle();
     await tester.tap(create);
     await tester.pumpAndSettle();
 
     expect(imports, 1);
+    expect(requestedName, 'My Documentary Archive');
+    expect(requestedRestore, isFalse);
     expect(find.text('Settings'), findsNothing);
   });
 
@@ -111,7 +128,7 @@ void main() {
             settings: settings,
             mltVersion: '7.22',
             redleaf: connection,
-            onImportConnectedRedleaf: () async {
+            onImportConnectedRedleaf: (name, restore) async {
               throw StateError('Archive import was rejected');
             },
           ),
