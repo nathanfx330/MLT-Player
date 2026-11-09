@@ -143,7 +143,7 @@ _RatingFilterChoice _exactRatingFilterChoice(int? rating) {
   };
 }
 
-enum _ProjectMenuAction { create, rename, delete }
+enum _ProjectMenuAction { create, rename, delete, trashRedleaf, redleafTrash }
 
 enum _CatalogMenuAction { createChild, rename, delete }
 
@@ -222,6 +222,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
   late final WorkspaceProjectService _workspaceProjectService;
   late final bool _ownsWorkspaceProjectService;
   String? _lastReportedWorkspaceProjectKey;
+  String? _lastReportedWorkspaceProjectName;
   String? _lastReportedLocalProjectId;
 
   ProjectCatalogService get _projectCatalogService =>
@@ -421,11 +422,14 @@ class _ExplorerPageState extends State<ExplorerPage> {
 
   void _reportWorkspaceProject(WorkspaceProject? project) {
     final projectKey = project?.key;
-    if (_lastReportedWorkspaceProjectKey == projectKey) {
+    final name = project?.name;
+    if (_lastReportedWorkspaceProjectKey == projectKey &&
+        _lastReportedWorkspaceProjectName == name) {
       return;
     }
 
     _lastReportedWorkspaceProjectKey = projectKey;
+    _lastReportedWorkspaceProjectName = name;
     widget.onWorkspaceProjectChanged?.call(project);
   }
 
@@ -1493,6 +1497,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
       final project = _projectCatalogService.createProject(name);
       _projectCatalogService.setActiveProject(project.id);
       _workspaceProjectService.synchronizeLocalProjects();
+      _workspaceProjectService.selectLocalProject(project.id);
       _expandedCatalogIds.clear();
       await _persistProjectCatalogs();
 
@@ -1604,16 +1609,169 @@ class _ExplorerPageState extends State<ExplorerPage> {
     }
   }
 
+  Future<void> _renameActiveRedleafProject() async {
+    final project = _workspaceProjectService.activeProject;
+    if (project == null || !project.isRedleaf) return;
+
+    final name = await _promptText(
+      title: 'Rename Project',
+      hint: 'Project name',
+      initialValue: project.name,
+    );
+    if (name == null) return;
+
+    try {
+      await _workspaceProjectService.renameRedleafProject(
+        project.redleafInstanceId!,
+        name,
+      );
+    } catch (error) {
+      _showProjectCatalogError(error);
+    }
+  }
+
+  Future<void> _trashActiveRedleafProject() async {
+    final project = _workspaceProjectService.activeProject;
+    if (project == null || !project.isRedleaf) return;
+
+    final confirmed = await _confirm(
+      title: 'Move Project to Trash?',
+      message: 'Move "${project.name}" to MLT Player Trash? '
+          'The Redleaf database and your saved transcript cache will be '
+          'preserved. You can restore this project using the project menu.',
+      confirmLabel: 'MOVE TO TRASH',
+    );
+    if (!confirmed) return;
+
+    try {
+      await _workspaceProjectService.trashRedleafProject(
+        project.redleafInstanceId!,
+      );
+    } catch (error) {
+      _showProjectCatalogError(error);
+    }
+  }
+
+  Future<void> _openRedleafTrash() async {
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setDialogState) {
+          final trashed = _workspaceProjectService.trashedRedleafProjects;
+          return AlertDialog(
+            title: const Text('Redleaf Trash'),
+            content: SizedBox(
+              width: 490,
+              height: 320,
+              child: trashed.isEmpty
+                  ? const Center(
+                      child: Text('No Redleaf projects in Trash.'),
+                    )
+                  : ListView.separated(
+                      itemCount: trashed.length,
+                      separatorBuilder: (_, _) =>
+                          const Divider(height: 1, color: Colors.white12),
+                      itemBuilder: (context, index) {
+                        final record = trashed[index];
+                        return ListTile(
+                          dense: true,
+                          contentPadding:
+                              const EdgeInsets.symmetric(horizontal: 0),
+                          leading: const Icon(Icons.cloud_outlined),
+                          title: Text(
+                            record.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          subtitle: Text(
+                            record.serverUrl,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          trailing: TextButton(
+                            onPressed: () async {
+                              try {
+                                await _workspaceProjectService
+                                    .restoreRedleafProject(record.instanceId);
+                                if (dialogContext.mounted) {
+                                  setDialogState(() {});
+                                }
+                              } catch (error) {
+                                _showProjectCatalogError(error);
+                              }
+                            },
+                            child: const Text('RESTORE'),
+                          ),
+                        );
+                      },
+                    ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: const Text('CLOSE'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildProjectOptionsMenu({required bool redleaf}) {
+    return PopupMenuButton<_ProjectMenuAction>(
+      tooltip: 'Project options',
+      icon: const Icon(Icons.more_vert, size: 18),
+      onSelected: (action) => unawaited(_handleProjectAction(action)),
+      itemBuilder: (context) => [
+        const PopupMenuItem(
+          value: _ProjectMenuAction.create,
+          child: Text('New Project…'),
+        ),
+        const PopupMenuItem(
+          value: _ProjectMenuAction.rename,
+          child: Text('Rename Project…'),
+        ),
+        if (redleaf)
+          const PopupMenuItem(
+            value: _ProjectMenuAction.trashRedleaf,
+            child: Text('Move to Trash…'),
+          )
+        else
+          PopupMenuItem(
+            value: _ProjectMenuAction.delete,
+            enabled: _projectCatalogService.projects.length > 1,
+            child: const Text('Delete Project…'),
+          ),
+        const PopupMenuDivider(),
+        const PopupMenuItem(
+          value: _ProjectMenuAction.redleafTrash,
+          child: Text('Redleaf Trash…'),
+        ),
+      ],
+    );
+  }
+
   Future<void> _handleProjectAction(_ProjectMenuAction action) async {
     switch (action) {
       case _ProjectMenuAction.create:
         await _createProject();
         break;
       case _ProjectMenuAction.rename:
-        await _renameActiveProject();
+        if (_workspaceProjectService.activeIsRedleaf) {
+          await _renameActiveRedleafProject();
+        } else {
+          await _renameActiveProject();
+        }
         break;
       case _ProjectMenuAction.delete:
         await _deleteActiveProject();
+        break;
+      case _ProjectMenuAction.trashRedleaf:
+        await _trashActiveRedleafProject();
+        break;
+      case _ProjectMenuAction.redleafTrash:
+        await _openRedleafTrash();
         break;
     }
   }
@@ -2252,6 +2410,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
                 },
               ),
             ),
+            _buildProjectOptionsMenu(redleaf: true),
             const SizedBox(width: 10),
             Container(
               padding: const EdgeInsets.symmetric(
@@ -2335,27 +2494,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
                   },
                 ),
               ),
-              PopupMenuButton<_ProjectMenuAction>(
-                tooltip: 'Project options',
-                icon: const Icon(Icons.more_vert, size: 18),
-                onSelected: (action) =>
-                    unawaited(_handleProjectAction(action)),
-                itemBuilder: (context) => [
-                  const PopupMenuItem(
-                    value: _ProjectMenuAction.create,
-                    child: Text('New Project…'),
-                  ),
-                  const PopupMenuItem(
-                    value: _ProjectMenuAction.rename,
-                    child: Text('Rename Project…'),
-                  ),
-                  PopupMenuItem(
-                    value: _ProjectMenuAction.delete,
-                    enabled: _projectCatalogService.projects.length > 1,
-                    child: const Text('Delete Project…'),
-                  ),
-                ],
-              ),
+              _buildProjectOptionsMenu(redleaf: false),
               const SizedBox(width: 4),
             ],
             IconButton(
