@@ -138,9 +138,41 @@ folder name, URL, or login session:
 The server URL from Hub is a convenience hint, not proof of identity. The
 Hub's port-5000 TCP check does not prove which database is running; a wrong
 server is disconnected and rejected before any registry import. Neither
-password nor session cookie is passed in the process arguments or persisted.
-The dialog does not accept empty project names or credentials when needed.
-Canceling leaves the registry untouched. Older startup flags are unchanged.
+password nor session cookie is passed in the process arguments or persisted
+in MLT Player's configuration. Credentials saved explicitly in Redleaf Hub
+may be retrieved from the Linux login keyring, bound to the same database
+instance ID and an approved server origin. The dialog does not accept empty
+project names or credentials when needed. Canceling leaves the registry
+untouched. Older startup flags are unchanged.
+
+#### Shared keyring sign-in for Hub launches
+
+`RedleafSharedCredentialVault` is identical in both desktop apps and uses
+Linux `secret-tool` with GNOME Keyring or KDE KWallet via the Secret Service
+API. A single secret item, identified by a versioned application namespace
+and Redleaf `instance_id`, holds the username, password and approved server
+origin. The password is sent to `secret-tool store` through **stdin only**;
+lookup and delete commands use nonsecret ID attributes. A saved password
+is never passed through Hub launch arguments, environment variables, JSON
+project settings or application logs.
+
+For a cached Redleaf project, the snapshot opens first. MLT Player then
+attempts an optional background login from the keyring, without forcing a
+catalog sync. For an unsynced project, onboarding offers a checkbox to use
+the saved login, while still requiring the user to approve the MLT name and
+import. Credentials are used only if the current server URL matches the
+origin stored with the secret. If the keyring is unavailable, locked or
+returns an outdated password, MLT Player falls back to manual login.
+Successful authentication must return the same `instance_id` as the
+local Redleaf database; mismatched instances are disconnected.
+
+This integration currently targets Linux desktop keyrings only, using the
+`secret-tool` executable from `libsecret-tools`. It does not import
+browser-stored passwords and does not provide an unencrypted fallback.
+The keyring itself is accessible to programs permitted by the user's
+unlocked desktop session, so this protects against accidental credential
+exposure in process arguments and project files, not against malicious
+software already running as the same desktop user.
 
 ### Create New Redleaf Cloud Project from Settings
 
