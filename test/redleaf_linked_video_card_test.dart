@@ -117,7 +117,8 @@ void main() {
     expect(thumbnails.lastSource, '/media/archive/interview.mp4');
 
     await tester.tap(find.text('interview.mp4'));
-    await tester.pump();
+    // InkWell waits for the double-tap timeout before dispatching onTap.
+    await tester.pump(const Duration(milliseconds: 400));
     expect(taps, 1);
   });
 
