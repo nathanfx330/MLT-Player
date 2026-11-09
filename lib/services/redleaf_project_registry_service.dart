@@ -441,6 +441,28 @@ class RedleafProjectRegistryService extends ChangeNotifier {
     return updated;
   }
 
+  /// Permanently remove only trashed workspace registry records.
+  ///
+  /// This does not delete source-side Redleaf data, media files, or local
+  /// snapshot caches. Removing an entry releases its display name and allows
+  /// a later explicit import to create a fresh MLT Player project record.
+  Future<int> emptyTrash() async {
+    _requireLoaded();
+
+    final ids = _records.values
+        .where((record) => record.isTrashed)
+        .map((record) => record.instanceId)
+        .toList(growable: false);
+    if (ids.isEmpty) return 0;
+
+    for (final id in ids) {
+      _records.remove(id);
+    }
+    notifyListeners();
+    await save();
+    return ids.length;
+  }
+
   Future<bool> forgetProject(String instanceId) async {
     _requireLoaded();
 
