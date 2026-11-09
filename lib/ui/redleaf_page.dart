@@ -19,6 +19,7 @@ class RedleafPage extends StatefulWidget {
     super.key,
     required this.active,
     this.workspaceProject,
+    this.importRequestSerial = 0,
     this.connection,
     this.onOpenVerifiedMedia,
     this.onOpenRedleafHandoff,
@@ -31,6 +32,10 @@ class RedleafPage extends StatefulWidget {
   /// This is deliberately separate from the live Redleaf connection so the
   /// page can later reopen a cached project even while Redleaf is disconnected.
   final WorkspaceProject? workspaceProject;
+
+  /// Incremented by the explicit Settings import action. Never auto-sync on
+  /// ordinary navigation, reconnection, or project switching.
+  final int importRequestSerial;
 
   final RedleafConnectionService? connection;
 
@@ -69,6 +74,7 @@ class _RedleafPageState extends State<RedleafPage> {
   String? _snapshotError;
   int _snapshotLoadSerial = 0;
   bool _syncing = false;
+  int _handledImportRequestSerial = 0;
   String? _syncError;
   bool _scanForMediaLoading = false;
   String? _scanForMediaMessage;
@@ -100,6 +106,7 @@ class _RedleafPageState extends State<RedleafPage> {
     _searchController.addListener(_onSearchChanged);
 
     _maybeLoad();
+    _maybeStartRequestedImport();
 
     unawaited(_connection.load().then((_) {
       if (!mounted) {
@@ -132,6 +139,7 @@ class _RedleafPageState extends State<RedleafPage> {
     if (widget.active && (!oldWidget.active || oldKey != newKey)) {
       _maybeLoad();
     }
+    _maybeStartRequestedImport();
   }
 
   @override
@@ -266,6 +274,19 @@ class _RedleafPageState extends State<RedleafPage> {
     unawaited(_loadSnapshot(instanceId));
   }
 
+  void _maybeStartRequestedImport() {
+    final serial = widget.importRequestSerial;
+    if (serial == 0 || serial == _handledImportRequestSerial ||
+        !widget.active || _snapshotLoading || _syncing ||
+        _loadedInstanceId != _workspaceInstanceId ||
+        !_connectionMatchesWorkspace) {
+      return;
+    }
+
+    _handledImportRequestSerial = serial;
+    unawaited(_syncNow());
+  }
+
   Future<void> _loadSnapshot(String instanceId) async {
     final serial = ++_snapshotLoadSerial;
 
@@ -297,6 +318,7 @@ class _RedleafPageState extends State<RedleafPage> {
           _snapshotLoading = false;
           _snapshotError = null;
         });
+        _maybeStartRequestedImport();
         return;
       }
 
@@ -308,6 +330,7 @@ class _RedleafPageState extends State<RedleafPage> {
         _snapshotLoading = false;
         _snapshotError = null;
       });
+      _maybeStartRequestedImport();
     } catch (error) {
       if (!mounted ||
           serial != _snapshotLoadSerial ||
@@ -321,6 +344,7 @@ class _RedleafPageState extends State<RedleafPage> {
         _snapshotLoading = false;
         _snapshotError = 'Could not load the saved Redleaf snapshot: $error';
       });
+      _maybeStartRequestedImport();
     }
   }
 
@@ -1027,6 +1051,10 @@ class _RedleafPageState extends State<RedleafPage> {
       );
     }
 
+    if (_syncing && _snapshot == null) {
+      return const _LoadingState(label: 'Importing Redleaf project…');
+    }
+
     if (_snapshotLoading && _discovery.documents.isEmpty) {
       return const _LoadingState(
         label: 'Opening saved Redleaf snapshot…',
@@ -1045,7 +1073,7 @@ class _RedleafPageState extends State<RedleafPage> {
     if (_snapshot == null && _discovery.documents.isEmpty) {
       if (_connectionMatchesWorkspace) {
         return _ErrorState(
-          message:
+          message: _syncError ??
               'This Redleaf project does not have a saved snapshot yet. '
               'Use SYNC NOW to create its local browse cache.',
           onRetry: () => unawaited(_syncNow()),
