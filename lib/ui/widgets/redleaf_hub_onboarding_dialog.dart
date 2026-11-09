@@ -96,6 +96,17 @@ class _RedleafHubOnboardingDialogState
     }
   }
 
+  bool _savedOriginMatches(String rawServer) {
+    final saved = widget.savedCredentials;
+    if (saved == null) return false;
+    try {
+      return RedleafSharedCredentialVault.normalizeServerUrl(rawServer) ==
+          saved.serverUrl;
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<void> _signInAndImport() async {
     if (_busy) return;
     final name = _projectName.text.trim();
@@ -110,9 +121,7 @@ class _RedleafHubOnboardingDialogState
 
     // A Hub launch argument can be user-controlled. Never send a saved
     // password to an origin other than the one approved in Hub's keyring.
-    final useSavedLogin = _useSavedLogin &&
-        widget.savedCredentials != null &&
-        server == widget.savedCredentials!.serverUrl;
+    final useSavedLogin = _useSavedLogin && _savedOriginMatches(server);
     if (!alreadyConnected &&
         !useSavedLogin &&
         (_username.text.trim().isEmpty || _password.text.isEmpty)) {
@@ -251,7 +260,7 @@ class _RedleafHubOnboardingDialogState
                 const SizedBox(height: 8),
               ],
               if (widget.savedCredentials != null &&
-                  _server.text.trim() != widget.savedCredentials!.serverUrl)
+                  !_savedOriginMatches(_server.text))
                 const Padding(
                   padding: EdgeInsets.only(bottom: 8),
                   child: Text(
