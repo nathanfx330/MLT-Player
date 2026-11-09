@@ -263,10 +263,13 @@ class RedleafProjectRegistryService extends ChangeNotifier {
     if (existing != null) return existing;
 
     final name = _cleanRequired(suggestedName, label: 'Project name');
+    // Folder launches must also respect names reserved in Trash. Do not
+    // silently manufacture an alternate name when a conflict exists.
+    _ensureNameAvailable(name);
     final now = DateTime.now().toUtc();
     final record = RedleafProjectRecord(
       instanceId: id,
-      name: _uniqueName(name),
+      name: name,
       serverUrl: RedleafConnectionService.defaultServerUrl,
       sourceProjectName: name,
       createdAt: now,
