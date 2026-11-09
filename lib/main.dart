@@ -2838,6 +2838,7 @@ class _PlayerPageState extends State<PlayerPage>
                       ? null
                       : () async {
                           if (_engine.playing) _engine.pausePlayback();
+                          _storyboardThumbnailService.cancelPending();
                           await widget.onImportConnectedRedleaf!();
                         },
                   onClosed: _keyboardFocus.requestFocus,
