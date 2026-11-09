@@ -128,12 +128,20 @@ in Trash:
 - is absent from the active project switcher, including while its Redleaf
   instance is authenticated;
 - retains its instance ID, chosen name, server URL, and cached snapshot;
-- is shown in Settings under **TRASH**, with an explicit **RESTORE** control;
+- is shown under **Redleaf Trash…** in the standard three-dot project
+  menu of either Explorer view, with an explicit **RESTORE** control;
 - cannot be recreated by signing in or launching its folder. An import of
   that same `instance_id` instead offers **RESTORE AND IMPORT REDLEAF CLOUD
   PROJECT**, returning the original workspace record;
 - reserves its display name. Another Redleaf instance cannot take that name
   while it remains in Trash, and name comparisons ignore letter case.
+
+In Redleaf Explorer, the three-dot control next to the project dropdown
+uses the same menu pattern as local projects. Rename and Move to Trash apply
+to the selected Redleaf project. The Redleaf Trash dialog is accessible from
+both Redleaf and local project menus so projects can be restored after their
+selector entries are hidden. Creation and authentication stay in Settings;
+project management belongs in the project menu.
 
 Moving the currently selected Redleaf project to Trash returns selection to
 the previous local workspace. No server database, media file, snapshot, or
