@@ -70,7 +70,25 @@ than inventing a broken local identity.
 
 ---
 
-## 3. Authentication and instance identity
+## 3. Launch from Redleaf Hub
+
+The Linux desktop app accepts `--redleaf-project <instance_id>` or
+`--redleaf-project=redleaf:<instance_id>` as a startup request. Its existing
+native runner already forwards command-line arguments to Dart, so no native
+MLT engine change or HTTP command endpoint is needed.
+
+After the saved workspace registry loads, MLT Player selects the matching
+`redleaf:<instance_id>` workspace through `WorkspaceProjectService` and
+opens the **PROJECT** tab. An invalid or unknown identity displays an error,
+and does not select a different Redleaf workspace instead. Without this
+argument, the usual local project startup is unchanged.
+
+The Redleaf instance must already be saved in MLT Player's registry. Connecting
+through MLT Player once is currently required for first-time registration.
+The launch does not create an instance ID, sign in, start a Redleaf server, or
+trigger `SYNC NOW`. Cached snapshots remain accessible while disconnected.
+
+## 4. Authentication and instance identity
 
 MLT Player authenticates to Redleaf through Redleaf's existing login flow.
 
@@ -107,7 +125,7 @@ http://127.0.0.1:5000
 
 ---
 
-## 4. SRT discovery
+## 5. SRT discovery
 
 The Redleaf workspace currently focuses on indexed SRT documents.
 
@@ -135,7 +153,7 @@ This same rule is covered by automated tests.
 
 ---
 
-## 5. Media relationships
+## 6. Media relationships
 
 For each discovered SRT, MLT Player asks Redleaf for the document's explicit
 media relationship:
@@ -166,7 +184,7 @@ Player handoff stage.
 
 ---
 
-## 6. Redleaf catalogs
+## 7. Redleaf catalogs
 
 The catalog sidebar uses Redleaf's existing catalog APIs.
 
@@ -217,7 +235,7 @@ collections are not mixed into this browsing lane.
 
 ---
 
-## 7. Current UI behavior
+## 8. Current UI behavior
 
 The current Redleaf Explorer view contains:
 
@@ -239,7 +257,7 @@ Selecting a local Project restores the existing local Project dashboard.
 
 ---
 
-## 8. Read-only boundary
+## 9. Read-only boundary
 
 The current Redleaf workspace performs GET-only discovery and browsing.
 
@@ -258,7 +276,7 @@ handoff are being proven.
 
 ---
 
-## 9. `.rlink` is separate
+## 10. `.rlink` is separate
 
 MLT Player also supports Redleaf `.rlink` files.
 
@@ -287,7 +305,7 @@ It remains one possible filesystem-resolution mechanism where appropriate.
 
 ---
 
-## 10. Validation completed
+## 11. Validation completed
 
 The current checkpoint has been validated through:
 
@@ -327,7 +345,7 @@ Interactive Linux validation has also confirmed:
 
 ---
 
-## 11. Current source ownership
+## 12. Current source ownership
 
 | Concern | Primary source |
 | --- | --- |
@@ -346,7 +364,7 @@ Interactive Linux validation has also confirmed:
 
 ---
 
-## 12. Next integration boundary
+## 13. Next integration boundary
 
 The next feature is the Player handoff lane.
 
