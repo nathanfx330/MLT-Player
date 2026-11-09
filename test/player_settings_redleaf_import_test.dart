@@ -117,6 +117,118 @@ void main() {
     expect(find.text('Settings'), findsNothing);
   });
 
+  testWidgets('empty project name cannot create a cloud project',
+      (tester) async {
+    connection.connect();
+    var imports = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MltPlayerSettingsButton(
+            settings: settings,
+            mltVersion: '7.22',
+            redleaf: connection,
+            onImportConnectedRedleaf: (name, restore) async {
+              imports += 1;
+            },
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.byTooltip('Settings'));
+    await tester.pumpAndSettle();
+
+    final nameField = find.byWidgetPredicate(
+      (widget) => widget is TextField &&
+          widget.decoration?.labelText == 'MLT Player project name',
+    );
+    await tester.ensureVisible(nameField);
+    await tester.enterText(nameField, ' ');
+    await tester.pumpAndSettle();
+
+    final create = find.text(
+      'CREATE NEW REDLEAF CLOUD PROJECT',
+      skipOffstage: false,
+    );
+    await tester.ensureVisible(create);
+    await tester.tap(create);
+    await tester.pumpAndSettle();
+
+    expect(imports, 0);
+    expect(
+      find.text('Enter a project name before importing.'),
+      findsOneWidget,
+    );
+
+    await tester.ensureVisible(nameField);
+    await tester.enterText(nameField, 'Valid Project');
+    await tester.ensureVisible(create);
+    await tester.tap(create);
+    await tester.pumpAndSettle();
+    expect(imports, 1);
+  });
+
+  testWidgets('Cloud Trash hides a project and Restore returns it',
+      (tester) async {
+    final local = ProjectCatalogService(
+      configDirectory: Directory('${tempDirectory.path}/local'),
+    );
+    final registry = RedleafProjectRegistryService(
+      configDirectory: Directory('${tempDirectory.path}/projects'),
+    );
+    final workspace = WorkspaceProjectService(
+      localProjects: local,
+      redleafConnection: connection,
+      redleafProjects: registry,
+    );
+    await workspace.load();
+    connection.connect();
+    await workspace.importConnectedRedleafProject(
+      displayName: 'My Cloud Archive',
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MltPlayerSettingsButton(
+            settings: settings,
+            mltVersion: '7.22',
+            redleaf: connection,
+            workspaceProjects: workspace,
+            onImportConnectedRedleaf: (name, restore) async {},
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.byTooltip('Settings'));
+    await tester.pumpAndSettle();
+
+    final trash = find.byTooltip('Move My Cloud Archive to Trash');
+    await tester.ensureVisible(trash);
+    await tester.tap(trash);
+    await tester.pumpAndSettle();
+    expect(find.text('Move Redleaf project to Trash?'), findsOneWidget);
+    await tester.tap(find.text('MOVE TO TRASH'));
+    await tester.pumpAndSettle();
+
+    expect(workspace.savedRedleafProjects, isEmpty);
+    expect(workspace.trashedRedleafProjects, hasLength(1));
+    expect(workspace.activeIsLocal, isTrue);
+    expect(find.text('TRASH (1)', skipOffstage: false), findsOneWidget);
+
+    final restore = find.text('RESTORE', skipOffstage: false);
+    await tester.ensureVisible(restore);
+    await tester.tap(restore);
+    await tester.pumpAndSettle();
+
+    expect(workspace.savedRedleafProjects, hasLength(1));
+    expect(workspace.trashedRedleafProjects, isEmpty);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    workspace.dispose();
+    registry.dispose();
+  });
+
   testWidgets('failed project import leaves Settings open with an error',
       (tester) async {
     connection.connect();
