@@ -1655,66 +1655,152 @@ class _ExplorerPageState extends State<ExplorerPage> {
   Future<void> _openRedleafTrash() async {
     await showDialog<void>(
       context: context,
-      builder: (dialogContext) => StatefulBuilder(
-        builder: (dialogContext, setDialogState) {
-          final trashed = _workspaceProjectService.trashedRedleafProjects;
-          return AlertDialog(
-            title: const Text('Redleaf Trash'),
-            content: SizedBox(
-              width: 490,
-              height: 320,
-              child: trashed.isEmpty
-                  ? const Center(
-                      child: Text('No Redleaf projects in Trash.'),
-                    )
-                  : ListView.separated(
-                      itemCount: trashed.length,
-                      separatorBuilder: (context, index) =>
-                          const Divider(height: 1, color: Colors.white12),
-                      itemBuilder: (context, index) {
-                        final record = trashed[index];
-                        return ListTile(
-                          dense: true,
-                          contentPadding:
-                              const EdgeInsets.symmetric(horizontal: 0),
-                          leading: const Icon(Icons.cloud_outlined),
-                          title: Text(
-                            record.name,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          subtitle: Text(
-                            record.serverUrl,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          trailing: TextButton(
-                            onPressed: () async {
-                              try {
-                                await _workspaceProjectService
-                                    .restoreRedleafProject(record.instanceId);
-                                if (dialogContext.mounted) {
-                                  setDialogState(() {});
-                                }
-                              } catch (error) {
-                                _showProjectCatalogError(error);
-                              }
-                            },
-                            child: const Text('RESTORE'),
-                          ),
-                        );
-                      },
+      builder: (dialogContext) {
+        var emptyingTrash = false;
+
+        return StatefulBuilder(
+          builder: (dialogContext, setDialogState) {
+            final trashed = _workspaceProjectService.trashedRedleafProjects;
+
+            Future<void> emptyTrash() async {
+              if (emptyingTrash || trashed.isEmpty) return;
+
+              final count = trashed.length;
+              final confirmed = await showDialog<bool>(
+                context: dialogContext,
+                builder: (confirmContext) => AlertDialog(
+                  title: const Text('Empty Redleaf Trash?'),
+                  content: Text(
+                    'Permanently remove $count Redleaf project '
+                    '${count == 1 ? 'entry' : 'entries'} from MLT Player? '
+                    'You will no longer be able to restore '
+                    '${count == 1 ? 'it' : 'them'} from Trash. '
+                    'The Redleaf databases, source media, and locally '
+                    'cached snapshots will not be deleted.',
+                  ),
+                  actions: [
+                    TextButton(
+                      onPressed: () => Navigator.of(confirmContext).pop(false),
+                      child: const Text('CANCEL'),
                     ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(dialogContext).pop(),
-                child: const Text('CLOSE'),
+                    FilledButton(
+                      onPressed: () => Navigator.of(confirmContext).pop(true),
+                      style: FilledButton.styleFrom(
+                        backgroundColor: Colors.red.shade700,
+                      ),
+                      child: const Text('EMPTY TRASH'),
+                    ),
+                  ],
+                ),
+              );
+              if (confirmed != true || !dialogContext.mounted) return;
+
+              setDialogState(() => emptyingTrash = true);
+              try {
+                await _workspaceProjectService.emptyRedleafTrash();
+                if (dialogContext.mounted) setDialogState(() {});
+              } catch (error) {
+                _showProjectCatalogError(error);
+              } finally {
+                if (dialogContext.mounted) {
+                  setDialogState(() => emptyingTrash = false);
+                }
+              }
+            }
+
+            return AlertDialog(
+              title: const Text('Redleaf Trash'),
+              content: SizedBox(
+                width: 490,
+                height: 345,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: trashed.isEmpty
+                          ? const Center(
+                              child: Text('No Redleaf projects in Trash.'),
+                            )
+                          : ListView.separated(
+                              itemCount: trashed.length,
+                              separatorBuilder: (context, index) =>
+                                  const Divider(
+                                height: 1,
+                                color: Colors.white12,
+                              ),
+                              itemBuilder: (context, index) {
+                                final record = trashed[index];
+                                return ListTile(
+                                  dense: true,
+                                  contentPadding: const EdgeInsets.symmetric(
+                                    horizontal: 0,
+                                  ),
+                                  leading: const Icon(Icons.cloud_outlined),
+                                  title: Text(
+                                    record.name,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  subtitle: Text(
+                                    record.serverUrl,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  trailing: TextButton(
+                                    onPressed: emptyingTrash
+                                        ? null
+                                        : () async {
+                                            try {
+                                              await _workspaceProjectService
+                                                  .restoreRedleafProject(
+                                                record.instanceId,
+                                              );
+                                              if (dialogContext.mounted) {
+                                                setDialogState(() {});
+                                              }
+                                            } catch (error) {
+                                              _showProjectCatalogError(error);
+                                            }
+                                          },
+                                    child: const Text('RESTORE'),
+                                  ),
+                                );
+                              },
+                            ),
+                    ),
+                    const SizedBox(height: 10),
+                    const Text(
+                      'Empty Trash removes project entries from MLT Player. '
+                      'Redleaf databases, media, and cached snapshots remain.',
+                      style: TextStyle(
+                        color: Colors.white54,
+                        fontSize: 11,
+                        height: 1.4,
+                      ),
+                    ),
+                  ],
+                ),
               ),
-            ],
-          );
-        },
-      ),
+              actions: [
+                TextButton(
+                  onPressed: emptyingTrash
+                      ? null
+                      : () => Navigator.of(dialogContext).pop(),
+                  child: const Text('CLOSE'),
+                ),
+                TextButton.icon(
+                  onPressed:
+                      trashed.isEmpty || emptyingTrash ? null : emptyTrash,
+                  icon: const Icon(Icons.delete_forever_outlined, size: 18),
+                  label: Text(
+                    emptyingTrash ? 'EMPTYING…' : 'EMPTY TRASH',
+                  ),
+                ),
+              ],
+            );
+          },
+        );
+      },
     );
   }
 
