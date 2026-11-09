@@ -1669,7 +1669,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
                     )
                   : ListView.separated(
                       itemCount: trashed.length,
-                      separatorBuilder: (_, _) =>
+                      separatorBuilder: (context, index) =>
                           const Divider(height: 1, color: Colors.white12),
                       itemBuilder: (context, index) {
                         final record = trashed[index];
