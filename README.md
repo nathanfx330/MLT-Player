@@ -739,7 +739,10 @@ consumer lifecycle properties, background export, and failures that looked like
 MLT bugs but were not.
 
 The chronological POC documents remain available as the project's historical
-engineering record in [`docs/`](docs/README.md).
+engineering record in [`docs/`](docs/README.md). The broader
+[Development Overview and November 2026 Update](docs/development-journey.md)
+connects those stages with the Redleaf workspace, authenticated Hub launch,
+project Trash, encrypted credentials and shared linked-video thumbnails.
 
 ---
 
