@@ -546,9 +546,38 @@ workspace **and** a valid synced snapshot, and then:
   offers **RESTORE SAVED PROJECT** offline; otherwise requires explicit sign-in
   and restore/import.
 
-Hub passes only the local project folder and server URL, not credentials.
-MLT Player does not save Redleaf passwords. Canceling onboarding leaves the
-MLT project registry unchanged.
+Hub passes only the local project folder and server URL, never a
+password or cookie. A saved Redleaf Hub login may be retrieved directly from
+the operating-system keyring by the exact database instance ID. MLT Player
+does not write passwords into its project registry or configuration.
+Canceling onboarding leaves the MLT project registry unchanged.
+
+### Optional automatic Redleaf login through Hub's keyring
+
+On Linux, Redleaf Hub's Project Library now has a **Credentials** button on
+each project row. Users can explicitly save or remove their Redleaf login
+in the desktop keyring (GNOME Keyring or KWallet). The apps share a versioned
+Secret Service entry keyed to Redleaf's canonical database `instance_id`.
+No password appears in command-line arguments, project JSON files, app
+settings, logs, or environment variables. Hub's saved login is also bound to
+the origin `http://127.0.0.1:5000` and cannot be silently sent to a
+different server URL.
+
+When Hub opens an existing synced MLT Player project, its cached transcript
+catalog opens immediately. If a matching saved login is available, MLT Player
+also authenticates to Redleaf automatically in the same session, without
+triggering an automatic archive refresh. When onboarding a new project, the
+dialog can use the keyring credential so the user still chooses an MLT
+project name but does not need to type the Redleaf password again. The server
+validates the password and MLT Player verifies the returned database instance
+ID before importing.
+
+On Ubuntu, the `secret-tool` utility is provided by `libsecret-tools`.
+A running, unlocked desktop Secret Service keyring is also required.
+If it is absent or rejects a saved login, MLT Player falls back to manual
+sign-in. The first version of shared credentials is Linux-only; **there
+is no insecure plaintext fallback**. Browser password managers remain
+separate from the desktop keyring.
 
 ## Build and run
 
