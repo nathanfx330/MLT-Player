@@ -14,6 +14,7 @@ class MltPlayerSettingsButton extends StatelessWidget {
     required this.settings,
     required this.mltVersion,
     this.redleaf,
+    this.onImportConnectedRedleaf,
     this.explorerNavigation,
     this.onOpenHistoryPath,
     this.onClosed,
@@ -22,6 +23,7 @@ class MltPlayerSettingsButton extends StatelessWidget {
   final PlayerSettingsService settings;
   final String mltVersion;
   final RedleafConnectionService? redleaf;
+  final Future<void> Function()? onImportConnectedRedleaf;
   final ExplorerNavigationService? explorerNavigation;
   final ValueChanged<String>? onOpenHistoryPath;
   final VoidCallback? onClosed;
@@ -47,6 +49,7 @@ class MltPlayerSettingsButton extends StatelessWidget {
             settings: settings,
             mltVersion: mltVersion,
             redleaf: redleafService,
+            onImportConnectedRedleaf: onImportConnectedRedleaf,
             explorerNavigation: explorerNavigation,
           ),
         );
@@ -65,12 +68,14 @@ class _MltPlayerSettingsDialog extends StatefulWidget {
     required this.settings,
     required this.mltVersion,
     required this.redleaf,
+    required this.onImportConnectedRedleaf,
     required this.explorerNavigation,
   });
 
   final PlayerSettingsService settings;
   final String mltVersion;
   final RedleafConnectionService redleaf;
+  final Future<void> Function()? onImportConnectedRedleaf;
   final ExplorerNavigationService? explorerNavigation;
 
   @override
@@ -94,6 +99,8 @@ class _MltPlayerSettingsDialogState extends State<_MltPlayerSettingsDialog> {
   late final TextEditingController _usernameController;
   late final TextEditingController _passwordController;
   bool _obscurePassword = true;
+  bool _importingRedleaf = false;
+  String? _importError;
 
   @override
   void initState() {
@@ -128,6 +135,28 @@ class _MltPlayerSettingsDialogState extends State<_MltPlayerSettingsDialog> {
 
     if (success && mounted) {
       _passwordController.clear();
+    }
+  }
+
+  Future<void> _importConnectedRedleaf() async {
+    final import = widget.onImportConnectedRedleaf;
+    if (import == null || _importingRedleaf || !widget.redleaf.isConnected) {
+      return;
+    }
+
+    setState(() {
+      _importingRedleaf = true;
+      _importError = null;
+    });
+
+    try {
+      await import();
+      if (mounted) Navigator.of(context).pop();
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _importError = error.toString());
+    } finally {
+      if (mounted) setState(() => _importingRedleaf = false);
     }
   }
 
@@ -471,6 +500,43 @@ class _MltPlayerSettingsDialogState extends State<_MltPlayerSettingsDialog> {
         ),
         const SizedBox(height: 10),
         _RedleafStatusBlock(redleaf: redleaf),
+        if (redleaf.isConnected &&
+            widget.onImportConnectedRedleaf != null) ...[
+          const SizedBox(height: 14),
+          const _SectionLabel('REDLEAF CLOUD PROJECT'),
+          const SizedBox(height: 6),
+          const Text(
+            'Add this connected Redleaf database to your MLT Player projects '
+            'and import its transcript catalog now. An existing project is '
+            'reused. This does not create a new Redleaf server.',
+            style: TextStyle(
+              fontSize: 12,
+              height: 1.45,
+              color: Colors.white60,
+            ),
+          ),
+          const SizedBox(height: 10),
+          FilledButton.icon(
+            onPressed: _importingRedleaf ? null : _importConnectedRedleaf,
+            icon: _importingRedleaf
+                ? const SizedBox(
+                    width: 15,
+                    height: 15,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.cloud_download_outlined, size: 18),
+            label: Text(_importingRedleaf
+                ? 'OPENING REDLEAF PROJECT…'
+                : 'CREATE NEW REDLEAF CLOUD PROJECT'),
+          ),
+          if (_importError != null) ...[
+            const SizedBox(height: 8),
+            Text(
+              _importError!,
+              style: const TextStyle(fontSize: 12, color: Colors.redAccent),
+            ),
+          ],
+        ],
       ],
     );
   }
