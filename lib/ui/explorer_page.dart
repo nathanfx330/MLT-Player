@@ -551,7 +551,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
         );
       }
     } catch (_) {
-      // A locked or unavailable keyring must never block cached projects.
+      // An unreadable or missing local vault must never block cached projects.
       // Credentials can still be entered through Settings.
     }
   }
@@ -575,7 +575,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
         _workspaceProjectService.select(
           WorkspaceProject.redleafKey(resolution.instanceId),
         );
-        // Opening the snapshot never waits for the keyring or network.
+        // Opening the snapshot never waits for the vault or network.
         unawaited(_connectSavedHubLogin(
           instanceId: resolution.instanceId,
           serverUrl: serverUrl,
@@ -602,8 +602,8 @@ class _ExplorerPageState extends State<ExplorerPage> {
             .read(resolution.instanceId);
       } catch (_) {
         keyringWarning =
-            'The Linux login keyring is unavailable. Sign in manually, '
-            'or install and unlock libsecret-tools.';
+            'Saved Redleaf credentials could not be read from the local vault. '
+            'Sign in manually or replace them in Redleaf Hub.';
       }
       if (!mounted) return;
 
