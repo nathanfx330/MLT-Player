@@ -103,6 +103,27 @@ Startup does not authenticate, refresh the archive, start Flask, or write
 Redleaf's database. The command launches a new process; it is not IPC to
 an existing MLT Player window.
 
+### Create New Redleaf Cloud Project from Settings
+
+After successful sign-in, Settings presents **CREATE NEW REDLEAF CLOUD
+PROJECT**. This action explicitly imports the authenticated Redleaf instance
+into MLT Player. `WorkspaceProjectService.importConnectedRedleafProject`
+saves or reuses the registry entry by Redleaf `instance_id`, preserving an
+existing MLT display name, then selects that workspace.
+
+The app opens its existing Redleaf Explorer and forwards a one-time import
+request to `RedleafPage`. Once any saved snapshot has been loaded, the page
+runs its established `SYNC NOW` path: refresh inventory, SRT documents,
+catalogs and memberships, then persist a new snapshot. Import status and any
+error remain visible in the Redleaf Explorer. Import failure does not delete
+a previous snapshot.
+
+Signing in alone continues to save the connection identity without silently
+scanning the archive. Repeating **CREATE NEW REDLEAF CLOUD PROJECT** for the
+same instance refreshes that same project, not a duplicate. This is a local
+MLT Player remote-workspace record, not provisioning of a Redleaf host or an
+account on an external cloud service.
+
 ## 4. Authentication and instance identity
 
 MLT Player authenticates to Redleaf through Redleaf's existing login flow.
