@@ -1,5 +1,6 @@
 // test/redleaf_project_trash_test.dart
 
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -150,6 +151,15 @@ void main() {
 
   test('older registry JSON without a Trash field remains active', () async {
     await create('legacy-id', 'Old Archive');
+
+    // Simulate an older saved registry version with no Trash metadata.
+    final savedFile = File('${home.path}/redleaf_projects.json');
+    final json = jsonDecode(await savedFile.readAsString())
+        as Map<String, dynamic>;
+    final saved = (json['projects'] as List<dynamic>).first
+        as Map<String, dynamic>;
+    saved.remove('trashedAt');
+    await savedFile.writeAsString(jsonEncode(json));
 
     final reopened =
         RedleafProjectRegistryService(configDirectory: home);
