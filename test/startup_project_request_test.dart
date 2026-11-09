@@ -239,6 +239,29 @@ void main() {
       expect(registry.projects, isEmpty);
     });
 
+    test('folder name cannot take a name reserved by Trash', () async {
+      await registry.rememberLocalProject(
+        instanceId: 'old-trash-instance',
+        suggestedName: 'Archive Conflict',
+      );
+      await registry.trashProject('old-trash-instance');
+
+      final folder = Directory('${tempDirectory.path}/Archive Conflict');
+      await folder.create();
+      await _createRedleafDatabase(
+        folder,
+        instanceId: 'different-instance',
+      );
+
+      final request = StartupProjectRequest.parse(
+        <String>['--redleaf-project-path', folder.path],
+      );
+      expect(await request.applyTo(workspace), contains('Trash'));
+      expect(registry.projectByInstanceId('different-instance'), isNull);
+      expect(registry.trashedProjects, hasLength(1));
+      expect(workspace.activeIsLocal, isTrue);
+    });
+
     test('refuses a folder with no database and leaves state unchanged',
         () async {
       final emptyFolder = Directory('${tempDirectory.path}/Empty');
