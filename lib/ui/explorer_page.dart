@@ -628,6 +628,10 @@ class _ExplorerPageState extends State<ExplorerPage> {
                   _workspaceProjectService.select(
                     WorkspaceProject.redleafKey(resolution.instanceId),
                   );
+                  unawaited(_connectSavedHubLogin(
+                    instanceId: resolution.instanceId,
+                    serverUrl: serverUrl,
+                  ));
                 }
               : null,
         ),
