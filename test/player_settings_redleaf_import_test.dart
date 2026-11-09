@@ -103,10 +103,12 @@ void main() {
           widget.decoration?.labelText == 'MLT Player project name',
     );
     await tester.ensureVisible(nameField);
+    await tester.pumpAndSettle();
     await tester.enterText(nameField, 'My Documentary Archive');
     await tester.pumpAndSettle();
 
     await tester.ensureVisible(create);
+    await tester.pumpAndSettle();
     await tester.pumpAndSettle();
     await tester.tap(create);
     await tester.pumpAndSettle();
@@ -143,6 +145,7 @@ void main() {
           widget.decoration?.labelText == 'MLT Player project name',
     );
     await tester.ensureVisible(nameField);
+    await tester.pumpAndSettle();
     await tester.enterText(nameField, ' ');
     await tester.pumpAndSettle();
 
@@ -151,6 +154,7 @@ void main() {
       skipOffstage: false,
     );
     await tester.ensureVisible(create);
+    await tester.pumpAndSettle();
     await tester.tap(create);
     await tester.pumpAndSettle();
 
@@ -161,8 +165,10 @@ void main() {
     );
 
     await tester.ensureVisible(nameField);
+    await tester.pumpAndSettle();
     await tester.enterText(nameField, 'Valid Project');
     await tester.ensureVisible(create);
+    await tester.pumpAndSettle();
     await tester.tap(create);
     await tester.pumpAndSettle();
     expect(imports, 1);
@@ -205,6 +211,7 @@ void main() {
 
     final trash = find.byTooltip('Move My Cloud Archive to Trash');
     await tester.ensureVisible(trash);
+    await tester.pumpAndSettle();
     await tester.tap(trash);
     await tester.pumpAndSettle();
     expect(find.text('Move Redleaf project to Trash?'), findsOneWidget);
@@ -218,6 +225,7 @@ void main() {
 
     final restore = find.text('RESTORE', skipOffstage: false);
     await tester.ensureVisible(restore);
+    await tester.pumpAndSettle();
     await tester.tap(restore);
     await tester.pumpAndSettle();
 
@@ -256,6 +264,7 @@ void main() {
       skipOffstage: false,
     );
     await tester.ensureVisible(create);
+    await tester.pumpAndSettle();
     await tester.pumpAndSettle();
     await tester.tap(create);
     await tester.pumpAndSettle();
