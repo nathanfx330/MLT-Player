@@ -108,7 +108,11 @@ class _RedleafHubOnboardingDialogState
         widget.connection.instanceId == widget.expectedInstanceId &&
         widget.connection.serverUrl == server;
 
-    final useSavedLogin = _useSavedLogin && widget.savedCredentials != null;
+    // A Hub launch argument can be user-controlled. Never send a saved
+    // password to an origin other than the one approved in Hub's keyring.
+    final useSavedLogin = _useSavedLogin &&
+        widget.savedCredentials != null &&
+        server == widget.savedCredentials!.serverUrl;
     if (!alreadyConnected &&
         !useSavedLogin &&
         (_username.text.trim().isEmpty || _password.text.isEmpty)) {
@@ -246,6 +250,19 @@ class _RedleafHubOnboardingDialogState
                 ),
                 const SizedBox(height: 8),
               ],
+              if (widget.savedCredentials != null &&
+                  _server.text.trim() != widget.savedCredentials!.serverUrl)
+                const Padding(
+                  padding: EdgeInsets.only(bottom: 8),
+                  child: Text(
+                    'Saved login is restricted to its original Redleaf '
+                    'server. Enter credentials manually for another address.',
+                    style: TextStyle(
+                      color: Colors.amberAccent,
+                      fontSize: 12,
+                    ),
+                  ),
+                ),
               if (widget.keyringWarning != null) ...[
                 Text(
                   widget.keyringWarning!,
