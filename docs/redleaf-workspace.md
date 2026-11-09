@@ -145,8 +145,15 @@ project management belongs in the project menu.
 
 Moving the currently selected Redleaf project to Trash returns selection to
 the previous local workspace. No server database, media file, snapshot, or
-credential is deleted. There is intentionally no permanent-delete action in
-this iteration.
+credential is deleted.
+
+The **EMPTY TRASH** control in this dialog is available when it contains
+projects and requires a second confirmation stating the exact project count.
+It permanently removes **only trashed MLT Player registry entries** in one
+save, frees their display names and instance IDs for future explicit imports,
+and leaves every active project intact. The removed entries cannot be
+restored from Trash. This does not delete Redleaf databases, source media,
+or locally cached snapshots. The button is disabled when Trash is empty.
 
 `RedleafProjectRegistryService` owns the canonical identity and display-name
 uniqueness checks. `WorkspaceProjectService` owns selector visibility and
