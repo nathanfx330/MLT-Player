@@ -41,6 +41,11 @@ class WorkspaceProjectService extends ChangeNotifier {
       ? _redleafProjects.projectByInstanceId(_redleafConnection.instanceId)
       : null;
 
+  /// Includes trashed records so Hub launches cannot silently resurrect
+  /// projects that the user deliberately moved to MLT Player Trash.
+  RedleafProjectRecord? redleafRecordByInstanceId(String instanceId) =>
+      _loaded ? _redleafProjects.projectByInstanceId(instanceId) : null;
+
   String? get activeKey => activeProject?.key;
 
   WorkspaceProject? get activeProject {
