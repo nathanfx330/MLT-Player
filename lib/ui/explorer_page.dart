@@ -26,9 +26,12 @@ import '../services/redleaf_link_service.dart';
 import '../services/thumbnail_service.dart';
 import '../services/workspace_project_service.dart';
 import '../services/startup_project_request.dart';
+import '../services/redleaf_connection_service.dart';
+import '../services/redleaf_hub_launch_service.dart';
 import 'redleaf_page.dart';
 import 'widgets/catalog_child_tile.dart';
 import 'widgets/player_settings_button.dart';
+import 'widgets/redleaf_hub_onboarding_dialog.dart';
 import 'widgets/text_prompt_dialog.dart';
 import 'widgets/workspace_project_switcher.dart';
 
@@ -492,6 +495,68 @@ class _ExplorerPageState extends State<ExplorerPage> {
     });
   }
 
+  Future<void> _launchHubProject(StartupProjectRequest request) async {
+    final projectPath = request.hubProjectPath;
+    if (projectPath == null || !mounted) return;
+
+    try {
+      final resolution = await RedleafHubLaunchService().inspect(
+        projectPath: projectPath,
+        workspace: _workspaceProjectService,
+      );
+      if (!mounted) return;
+
+      if (resolution.disposition == RedleafHubLaunchDisposition.openCached) {
+        _workspaceProjectService.select(
+          WorkspaceProject.redleafKey(resolution.instanceId),
+        );
+        // The saved snapshot opens immediately without needing credentials.
+        return;
+      }
+
+      final import = widget.onImportConnectedRedleaf;
+      if (import == null) {
+        throw StateError(
+          'MLT Player cannot import Redleaf projects from this screen.',
+        );
+      }
+
+      final alreadyInTrash =
+          resolution.disposition == RedleafHubLaunchDisposition.restore;
+      final connection = RedleafConnectionService.instance;
+      await connection.load();
+      if (!mounted) return;
+
+      await showDialog<bool>(
+        context: context,
+        barrierDismissible: false,
+        builder: (dialogContext) => RedleafHubOnboardingDialog(
+          expectedInstanceId: resolution.instanceId,
+          suggestedName: resolution.suggestedName,
+          serverUrl: request.hubServerUrl ??
+              resolution.existingRecord?.serverUrl ??
+              RedleafConnectionService.defaultServerUrl,
+          connection: connection,
+          existingInTrash: alreadyInTrash,
+          hasCachedSnapshot: resolution.hasCachedSnapshot,
+          onImport: import,
+          onRestoreCached: alreadyInTrash && resolution.hasCachedSnapshot
+              ? () async {
+                  await _workspaceProjectService.restoreRedleafProject(
+                    resolution.instanceId,
+                  );
+                  _workspaceProjectService.select(
+                    WorkspaceProject.redleafKey(resolution.instanceId),
+                  );
+                }
+              : null,
+        ),
+      );
+    } catch (error) {
+      if (mounted) _showProjectCatalogError(error);
+    }
+  }
+
   Future<void> _initializeProjectCatalogs() async {
     try {
       await _workspaceProjectService.load();
@@ -521,7 +586,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
     // A saved Redleaf workspace can be selected only after the registry loads.
     // Startup selection never signs in or triggers SYNC NOW.
     final startupRequest = widget.startupProjectRequest;
-    if (startupRequest != null) {
+    if (startupRequest != null && startupRequest.hubProjectPath == null) {
       final selectionError =
           await startupRequest.applyTo(_workspaceProjectService);
       if (!mounted) return;
@@ -547,6 +612,14 @@ class _ExplorerPageState extends State<ExplorerPage> {
       _annotationsLoaded = widget.projectMediaMetadataService.loaded;
       _refreshVisibleItems();
     });
+
+    if (startupRequest?.hubProjectPath != null) {
+      // Show the modal after the Explorer has completed its first frame.
+      // Never auto-register an unsynced project or request a password in Hub.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) unawaited(_launchHubProject(startupRequest!));
+      });
+    }
 
     final activeWorkspaceProject = _workspaceProjectService.activeProject;
     _reportWorkspaceProject(activeWorkspaceProject);
