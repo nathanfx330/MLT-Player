@@ -150,7 +150,7 @@ void main() {
       throwsArgumentError,
     );
     await expectLater(
-      vault.save(instanceId: 'wrong\\ninstance', username: 'a', password: 'b'),
+      vault.save(instanceId: 'wrong' + String.fromCharCode(10) + 'instance', username: 'a', password: 'b'),
       throwsArgumentError,
     );
     expect(await vaultFolder.exists(), isFalse);
