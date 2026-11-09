@@ -9,6 +9,7 @@ import '../../services/thumbnail_service.dart';
 
 class ExplorerMediaThumbnail extends StatefulWidget {
   const ExplorerMediaThumbnail({
+    super.key,
     required this.item,
     required this.thumbnailService,
     required this.fallbackIcon,
