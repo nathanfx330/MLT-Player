@@ -149,6 +149,72 @@ void main() {
     expect(registry.projects, hasLength(1));
   });
 
+  test('Empty Trash permanently removes trashed records only', () async {
+    await create('trashed-1', 'Old Archive');
+    await create('active-1', 'Current Archive');
+    await create('trashed-2', 'Retired Archive');
+
+    await registry.trashProject('trashed-1');
+    await registry.trashProject('trashed-2');
+
+    expect(registry.projects, hasLength(1));
+    expect(registry.trashedProjects, hasLength(2));
+
+    final removed = await registry.emptyTrash();
+
+    expect(removed, 2);
+    expect(registry.trashedProjects, isEmpty);
+    expect(registry.projectByInstanceId('trashed-1'), isNull);
+    expect(registry.projectByInstanceId('trashed-2'), isNull);
+    expect(registry.projects.single.instanceId, 'active-1');
+    expect(await registry.emptyTrash(), 0);
+
+    final reopened = RedleafProjectRegistryService(configDirectory: home);
+    await reopened.load();
+    expect(reopened.trashedProjects, isEmpty);
+    expect(reopened.projects.single.instanceId, 'active-1');
+    reopened.dispose();
+  });
+
+  test('Empty Trash releases names and IDs for later explicit import',
+      () async {
+    await create('old-id', 'My Research');
+    final original = registry.projectByInstanceId('old-id')!;
+    await registry.trashProject('old-id');
+
+    expect(await registry.emptyTrash(), 1);
+    expect(registry.projectByInstanceId('old-id'), isNull);
+
+    await create('different-id', 'My Research');
+    expect(registry.projects.single.name, 'My Research');
+
+    // Removing the original record also removes its original timestamps.
+    await create('old-id', 'New Archive');
+    final recreated = registry.projectByInstanceId('old-id')!;
+    expect(recreated.instanceId, original.instanceId);
+    expect(recreated.name, 'New Archive');
+    expect(recreated.isTrashed, isFalse);
+    expect(registry.projects, hasLength(2));
+  });
+
+  test('Empty Trash never deletes Redleaf source or cached files', () async {
+    await create('cached-id', 'Cached Archive');
+    final database = File('${home.path}/knowledge_base.db');
+    await database.writeAsString('source database preserved');
+    final snapshots = Directory('${home.path}/redleaf_snapshots');
+    await snapshots.create(recursive: true);
+    final snapshot = File('${snapshots.path}/cached-id.json');
+    await snapshot.writeAsString('cached transcript');
+
+    await registry.trashProject('cached-id');
+    expect(await registry.emptyTrash(), 1);
+
+    expect(await database.readAsString(), 'source database preserved');
+    expect(await snapshot.readAsString(), 'cached transcript');
+    expect(registry.trashedProjects, isEmpty);
+    expect(registry.projects, isEmpty);
+  });
+
   test('older registry JSON without a Trash field remains active', () async {
     await create('legacy-id', 'Old Archive');
 
