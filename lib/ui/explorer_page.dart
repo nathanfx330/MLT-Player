@@ -195,7 +195,7 @@ class ExplorerPage extends StatefulWidget {
   final ValueChanged<WorkspaceProject?>? onWorkspaceProjectChanged;
   final WorkspaceProjectService? workspaceProjectService;
   final int importRequestSerial;
-  final Future<void> Function()? onImportConnectedRedleaf;
+  final Future<void> Function(String, bool)? onImportConnectedRedleaf;
   final StartupProjectRequest? startupProjectRequest;
   final VoidCallback? onStartupRedleafSelected;
   final PlayerSettingsService? playerSettings;
@@ -2282,6 +2282,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
                   settings: widget.playerSettings!,
                   mltVersion: widget.version,
                   explorerNavigation: _navigationService,
+                  workspaceProjects: _workspaceProjectService,
                   onImportConnectedRedleaf: widget.onImportConnectedRedleaf,
                   onOpenHistoryPath: _openHistoryPath,
                   onClosed: _handleSettingsClosed,
@@ -2458,6 +2459,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
                   settings: widget.playerSettings!,
                   mltVersion: widget.version,
                   explorerNavigation: _navigationService,
+                  workspaceProjects: _workspaceProjectService,
                   onImportConnectedRedleaf: widget.onImportConnectedRedleaf,
                   onOpenHistoryPath: _openHistoryPath,
                   onClosed: _handleSettingsClosed,
