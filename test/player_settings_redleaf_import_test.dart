@@ -1,7 +1,5 @@
 // test/player_settings_redleaf_import_test.dart
 
-import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -13,15 +11,16 @@ import 'package:mlt_player/ui/widgets/player_settings_button.dart';
 void main() {
   late Directory tempDirectory;
   late PlayerSettingsService settings;
-  late RedleafConnectionService connection;
+  late _FakeRedleafConnectionService connection;
 
   setUp(() async {
     tempDirectory = await Directory.systemTemp.createTemp(
       'mlt_player_settings_redleaf_import_test_',
     );
     settings = PlayerSettingsService(configDirectory: tempDirectory);
-    connection = RedleafConnectionService(configDirectory: tempDirectory);
-    await connection.load();
+    connection = _FakeRedleafConnectionService(
+      configDirectory: Directory('${tempDirectory.path}/redleaf'),
+    );
   });
 
   tearDown(() async {
@@ -44,6 +43,7 @@ void main() {
         ),
       ),
     );
+
     await tester.tap(find.byTooltip('Settings'));
     await tester.pumpAndSettle();
 
@@ -54,99 +54,138 @@ void main() {
     );
   });
 
-  testWidgets('Settings can explicitly create and import a connected project',
+  testWidgets('Settings explicitly imports a connected Redleaf project',
       (tester) async {
-    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-    unawaited(_serveRedleaf(server));
-
-    try {
-      final success = await connection.signIn(
-        serverUrl: 'http://${server.address.address}:${server.port}',
-        username: 'tester',
-        password: 'secret',
-      );
-      expect(success, isTrue);
-
-      var imports = 0;
-      await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(
-            body: MltPlayerSettingsButton(
-              settings: settings,
-              mltVersion: '7.22',
-              redleaf: connection,
-              onImportConnectedRedleaf: () async {
-                imports += 1;
-              },
-            ),
+    var imports = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MltPlayerSettingsButton(
+            settings: settings,
+            mltVersion: '7.22',
+            redleaf: connection,
+            onImportConnectedRedleaf: () async {
+              imports += 1;
+            },
           ),
         ),
-      );
-      await tester.tap(find.byTooltip('Settings'));
-      await tester.pumpAndSettle();
+      ),
+    );
 
-      final create = find.text(
-        'CREATE NEW REDLEAF CLOUD PROJECT',
-        skipOffstage: false,
-      );
-      expect(create, findsOneWidget);
+    await tester.tap(find.byTooltip('Settings'));
+    await tester.pumpAndSettle();
 
-      await tester.ensureVisible(create);
-      await tester.pumpAndSettle();
-      await tester.tap(create);
-      await tester.pumpAndSettle();
+    // Simulate sign-in through a deterministic fake. HTTP authentication has
+    // its own service tests and must not run inside a widget test's fake clock.
+    await tester.tap(find.text('SIGN IN'));
+    await tester.pumpAndSettle();
+    expect(connection.signInCalls, 1);
+    expect(connection.isConnected, isTrue);
 
-      expect(imports, 1);
-      expect(find.text('Settings'), findsNothing);
-    } finally {
-      await server.close(force: true);
-    }
+    final create = find.text(
+      'CREATE NEW REDLEAF CLOUD PROJECT',
+      skipOffstage: false,
+    );
+    expect(create, findsOneWidget);
+
+    await tester.ensureVisible(create);
+    await tester.pumpAndSettle();
+    await tester.tap(create);
+    await tester.pumpAndSettle();
+
+    expect(imports, 1);
+    expect(find.text('Settings'), findsNothing);
+  });
+
+  testWidgets('failed project import leaves Settings open with an error',
+      (tester) async {
+    connection.connect();
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MltPlayerSettingsButton(
+            settings: settings,
+            mltVersion: '7.22',
+            redleaf: connection,
+            onImportConnectedRedleaf: () async {
+              throw StateError('Archive import was rejected');
+            },
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.byTooltip('Settings'));
+    await tester.pumpAndSettle();
+
+    final create = find.text(
+      'CREATE NEW REDLEAF CLOUD PROJECT',
+      skipOffstage: false,
+    );
+    await tester.ensureVisible(create);
+    await tester.pumpAndSettle();
+    await tester.tap(create);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Settings'), findsOneWidget);
+    expect(
+      find.textContaining('Archive import was rejected'),
+      findsOneWidget,
+    );
   });
 }
 
-Future<void> _serveRedleaf(HttpServer server) async {
-  await for (final request in server) {
-    final path = request.uri.path;
-    if (request.method == 'GET' && path == '/login') {
-      request.response.cookies.add(Cookie('session', 'preauth'));
-      request.response.statusCode = HttpStatus.ok;
-      request.response.headers.contentType = ContentType.html;
-      request.response.write(
-        '<input type="hidden" name="csrf_token" value="csrf-login">',
-      );
-    } else if (request.method == 'POST' && path == '/login') {
-      final data = await utf8.decoder.bind(request).join();
-      final values = Uri.splitQueryString(data);
-      final valid = values['csrf_token'] == 'csrf-login' &&
-          values['username'] == 'tester' &&
-          values['password'] == 'secret';
-      if (valid) {
-        request.response.statusCode = HttpStatus.found;
-        request.response.headers.set(HttpHeaders.locationHeader, '/dashboard');
-        request.response.cookies.add(Cookie('session', 'authed'));
-      } else {
-        request.response.statusCode = HttpStatus.ok;
-        request.response.write('Invalid login');
-      }
-    } else if (request.method == 'GET' && path == '/dashboard') {
-      request.response.statusCode = HttpStatus.ok;
-      request.response.headers.contentType = ContentType.html;
-      request.response.write(
-        '<input type="hidden" name="csrf_token" value="csrf-session">',
-      );
-    } else if (request.method == 'GET' && path == '/api/system/info') {
-      request.response.statusCode = HttpStatus.ok;
-      request.response.headers.contentType = ContentType.json;
-      request.response.write(
-        jsonEncode(<String, String>{
-          'instance_id': 'settings-import-test',
-          'project_name': 'Imported Redleaf',
-          'base_dir': '/tmp/remote',
-        }),
-      );
-    } else {
-      request.response.statusCode = HttpStatus.notFound;
-    }
-    await request.response.close();
+/// Widget-test double. Real Redleaf login HTTP behavior is covered by the
+/// connection and workspace service tests with their own async server fixture.
+class _FakeRedleafConnectionService extends RedleafConnectionService {
+  _FakeRedleafConnectionService({required super.configDirectory});
+
+  bool _connected = false;
+  int signInCalls = 0;
+
+  @override
+  Future<void> load() async {}
+
+  @override
+  bool get isConnected => _connected;
+
+  @override
+  RedleafConnectionStatus get status => _connected
+      ? RedleafConnectionStatus.connected
+      : RedleafConnectionStatus.disconnected;
+
+  @override
+  String get serverUrl => RedleafConnectionService.defaultServerUrl;
+
+  @override
+  String get username => 'tester';
+
+  @override
+  String get instanceId => _connected ? 'settings-import-test' : '';
+
+  @override
+  String get projectName => _connected ? 'Imported Redleaf' : '';
+
+  @override
+  Future<bool> signIn({
+    required String serverUrl,
+    required String username,
+    required String password,
+  }) async {
+    signInCalls += 1;
+    connect();
+    return true;
+  }
+
+  void connect() {
+    _connected = true;
+    notifyListeners();
+  }
+
+  @override
+  void disconnect() {
+    _connected = false;
+    notifyListeners();
   }
 }
