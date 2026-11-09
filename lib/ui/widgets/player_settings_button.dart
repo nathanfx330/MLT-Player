@@ -7,6 +7,8 @@ import 'package:flutter/material.dart';
 import '../../services/explorer_navigation_service.dart';
 import '../../services/player_settings_service.dart';
 import '../../services/redleaf_connection_service.dart';
+import '../../services/workspace_project_service.dart';
+import '../../services/redleaf_project_registry_service.dart';
 
 class MltPlayerSettingsButton extends StatelessWidget {
   const MltPlayerSettingsButton({
@@ -14,6 +16,7 @@ class MltPlayerSettingsButton extends StatelessWidget {
     required this.settings,
     required this.mltVersion,
     this.redleaf,
+    this.workspaceProjects,
     this.onImportConnectedRedleaf,
     this.explorerNavigation,
     this.onOpenHistoryPath,
@@ -23,7 +26,8 @@ class MltPlayerSettingsButton extends StatelessWidget {
   final PlayerSettingsService settings;
   final String mltVersion;
   final RedleafConnectionService? redleaf;
-  final Future<void> Function()? onImportConnectedRedleaf;
+  final WorkspaceProjectService? workspaceProjects;
+  final Future<void> Function(String, bool)? onImportConnectedRedleaf;
   final ExplorerNavigationService? explorerNavigation;
   final ValueChanged<String>? onOpenHistoryPath;
   final VoidCallback? onClosed;
@@ -49,6 +53,7 @@ class MltPlayerSettingsButton extends StatelessWidget {
             settings: settings,
             mltVersion: mltVersion,
             redleaf: redleafService,
+            workspaceProjects: workspaceProjects,
             onImportConnectedRedleaf: onImportConnectedRedleaf,
             explorerNavigation: explorerNavigation,
           ),
@@ -68,6 +73,7 @@ class _MltPlayerSettingsDialog extends StatefulWidget {
     required this.settings,
     required this.mltVersion,
     required this.redleaf,
+    required this.workspaceProjects,
     required this.onImportConnectedRedleaf,
     required this.explorerNavigation,
   });
@@ -75,7 +81,8 @@ class _MltPlayerSettingsDialog extends StatefulWidget {
   final PlayerSettingsService settings;
   final String mltVersion;
   final RedleafConnectionService redleaf;
-  final Future<void> Function()? onImportConnectedRedleaf;
+  final WorkspaceProjectService? workspaceProjects;
+  final Future<void> Function(String, bool)? onImportConnectedRedleaf;
   final ExplorerNavigationService? explorerNavigation;
 
   @override
@@ -98,9 +105,12 @@ class _MltPlayerSettingsDialogState extends State<_MltPlayerSettingsDialog> {
   late final TextEditingController _serverController;
   late final TextEditingController _usernameController;
   late final TextEditingController _passwordController;
+  late final TextEditingController _cloudProjectNameController;
+  String _lastConnectedInstanceId = '';
   bool _obscurePassword = true;
   bool _importingRedleaf = false;
   String? _importError;
+  String? _projectActionError;
 
   @override
   void initState() {
@@ -108,22 +118,39 @@ class _MltPlayerSettingsDialogState extends State<_MltPlayerSettingsDialog> {
     _serverController = TextEditingController(text: widget.redleaf.serverUrl);
     _usernameController = TextEditingController(text: widget.redleaf.username);
     _passwordController = TextEditingController();
+    _cloudProjectNameController = TextEditingController();
     widget.redleaf.addListener(_onRedleafChanged);
+    widget.workspaceProjects?.addListener(_onRedleafChanged);
+    _updateConnectedProjectName();
   }
 
   @override
   void dispose() {
     widget.redleaf.removeListener(_onRedleafChanged);
+    widget.workspaceProjects?.removeListener(_onRedleafChanged);
     _serverController.dispose();
     _usernameController.dispose();
     _passwordController.dispose();
+    _cloudProjectNameController.dispose();
     super.dispose();
   }
 
   void _onRedleafChanged() {
-    if (mounted) {
-      setState(() {});
-    }
+    _updateConnectedProjectName();
+    if (mounted) setState(() {});
+  }
+
+  void _updateConnectedProjectName() {
+    final id =
+        widget.redleaf.isConnected ? widget.redleaf.instanceId.trim() : '';
+    if (id == _lastConnectedInstanceId) return;
+
+    _lastConnectedInstanceId = id;
+    _cloudProjectNameController.text = id.isEmpty
+        ? ''
+        : (widget.workspaceProjects?.connectedRedleafRecord?.name ??
+            widget.redleaf.projectName.trim());
+    _importError = null;
   }
 
   Future<void> _signIn() async {
@@ -149,8 +176,15 @@ class _MltPlayerSettingsDialogState extends State<_MltPlayerSettingsDialog> {
       _importError = null;
     });
 
+    final name = _cloudProjectNameController.text.trim();
+    if (name.isEmpty) {
+      setState(() => _importError = 'Enter a project name before importing.');
+      return;
+    }
+
     try {
-      await import();
+      final trashed = widget.workspaceProjects?.connectedRedleafRecord?.isTrashed ?? false;
+      await import(name, trashed);
       if (mounted) Navigator.of(context).pop();
     } catch (error) {
       if (!mounted) return;
