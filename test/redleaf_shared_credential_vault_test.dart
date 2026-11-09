@@ -1,120 +1,176 @@
 // test/redleaf_shared_credential_vault_test.dart
 
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mlt_player/services/redleaf_shared_credential_vault.dart';
 
-class _FakeKeyring {
-  final Map<String, String> entries = <String, String>{};
-  final List<List<String>> commands = <List<String>>[];
-  String? mostRecentStdin;
-
-  Future<SecretToolResult> run(
-    List<String> arguments, {
-    String? secret,
-  }) async {
-    commands.add(List<String>.of(arguments));
-    mostRecentStdin = secret;
-    final verb = arguments.first;
-    final attributes = arguments.skip(verb == 'store' ? 2 : 1).join('|');
-    switch (verb) {
-      case 'store':
-        entries[attributes] = secret!;
-        return const SecretToolResult(0, '');
-      case 'lookup':
-        return SecretToolResult(0, entries[attributes] ?? '');
-      case 'clear':
-        entries.remove(attributes);
-        return const SecretToolResult(0, '');
-      default:
-        return const SecretToolResult(1, '');
-    }
-  }
-}
-
 void main() {
-  late _FakeKeyring fake;
+  late Directory temp;
+  late Directory vaultFolder;
   late RedleafSharedCredentialVault vault;
 
-  setUp(() {
-    fake = _FakeKeyring();
-    vault = RedleafSharedCredentialVault(runner: fake.run);
+  setUp(() async {
+    temp = await Directory.systemTemp.createTemp('redleaf_vault_test_');
+    vaultFolder = Directory('${temp.path}/shared-vault');
+    vault = RedleafSharedCredentialVault(storageDirectory: vaultFolder);
   });
 
-  test('stores username and password ONLY on stdin, never in arguments',
-      () async {
+  tearDown(() async {
+    if (await temp.exists()) await temp.delete(recursive: true);
+  });
+
+  test('encrypted records can be opened by both desktop apps', () async {
     await vault.save(
-      instanceId: 'research-instance',
+      instanceId: 'archive-a',
       username: 'researcher',
-      password: 'sensitive-password',
+      password: 'my-secret-password',
     );
 
-    final args = fake.commands.single.join(' ');
-    expect(args, contains('research-instance'));
-    expect(args, isNot(contains('researcher')));
-    expect(args, isNot(contains('sensitive-password')));
+    // A new vault instance represents the second desktop application.
+    final otherApp = RedleafSharedCredentialVault(
+      storageDirectory: vaultFolder,
+    );
+    final found = await otherApp.read('archive-a');
+    expect(found?.username, 'researcher');
+    expect(found?.password, 'my-secret-password');
+    expect(found?.serverUrl, 'http://127.0.0.1:5000');
+    expect(await otherApp.read('archive-b'), isNull);
 
-    final stored = jsonDecode(fake.mostRecentStdin!)
-        as Map<String, dynamic>;
-    expect(stored['username'], 'researcher');
-    expect(stored['password'], 'sensitive-password');
-    expect(stored['serverUrl'], 'http://127.0.0.1:5000');
+    // The encrypted record and key do not contain the cleartext login.
+    final key = File('${vaultFolder.path}/vault.key');
+    final encrypted = (await Directory('${vaultFolder.path}/entries')
+            .list()
+            .first) as File;
+    final jsonBytes = await encrypted.readAsBytes();
+    expect(utf8.decode(jsonBytes), isNot(contains('my-secret-password')));
+    expect(utf8.decode(jsonBytes), isNot(contains('researcher')));
+    expect(await key.length(), 32);
+    expect(await key.readAsBytes(), isNot(contains('my-secret-password')));
   });
 
-  test('both apps can read same versioned instance-scoped secret', () async {
+  test('vault creates private Linux directories and files without chmod command',
+      () async {
+    await vault.save(
+      instanceId: 'archive',
+      username: 'editor',
+      password: 'secret',
+    );
+
+    final dir = await vaultFolder.stat();
+    final entriesDir =
+        await Directory('${vaultFolder.path}/entries').stat();
+    final key = await File('${vaultFolder.path}/vault.key').stat();
+    final entry = await Directory('${vaultFolder.path}/entries')
+        .list()
+        .first as File;
+    final entryStat = await entry.stat();
+
+    expect(dir.mode & 0x1ff, 0x1c0); // 0700
+    expect(entriesDir.mode & 0x1ff, 0x1c0);
+    expect(key.mode & 0x1ff, 0x180); // 0600
+    expect(entryStat.mode & 0x1ff, 0x180);
+  });
+
+  test('deletion and replacement are isolated to one instance', () async {
     await vault.save(
       instanceId: 'archive-a',
       username: 'editor',
-      password: 'correct-123',
+      password: 'old-password',
     );
-    final found = await vault.read('archive-a');
-    expect(found?.username, 'editor');
-    expect(found?.password, 'correct-123');
-    expect(found?.serverUrl, 'http://127.0.0.1:5000');
-    expect(await vault.read('archive-b'), isNull);
+    await vault.save(
+      instanceId: 'archive-b',
+      username: 'visitor',
+      password: 'different-password',
+    );
+    await vault.save(
+      instanceId: 'archive-a',
+      username: 'editor-new',
+      password: 'new-password',
+    );
+    expect((await vault.read('archive-a'))?.password, 'new-password');
+    expect((await vault.read('archive-b'))?.password, 'different-password');
 
     await vault.delete('archive-a');
     expect(await vault.read('archive-a'), isNull);
+    expect((await vault.read('archive-b'))?.username, 'visitor');
+    await vault.delete('archive-a');
   });
 
-  test('server origin is bound and cannot include foreign or hidden paths',
+  test('modified ciphertext fails authentication, never returns credentials',
       () async {
     await vault.save(
-      instanceId: 'a',
-      username: 'user',
+      instanceId: 'archive',
+      username: 'editor',
+      password: 'secret',
+    );
+
+    final file = (await Directory('${vaultFolder.path}/entries')
+            .list()
+            .first) as File;
+    final decoded = jsonDecode(await file.readAsString())
+        as Map<String, dynamic>;
+    decoded['ciphertext'] = base64Encode(<int>[1, 2, 3, 4, 5]);
+    await file.writeAsString(jsonEncode(decoded));
+
+    await expectLater(
+      vault.read('archive'),
+      throwsA(isA<StateError>()),
+    );
+  });
+
+  test('server origin is recorded and dangerous URLs are rejected', () async {
+    await vault.save(
+      instanceId: 'archive',
+      username: 'editor',
       password: 'secret',
       serverUrl: 'https://redleaf.example.com/',
     );
-    expect((await vault.read('a'))?.serverUrl,
+    expect((await vault.read('archive'))?.serverUrl,
         'https://redleaf.example.com');
 
     expect(
       () => RedleafSharedCredentialVault.normalizeServerUrl(
-          'http://user:password@127.0.0.1:5000'),
+        'http://user:password@127.0.0.1:5000',
+      ),
       throwsArgumentError,
     );
     expect(
       () => RedleafSharedCredentialVault.normalizeServerUrl(
-          'https://redleaf.example.com/hidden/login'),
-      throwsArgumentError,
-    );
-    expect(
-      () => RedleafSharedCredentialVault.normalizeServerUrl(
-          'file:///tmp/password.txt'),
+        'file:///tmp/credentials',
+      ),
       throwsArgumentError,
     );
   });
 
-  test('invalid or missing credentials are rejected', () async {
+  test('invalid login and database ID are rejected before writing', () async {
     await expectLater(
-      vault.save(instanceId: 'a', username: '', password: 'pass'),
+      vault.save(instanceId: 'archive', username: '', password: 'secret'),
       throwsArgumentError,
     );
-    expect(
-      () => RedleafSharedCredentialVault.attributesFor('x\ny'),
+    await expectLater(
+      vault.save(instanceId: 'wrong\\ninstance', username: 'a', password: 'b'),
       throwsArgumentError,
     );
-    expect(fake.commands, isEmpty);
+    expect(await vaultFolder.exists(), isFalse);
+  });
+
+  test('symlinked vault entries cannot be used', () async {
+    await vault.save(
+      instanceId: 'archive',
+      username: 'editor',
+      password: 'secret',
+    );
+    final original = (await Directory('${vaultFolder.path}/entries')
+            .list()
+            .first) as File;
+    final backup = File('${temp.path}/outside.json');
+    await original.rename(backup.path);
+    await Link(original.path).create(backup.path);
+    await expectLater(
+      vault.read('archive'),
+      throwsA(isA<StateError>()),
+    );
   });
 }
