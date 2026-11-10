@@ -408,9 +408,9 @@ The current Redleaf Explorer view contains:
 - a read-only inspector for the selected SRT.
 
 The PROJECT tab follows the same workspace switch. For a Redleaf Cloud
-Project, a visible **OVERVIEW / BROWSER** switch sits above the project
+Project, a visible **OVERVIEW / BROWSE** switch sits above the project
 content. OVERVIEW preserves the Redleaf instance name, identity, server, and
-rename action. BROWSER displays the **existing Redleaf browser**, starting
+rename action. BROWSE displays the **existing Redleaf browser**, starting
 in linked-video thumbnail mode, within the PROJECT tab itself. The browser's
 SRT TABLE switch, search, catalog filters, size slider, cached snapshot,
 verified media resolution and transcript-aware Player handoff all remain
@@ -421,7 +421,7 @@ Player entry from either Explorer or Redleaf awaits all registered drains
 before launching media. A slow drain shows a non-modal
 "Finishing thumbnail…" status after 200 milliseconds; it disappears when
 the handoff completes and never bypasses or times out the MLT safety gate.
-Reopening BROWSER never
+Reopening BROWSE never
 replays the earlier Settings import sync signal, even when its serial is
 nonzero and the remote project remains connected. Selecting another Redleaf Project
 returns to its own OVERVIEW rather than carrying over a prior gallery.
