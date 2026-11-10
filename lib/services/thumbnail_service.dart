@@ -30,7 +30,7 @@ class ThumbnailService {
   // they finish, and make every Player entry await them.
   static final Set<Future<void>> _detachedDrains = <Future<void>>{};
 
-  static void trackDetachedDrain(Future<void> drain) {
+  static void _trackDetachedDrain(Future<void> drain) {
     _detachedDrains.add(drain);
     // pauseAndDrain handles thumbnail failures internally. Retain the future
     // until it settles so the shell can await it, even after the view is gone.
@@ -73,7 +73,7 @@ class ThumbnailService {
     // Every paused browser is retained until its native work finishes,
     // including still-mounted inactive tabs and already-disposed galleries.
     final drain = _pauseAndDrain();
-    trackDetachedDrain(drain);
+    _trackDetachedDrain(drain);
     return drain;
   }
 
