@@ -428,7 +428,7 @@ before opening media, preventing stale media from using another project's
 ratings, tags, or bookmark context.
 If the user selects another Redleaf card during an in-progress handoff,
 the cancelled request waits for its already-running native decode to drain
-before resuming thumbnail generation. A newer handoff keeps the browser
+before resuming thumbnail generation. A newer handoff, including an unresolved grid double-click, keeps the browser
 paused until its own Player transition finishes. On cancellation, visible
 cards retry thumbnails that were skipped during the pause without needing
 to leave and reopen BROWSE.
