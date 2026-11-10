@@ -25,6 +25,26 @@ class ThumbnailService {
         _generator = generator ?? generateMltThumbnail,
         _permits = _ThumbnailPermitPool(maxConcurrent);
 
+  // A Redleaf PROJECT gallery can be disposed while an MLT worker is still
+  // decoding a frame. Keep its drain future reachable until it completes,
+  // and make every Player entry wait for any such detached work.
+  static final Set<Future<void>> _detachedDrains = <Future<void>>{};
+
+  static void trackDetachedDrain(Future<void> drain) {
+    _detachedDrains.add(drain);
+    // pauseAndDrain handles thumbnail failures internally. Retain the future
+    // until it settles so the shell can await it, even after the view is gone.
+    unawaited(drain.whenComplete(() => _detachedDrains.remove(drain)));
+  }
+
+  static Future<void> waitForDetachedDrains() async {
+    while (_detachedDrains.isNotEmpty) {
+      await Future.wait<void>(
+        _detachedDrains.toList(growable: false),
+      );
+    }
+  }
+
   static const int thumbnailWidth = 480;
   static const int thumbnailHeight = 270;
 
