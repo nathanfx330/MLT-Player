@@ -415,9 +415,10 @@ in linked-video thumbnail mode, within the PROJECT tab itself. The browser's
 SRT TABLE switch, search, catalog filters, size slider, cached snapshot,
 verified media resolution and transcript-aware Player handoff all remain
 available. Switching back to OVERVIEW disposes that gallery and stops
-admitting new native thumbnail work. Detached thumbnail decodes are retained
-by a process-wide drain registry; Player entry from either Explorer or Redleaf
-awaits those decodes before launching media. Reopening THUMBNAILS never
+admitting new native thumbnail work. Pending decodes from inactive or
+disposed thumbnail browsers are retained by a process-wide drain registry;
+Player entry from either Explorer or Redleaf awaits all registered drains
+before launching media. Reopening THUMBNAILS never
 replays the earlier Settings import sync signal, even when its serial is
 nonzero and the remote project remains connected. Selecting another Redleaf Project
 returns to its own OVERVIEW rather than carrying over a prior gallery.
