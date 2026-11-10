@@ -1,5 +1,18 @@
 # Changes
 
+## 2026-11-09: Recover Redleaf thumbnails after cancelled Player handoff
+
+- If a Redleaf handoff is cancelled or fails after pausing thumbnails, restore
+  thumbnail browsing once all local handoff drains finish and the page is active.
+- Keep native thumbnail work paused while another handoff is pending or after
+  the Player callback has been submitted to the shell.
+- Refresh visible linked-video cards on recovery so thumbnails skipped during
+  the pause can be requested again, without leaving BROWSE.
+- Add widget regression tests for selection changes, overlapping handoffs,
+  and navigation away during a native drain.
+
+---
+
 ## 2026-11-09: Prevent stale Player handoff after navigation
 
 - Cancel pending Player opens when switching workspace tabs, active projects,
