@@ -161,7 +161,11 @@ Future<void> _mount(WidgetTester tester, _GatedThumbnails thumbnails,
 Future<void> _open(WidgetTester tester, String mediaName,
     _GatedThumbnails thumbnails, int expectedDrains) async {
   await tester.ensureVisible(find.text(mediaName));
-  await tester.doubleTap(find.text(mediaName));
+  // WidgetTester has no doubleTap API. Two taps inside the gesture
+  // recognizer's double-tap interval exercise the real card callback.
+  await tester.tap(find.text(mediaName));
+  await tester.pump(const Duration(milliseconds: 50));
+  await tester.tap(find.text(mediaName));
   await tester.pump();
   await tester.pump();
   expect(thumbnails.drains.length, expectedDrains);
