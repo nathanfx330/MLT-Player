@@ -230,6 +230,7 @@ class _ExplorerPageState extends State<ExplorerPage> {
   String? _lastReportedWorkspaceProjectKey;
   String? _lastReportedWorkspaceProjectName;
   String? _lastReportedLocalProjectId;
+  int _mediaOpenSerial = 0;
 
   ProjectCatalogService get _projectCatalogService =>
       widget.projectCatalogService;
@@ -373,6 +374,9 @@ class _ExplorerPageState extends State<ExplorerPage> {
         }
       });
     } else if (!widget.active && oldWidget.active) {
+      // A local media handoff may still be draining its thumbnail service.
+      // Never let it open Player after Explorer becomes inactive.
+      _mediaOpenSerial++;
       unawaited(_thumbnailService.pauseAndDrain());
     }
 
@@ -405,6 +409,9 @@ class _ExplorerPageState extends State<ExplorerPage> {
     }
 
     final active = _workspaceProjectService.activeProject;
+    if (active?.key != _lastReportedWorkspaceProjectKey) {
+      _mediaOpenSerial++;
+    }
     _reportWorkspaceProject(active);
 
     if (active != null) {
@@ -1081,8 +1088,13 @@ class _ExplorerPageState extends State<ExplorerPage> {
   }
 
   Future<void> _openMediaInPlayer(String path) async {
+    final serial = ++_mediaOpenSerial;
+    final workspaceKey = _workspaceProjectService.activeProject?.key;
     await _thumbnailService.pauseAndDrain();
-    if (!mounted) {
+    if (!mounted ||
+        !widget.active ||
+        serial != _mediaOpenSerial ||
+        _workspaceProjectService.activeProject?.key != workspaceKey) {
       return;
     }
     widget.onOpenMedia(path);
