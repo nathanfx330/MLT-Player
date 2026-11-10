@@ -10,6 +10,7 @@ import 'package:mlt_player/ui/widgets/player_handoff_wait_indicator.dart';
 Widget _harness({
   required PlayerHandoffWaitController controller,
   required VoidCallback onOpen,
+  VoidCallback? onNavigate,
 }) {
   return MaterialApp(
     home: Scaffold(
@@ -19,6 +20,15 @@ Widget _harness({
             onPressed: onOpen,
             child: const Text('OPEN PLAYER'),
           ),
+          if (onNavigate != null)
+            Positioned(
+              top: 52,
+              left: 0,
+              child: TextButton(
+                onPressed: onNavigate,
+                child: const Text('NAVIGATE'),
+              ),
+            ),
           Positioned(
             right: 18,
             bottom: 18,
@@ -110,6 +120,120 @@ void main() {
     secondDrain.complete();
     await second;
     expect(openedPaths, <String>['second.mp4']);
+    controller.dispose();
+  });
+
+  testWidgets('switching tabs cancels the wait and removes its indicator',
+      (tester) async {
+    final releaseDrain = Completer<void>();
+    final controller = PlayerHandoffWaitController(
+      waitForDrains: () => releaseDrain.future,
+    );
+    addTearDown(controller.dispose);
+
+    var playerOpens = 0;
+    await tester.pumpWidget(_harness(
+      controller: controller,
+      onOpen: () => unawaited(controller.run(() => playerOpens++)),
+      onNavigate: controller.cancel,
+    ));
+
+    await tester.tap(find.text('OPEN PLAYER'));
+    await tester.pump(const Duration(milliseconds: 210));
+    expect(find.text('Finishing thumbnail…'), findsOneWidget);
+
+    await tester.tap(find.text('NAVIGATE'));
+    await tester.pump();
+    expect(find.text('Finishing thumbnail…'), findsNothing);
+
+    // Navigation does not cancel the MLT decode, only the Player request.
+    releaseDrain.complete();
+    await tester.pump();
+    expect(playerOpens, 0);
+  });
+
+  testWidgets('switching projects and returning never revives the old open',
+      (tester) async {
+    final releaseDrain = Completer<void>();
+    final controller = PlayerHandoffWaitController(
+      waitForDrains: () => releaseDrain.future,
+    );
+    addTearDown(controller.dispose);
+
+    var activeProject = 'redleaf:A';
+    final openedProjects = <String>[];
+    await tester.pumpWidget(_harness(
+      controller: controller,
+      onOpen: () {
+        final requestedProject = activeProject;
+        unawaited(controller.run(
+          () => openedProjects.add(requestedProject),
+          isStillCurrent: () => activeProject == requestedProject,
+        ));
+      },
+      onNavigate: () {
+        activeProject = 'redleaf:B';
+        controller.cancel();
+      },
+    ));
+
+    await tester.tap(find.text('OPEN PLAYER'));
+    await tester.pump(const Duration(milliseconds: 210));
+    expect(find.text('Finishing thumbnail…'), findsOneWidget);
+
+    await tester.tap(find.text('NAVIGATE'));
+    await tester.pump();
+    expect(find.text('Finishing thumbnail…'), findsNothing);
+
+    activeProject = 'redleaf:A';
+    releaseDrain.complete();
+    await tester.pump();
+    expect(openedProjects, isEmpty);
+  });
+
+  test('original project identity is rechecked after the thumbnail drain',
+      () async {
+    final releaseDrain = Completer<void>();
+    var activeProject = 'redleaf:A';
+    final controller = PlayerHandoffWaitController(
+      waitForDrains: () => releaseDrain.future,
+    );
+    var playerOpens = 0;
+
+    // Even if a navigation call site forgets to cancel, never open A's
+    // media using B's current metadata project.
+    final requestedProject = activeProject;
+    final pending = controller.run(
+      () => playerOpens++,
+      isStillCurrent: () => activeProject == requestedProject,
+    );
+    activeProject = 'redleaf:B';
+    releaseDrain.complete();
+    await pending;
+    expect(playerOpens, 0);
+    controller.dispose();
+  });
+
+  test('cancelled request does not block a subsequent valid request', () async {
+    final firstDrain = Completer<void>();
+    final secondDrain = Completer<void>();
+    var calls = 0;
+    final controller = PlayerHandoffWaitController(
+      waitForDrains: () => ++calls == 1 ? firstDrain.future : secondDrain.future,
+    );
+    final opened = <String>[];
+
+    final oldRequest = controller.run(() => opened.add('old.mp4'));
+    controller.cancel();
+    final newRequest = controller.run(() => opened.add('new.mp4'));
+
+    firstDrain.complete();
+    await oldRequest;
+    expect(opened, isEmpty);
+
+    secondDrain.complete();
+    await newRequest;
+    expect(opened, <String>['new.mp4']);
     controller.dispose();
   });
 
