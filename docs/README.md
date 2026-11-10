@@ -28,11 +28,11 @@ be treated as current reference documentation when they conflict with
 
 [**Development Overview and November 2026 Update**](development-journey.md)
 
-The continuous history from the precise MLT-backed Player through Explorer,
-Projects, Storyboard and Redleaf integration. Its November 9 chapter records
-Redleaf Hub onboarding, explicit project management, the rejected external
-keyring dependency, the final shared encrypted vault and thumbnail parity with
-local Explorer. The earlier POC chapters below preserve the detailed proofs.
+A continuous history of the precise MLT-backed Player, Explorer, Projects,
+Storyboard and the Redleaf integration. The November 9 and 10 chapters cover
+Hub onboarding, the shared encrypted vault, PROJECT BROWSE, thumbnail drain
+safety, stale Player cancellation, recovery, and coordinated vault-parity CI.
+The POC chapters below retain their original engineering record.
 
 ### Current architecture
 

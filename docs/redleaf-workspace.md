@@ -140,9 +140,8 @@ Hub's port-5000 TCP check does not prove which database is running; a wrong
 server is disconnected and rejected before any registry import. Neither
 password nor session cookie is passed in the process arguments or persisted
 in MLT Player's configuration. Credentials saved explicitly in Redleaf Hub
-may be retrieved from the shared app-managed encrypted vault, bound to the
-same database instance ID and an approved server origin. No external Linux
-keyring utility or daemon is needed. The dialog does not accept empty
+may be retrieved from the Linux login keyring, bound to the same database
+instance ID and an approved server origin. The dialog does not accept empty
 project names or credentials when needed. Canceling leaves the registry
 untouched. Older startup flags are unchanged.
 
@@ -408,10 +407,40 @@ The current Redleaf Explorer view contains:
   transcript-aware Player handoff after thumbnail jobs drain;
 - a read-only inspector for the selected SRT.
 
-The PROJECT tab follows the same workspace switch.
+The PROJECT tab follows the same workspace switch. For a Redleaf Cloud
+Project, a visible **OVERVIEW / BROWSE** switch sits above the project
+content. OVERVIEW preserves the Redleaf instance name, identity, server, and
+rename action. BROWSE displays the **existing Redleaf browser**, starting
+in linked-video thumbnail mode, within the PROJECT tab itself. The browser's
+SRT TABLE switch, search, catalog filters, size slider, cached snapshot,
+verified media resolution and transcript-aware Player handoff all remain
+available. Switching back to OVERVIEW disposes that gallery and stops
+admitting new native thumbnail work. Pending decodes from inactive or
+disposed thumbnail browsers are retained by a process-wide drain registry;
+Player entry from either Explorer or Redleaf awaits all registered drains
+before launching media. A slow drain shows a non-modal
+"Finishing thumbnail…" status after 200 milliseconds; it disappears when
+the handoff completes and never bypasses or times out the MLT safety gate.
+Navigating to another workspace tab or changing the active project cancels
+only the pending Player open and clears the indicator. Native thumbnail work
+still drains safely. Player also rechecks the initiating project identity
+before opening media, preventing stale media from using another project's
+ratings, tags, or bookmark context.
+If the user selects another Redleaf card during an in-progress handoff,
+the cancelled request waits for its already-running native decode to drain
+before resuming thumbnail generation. A newer handoff, including an unresolved grid double-click, keeps the browser
+paused until its own Player transition finishes. On cancellation, visible
+cards retry thumbnails that were skipped during the pause without needing
+to leave and reopen BROWSE.
+Reopening BROWSE never
+replays the earlier Settings import sync signal, even when its serial is
+nonzero and the remote project remains connected. Selecting another Redleaf Project
+returns to its own OVERVIEW rather than carrying over a prior gallery.
 
-Selecting Redleaf in Explorer makes PROJECT show the Redleaf project identity.
-Selecting a local Project restores the existing local Project dashboard.
+The Redleaf Explorer continues to default to its SRT TABLE with its own
+THUMBNAILS switch. Neither Project nor Explorer silently signs in, syncs,
+or guesses local file locations. Selecting a Local Project restores the
+existing local Project dashboard.
 
 ---
 

@@ -20,13 +20,19 @@ import 'services/mlt_export_frame_rate_bridge.dart';
 import 'services/mlt_export_preset_bridge.dart';
 import 'services/player_engine.dart';
 import 'services/player_settings_service.dart';
+import 'services/thumbnail_service.dart';
+import 'services/player_handoff_wait_controller.dart';
+import 'services/redleaf_connection_service.dart';
+import 'services/redleaf_project_snapshot_service.dart';
 import 'services/storyboard_thumbnail_service.dart';
 import 'services/srt_subtitle_service.dart';
 import 'services/workspace_project_service.dart';
 import 'ui/widgets/player_settings_button.dart';
+import 'ui/widgets/player_handoff_wait_indicator.dart';
 import 'ui/widgets/bookmark_view.dart';
 import 'ui/widgets/media_inspector.dart';
 import 'ui/explorer_page.dart';
+import 'ui/redleaf_page.dart';
 import 'ui/project_page.dart';
 import 'ui/widgets/layers_inspector.dart';
 import 'ui/widgets/storyboard_view.dart';
@@ -158,6 +164,7 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
   String? _activeProjectId;
   WorkspaceProject? _activeWorkspaceProject;
   int _playerOpenRequest = 0;
+  late final PlayerHandoffWaitController _playerHandoffWait;
   int _cloudImportRequestSerial = 0;
   bool _showPlayer = false;
   _WorkspaceSection _workspaceSection = _WorkspaceSection.explorer;
@@ -169,6 +176,9 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
     super.initState();
     _projectCatalogService = ProjectCatalogService();
     _projectMediaMetadataService = ProjectMediaMetadataService();
+    _playerHandoffWait = PlayerHandoffWaitController(
+      waitForDrains: ThumbnailService.waitForDetachedDrains,
+    );
     _workspaceProjectService = WorkspaceProjectService(
       localProjects: _projectCatalogService,
     );
@@ -176,6 +186,7 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
 
   @override
   void dispose() {
+    _playerHandoffWait.dispose();
     _workspaceProjectService.dispose();
     super.dispose();
   }
@@ -189,6 +200,7 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
       return;
     }
 
+    _playerHandoffWait.cancel();
     setState(() {
       _activeWorkspaceProject = project;
       _activeProjectId = localProjectId;
@@ -199,24 +211,46 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
     if (_activeProjectId == projectId) {
       return;
     }
+    _playerHandoffWait.cancel();
     setState(() => _activeProjectId = projectId);
   }
 
   void _openInPlayer(String path) {
-    setState(() {
-      _redleafPlayerHandoff = null;
-      _playerPath = path;
-      _playerOpenRequest += 1;
-      _showPlayer = true;
-    });
+    unawaited(_openPlayerAfterDetachedDrains(path: path));
   }
 
   void _openRedleafInPlayer(RedleafPlayerHandoff handoff) {
-    setState(() {
-      _redleafPlayerHandoff = handoff;
-      _playerPath = handoff.mediaPath;
-      _playerOpenRequest += 1;
-      _showPlayer = true;
+    unawaited(_openPlayerAfterDetachedDrains(
+      path: handoff.mediaPath,
+      handoff: handoff,
+    ));
+  }
+
+  Future<void> _openPlayerAfterDetachedDrains({
+    required String path,
+    RedleafPlayerHandoff? handoff,
+  }) {
+    // Snapshot both identities that determine Player's metadata project.
+    // Navigation cancels the request, and this guard prevents a stale
+    // callback from opening media under another project's metadata.
+    final requestedWorkspaceKey = _activeWorkspaceProject?.key;
+    final requestedLocalProjectId = _activeProjectId;
+
+    // Preserve the process-wide MLT safety barrier for both Player entry
+    // paths. Slow native decodes show a delayed, non-modal status indicator.
+    // A cancelled request never interrupts the underlying thumbnail drain.
+    return _playerHandoffWait.run(() {
+      if (!mounted) return;
+      setState(() {
+        _redleafPlayerHandoff = handoff;
+        _playerPath = path;
+        _playerOpenRequest += 1;
+        _showPlayer = true;
+      });
+    }, isStillCurrent: () {
+      return mounted &&
+          _activeWorkspaceProject?.key == requestedWorkspaceKey &&
+          _activeProjectId == requestedLocalProjectId;
     });
   }
 
@@ -224,6 +258,7 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
     String displayName,
     bool restoreFromTrash,
   ) async {
+    _playerHandoffWait.cancel();
     if (!_workspaceProjectService.loaded) {
       await _workspaceProjectService.load();
     }
@@ -241,6 +276,7 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
   }
 
   void _returnToExplorer() {
+    _playerHandoffWait.cancel();
     setState(() {
       _showPlayer = false;
       _workspaceSection = _WorkspaceSection.explorer;
@@ -251,11 +287,13 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
     if (_workspaceSection == section) {
       return;
     }
+    _playerHandoffWait.cancel();
     setState(() => _workspaceSection = section);
   }
 
   void _showStartupRedleafProject() {
     if (!mounted) return;
+    _playerHandoffWait.cancel();
     setState(() => _workspaceSection = _WorkspaceSection.project);
   }
 
@@ -300,6 +338,7 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
     String? colorHex,
     bool bookmarkedOnly = false,
   }) {
+    _playerHandoffWait.cancel();
     final serial = _explorerProjectViewSerial + 1;
     setState(() {
       _explorerProjectViewSerial = serial;
@@ -325,82 +364,101 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
         ? activeWorkspaceProject.key
         : _activeProjectId;
 
-    return IndexedStack(
-      index: _showPlayer ? 1 : 0,
+    return Stack(
       children: [
-        Column(
+        IndexedStack(
+          index: _showPlayer ? 1 : 0,
           children: [
-            _WorkspaceTabs(
-              selected: _workspaceSection,
-              onSelected: _setWorkspaceSection,
-            ),
-            Expanded(
-              child: IndexedStack(
-                index: workspaceIndex,
-                children: [
-                  ExplorerPage(
-                    initialized: widget.initialized,
-                    version: widget.version,
-                    startupError: widget.startupError,
-                    onOpenMedia: _openInPlayer,
-                    onOpenRedleafMedia: _openRedleafInPlayer,
-                    projectCatalogService: _projectCatalogService,
-                    projectMediaMetadataService:
-                        _projectMediaMetadataService,
-                    workspaceProjectService: _workspaceProjectService,
-                    importRequestSerial: _cloudImportRequestSerial,
-                    onImportConnectedRedleaf: _importConnectedRedleafProject,
-                    startupProjectRequest: widget.startupProjectRequest,
-                    onStartupRedleafSelected: _showStartupRedleafProject,
-                    playerSettings: widget.playerSettings,
-                    projectViewRequest: _explorerProjectViewRequest,
-                    onActiveProjectChanged: _setActiveProject,
-                    onWorkspaceProjectChanged: _setWorkspaceProject,
-                    active: !_showPlayer &&
-                        _workspaceSection == _WorkspaceSection.explorer,
+            Column(
+              children: [
+                _WorkspaceTabs(
+                  selected: _workspaceSection,
+                  onSelected: _setWorkspaceSection,
+                ),
+                Expanded(
+                  child: IndexedStack(
+                    index: workspaceIndex,
+                    children: [
+                      ExplorerPage(
+                        initialized: widget.initialized,
+                        version: widget.version,
+                        startupError: widget.startupError,
+                        onOpenMedia: _openInPlayer,
+                        onOpenRedleafMedia: _openRedleafInPlayer,
+                        projectCatalogService: _projectCatalogService,
+                        projectMediaMetadataService:
+                            _projectMediaMetadataService,
+                        workspaceProjectService: _workspaceProjectService,
+                        importRequestSerial: _cloudImportRequestSerial,
+                        onImportConnectedRedleaf: _importConnectedRedleafProject,
+                        startupProjectRequest: widget.startupProjectRequest,
+                        onStartupRedleafSelected: _showStartupRedleafProject,
+                        playerSettings: widget.playerSettings,
+                        projectViewRequest: _explorerProjectViewRequest,
+                        onActiveProjectChanged: _setActiveProject,
+                        onWorkspaceProjectChanged: _setWorkspaceProject,
+                        active: !_showPlayer &&
+                            _workspaceSection == _WorkspaceSection.explorer,
+                      ),
+                      if (activeWorkspaceProject != null &&
+                          activeWorkspaceProject.isRedleaf)
+                        RedleafProjectWorkspace(
+                          key: ValueKey(
+                            'redleaf-project-workspace-${activeWorkspaceProject.key}',
+                          ),
+                          project: activeWorkspaceProject,
+                          active: !_showPlayer &&
+                              _workspaceSection == _WorkspaceSection.project,
+                          importRequestSerial: _cloudImportRequestSerial,
+                          onRename: _renameActiveRedleafProject,
+                          onOpenVerifiedMedia: _openInPlayer,
+                          onOpenRedleafHandoff: _openRedleafInPlayer,
+                        )
+                      else
+                        ProjectPage(
+                          projectCatalogService: _projectCatalogService,
+                          projectMediaMetadataService:
+                              _projectMediaMetadataService,
+                          activeProjectId: _activeProjectId,
+                          onOpenCatalog: (catalogId) =>
+                              _openExplorerProjectView(catalogId: catalogId),
+                          onOpenRating: (rating) =>
+                              _openExplorerProjectView(exactRating: rating),
+                          onOpenTag: (tag) =>
+                              _openExplorerProjectView(tag: tag),
+                          onOpenColor: (colorHex) =>
+                              _openExplorerProjectView(colorHex: colorHex),
+                          onOpenBookmarks: () =>
+                              _openExplorerProjectView(bookmarkedOnly: true),
+                        ),
+                    ],
                   ),
-                  if (activeWorkspaceProject != null &&
-                      activeWorkspaceProject.isRedleaf)
-                    _RedleafProjectSyncView(
-                      project: activeWorkspaceProject,
-                      onRename: _renameActiveRedleafProject,
-                    )
-                  else
-                    ProjectPage(
-                      projectCatalogService: _projectCatalogService,
-                      projectMediaMetadataService:
-                          _projectMediaMetadataService,
-                      activeProjectId: _activeProjectId,
-                      onOpenCatalog: (catalogId) =>
-                          _openExplorerProjectView(catalogId: catalogId),
-                      onOpenRating: (rating) =>
-                          _openExplorerProjectView(exactRating: rating),
-                      onOpenTag: (tag) =>
-                          _openExplorerProjectView(tag: tag),
-                      onOpenColor: (colorHex) =>
-                          _openExplorerProjectView(colorHex: colorHex),
-                      onOpenBookmarks: () =>
-                          _openExplorerProjectView(bookmarkedOnly: true),
-                    ),
-                ],
-              ),
+                ),
+              ],
+            ),
+            PlayerPage(
+              bridge: widget.bridge,
+              initialized: widget.initialized,
+              version: widget.version,
+              startupError: widget.startupError,
+              playerSettings: widget.playerSettings,
+              projectMediaMetadataService: _projectMediaMetadataService,
+              activeProjectId: playerMetadataProjectId,
+              initialPath: _playerPath,
+              redleafHandoff: _redleafPlayerHandoff,
+              onImportConnectedRedleaf: _importConnectedRedleafProject,
+              workspaceProjects: _workspaceProjectService,
+              openRequestSerial: _playerOpenRequest,
+              onBack: _returnToExplorer,
             ),
           ],
         ),
-        PlayerPage(
-          bridge: widget.bridge,
-          initialized: widget.initialized,
-          version: widget.version,
-          startupError: widget.startupError,
-          playerSettings: widget.playerSettings,
-          projectMediaMetadataService: _projectMediaMetadataService,
-          activeProjectId: playerMetadataProjectId,
-          initialPath: _playerPath,
-          redleafHandoff: _redleafPlayerHandoff,
-          onImportConnectedRedleaf: _importConnectedRedleafProject,
-          workspaceProjects: _workspaceProjectService,
-          openRequestSerial: _playerOpenRequest,
-          onBack: _returnToExplorer,
+        Positioned(
+          right: 18,
+          bottom: 18,
+          child: PlayerHandoffWaitIndicator(
+            controller: _playerHandoffWait,
+          ),
         ),
       ],
     );
@@ -534,6 +592,135 @@ class _WorkspaceTab extends StatelessWidget {
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The Redleaf PROJECT tab keeps its overview and exposes the same verified
+/// linked-video browser already used by Redleaf Explorer. Only one browser
+/// pane is built here at a time, so switching back to the overview disposes
+/// the PROJECT-side media browser rather than leaving its thumbnail jobs live.
+class RedleafProjectWorkspace extends StatefulWidget {
+  const RedleafProjectWorkspace({
+    super.key,
+    required this.project,
+    required this.active,
+    required this.onRename,
+    this.importRequestSerial = 0,
+    this.connection,
+    this.snapshotService,
+    this.onOpenVerifiedMedia,
+    this.onOpenRedleafHandoff,
+  });
+
+  final WorkspaceProject project;
+  final bool active;
+  /// Only Explorer handles this Settings import signal. PROJECT receives it
+  /// for compatibility but must never replay it when mounting its gallery.
+  final int importRequestSerial;
+  final RedleafConnectionService? connection;
+  final RedleafProjectSnapshotService? snapshotService;
+  final Future<void> Function(String name) onRename;
+  final ValueChanged<String>? onOpenVerifiedMedia;
+  final ValueChanged<RedleafPlayerHandoff>? onOpenRedleafHandoff;
+
+  @override
+  State<RedleafProjectWorkspace> createState() =>
+      _RedleafProjectWorkspaceState();
+}
+
+class _RedleafProjectWorkspaceState extends State<RedleafProjectWorkspace> {
+  bool _showBrowser = false;
+
+  @override
+  void didUpdateWidget(covariant RedleafProjectWorkspace oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.project.key != widget.project.key) {
+      _showBrowser = false;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF111111),
+      body: SafeArea(
+        child: Column(
+          children: [
+            Container(
+              height: 56,
+              padding: const EdgeInsets.symmetric(horizontal: 14),
+              decoration: const BoxDecoration(
+                color: Color(0xFF131313),
+                border: Border(
+                  bottom: BorderSide(color: Colors.white12),
+                ),
+              ),
+              child: Row(
+                children: [
+                  if (MediaQuery.sizeOf(context).width >= 720) ...[
+                    const Icon(
+                      Icons.cloud_outlined,
+                      color: Color(0xFFE8A33D),
+                      size: 18,
+                    ),
+                    const SizedBox(width: 9),
+                    const Text(
+                      'REDLEAF PROJECT',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 0.8,
+                        color: Colors.white70,
+                      ),
+                    ),
+                  ],
+                  const Spacer(),
+                  SegmentedButton<bool>(
+                    key: const ValueKey('redleaf-project-view-switch'),
+                    showSelectedIcon: false,
+                    segments: const [
+                      ButtonSegment<bool>(
+                        value: false,
+                        icon: Icon(Icons.dashboard_outlined, size: 16),
+                        label: Text('OVERVIEW'),
+                      ),
+                      ButtonSegment<bool>(
+                        value: true,
+                        icon: Icon(Icons.folder_open_outlined, size: 16),
+                        label: Text('BROWSE'),
+                      ),
+                    ],
+                    selected: <bool>{_showBrowser},
+                    onSelectionChanged: (values) {
+                      setState(() => _showBrowser = values.single);
+                    },
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: _showBrowser
+                  ? RedleafPage(
+                      key: ValueKey('redleaf-project-gallery-${widget.project.key}'),
+                      active: widget.active,
+                      workspaceProject: widget.project,
+                      // PROJECT gallery mounts are navigation, not imports.
+                      importRequestSerial: 0,
+                      initialThumbnailMode: true,
+                      connection: widget.connection,
+                      snapshotService: widget.snapshotService,
+                      onOpenVerifiedMedia: widget.onOpenVerifiedMedia,
+                      onOpenRedleafHandoff: widget.onOpenRedleafHandoff,
+                    )
+                  : _RedleafProjectSyncView(
+                      project: widget.project,
+                      onRename: widget.onRename,
+                    ),
+            ),
+          ],
         ),
       ),
     );

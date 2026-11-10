@@ -10,6 +10,8 @@ on:
     branches:
       - main
   workflow_dispatch:
+  schedule:
+    - cron: '43 9 * * *'
 
 permissions:
   contents: read
@@ -20,6 +22,7 @@ concurrency:
 
 jobs:
   smoke-and-parity:
+    if: github.event_name != 'schedule'
     name: MLT 7.22 smoke + parity
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -66,10 +69,22 @@ jobs:
         run: |
           flutter config --enable-linux-desktop
           flutter precache --linux
-          flutter pub get
+          flutter pub get --enforce-lockfile
           # A real Linux build is required on a clean runner to generate
           # linux/flutter/ephemeral, which tools/smoke.sh links against.
           flutter build linux --debug --no-pub
+
+      - name: Enforce committed dependency lock
+        run: git diff --exit-code -- pubspec.lock
+
+      - name: Compare cross-repository credential vault
+        shell: bash
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            bash tool/check_shared_vault.sh nathanfx330/Redleaf-Hub advisory
+          else
+            bash tool/check_shared_vault.sh nathanfx330/Redleaf-Hub strict
+          fi
 
       - name: Analyze Dart
         run: flutter analyze
@@ -84,3 +99,11 @@ jobs:
       - name: Run native thumbnail smoke
         shell: bash
         run: bash tools/thumbnail_smoke.sh
+
+  audit-vault-parity:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Require cross-repository vault parity after merge window
+        run: bash tool/check_shared_vault.sh nathanfx330/Redleaf-Hub strict

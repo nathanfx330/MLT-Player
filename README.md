@@ -296,6 +296,15 @@ The Redleaf Explorer view reports SRT totals including:
 
 Catalog filtering works from the cached membership snapshot while disconnected.
 
+**Redleaf Cloud PROJECT browsing:** In the PROJECT tab, choose
+**BROWSE** beside **OVERVIEW** to browse Redleaf SRTs and linked videos directly
+on the project side, without switching to EXPLORER. This is the same SRT
+catalog and verified local-media thumbnail grid used in Redleaf Explorer,
+including search, Catalog filters, density slider, **SRT TABLE** toggle, and
+transcript-aware Player opening. OVERVIEW preserves the existing project
+identity, server information and rename controls. The normal Redleaf
+Explorer still opens in SRT TABLE by default.
+
 #### Exact transcript handoff
 
 When a Redleaf SRT with verified local media is opened in Player, MLT Player
@@ -739,10 +748,10 @@ consumer lifecycle properties, background export, and failures that looked like
 MLT bugs but were not.
 
 The chronological POC documents remain available as the project's historical
-engineering record in [`docs/`](docs/README.md). The broader
+engineering record in [`docs/`](docs/README.md). The
 [Development Overview and November 2026 Update](docs/development-journey.md)
-connects those stages with the Redleaf workspace, authenticated Hub launch,
-project Trash, encrypted credentials and shared linked-video thumbnails.
+connects those stages to Redleaf PROJECT BROWSE, the guarded Player handoff,
+thumbnail recovery and coordinated credential-vault CI.
 
 ---
 

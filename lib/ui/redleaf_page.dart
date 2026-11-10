@@ -24,7 +24,12 @@ class RedleafPage extends StatefulWidget {
     required this.active,
     this.workspaceProject,
     this.importRequestSerial = 0,
+    this.initialThumbnailMode = false,
     this.connection,
+    this.snapshotService,
+    this.thumbnailService,
+    this.mediaResourceService,
+    this.transcriptService,
     this.onOpenVerifiedMedia,
     this.onOpenRedleafHandoff,
   });
@@ -41,7 +46,19 @@ class RedleafPage extends StatefulWidget {
   /// ordinary navigation, reconnection, or project switching.
   final int importRequestSerial;
 
+  /// Start in the linked-video grid when mounted from the Redleaf PROJECT tab.
+  /// The Explorer tab keeps its original SRT TABLE default.
+  final bool initialThumbnailMode;
+
   final RedleafConnectionService? connection;
+
+  /// Optional cache service for deterministic widget tests.
+  final RedleafProjectSnapshotService? snapshotService;
+
+  /// Optional dependencies used for deterministic thumbnail handoff tests.
+  final ThumbnailService? thumbnailService;
+  final RedleafMediaResourceService? mediaResourceService;
+  final RedleafTranscriptService? transcriptService;
 
   /// Legacy D3 verified-media callback. Kept so the currently wired Explorer
   /// path remains functional until the transcript-aware handoff is connected.
@@ -67,7 +84,7 @@ class _RedleafPageState extends State<RedleafPage> {
   final TextEditingController _searchController = TextEditingController();
   late final ThumbnailService _thumbnailService;
   late final ExplorerViewPreferencesService _thumbnailPrefs;
-  bool _thumbnailMode = false;
+  late bool _thumbnailMode;
 
   String _query = '';
   int? _selectedDocId;
@@ -94,19 +111,26 @@ class _RedleafPageState extends State<RedleafPage> {
   bool _handoffLoading = false;
   String? _handoffError;
   int _handoffSerial = 0;
+  final Set<int> _pendingPlayerHandoffs = <int>{};
+  int _pendingGridOpens = 0;
+  bool _playerHandoffSubmitted = false;
+  int _thumbnailRecoverySerial = 0;
 
   @override
   void initState() {
     super.initState();
+    _thumbnailMode = widget.initialThumbnailMode;
 
     _connection = widget.connection ?? RedleafConnectionService.instance;
     _discovery = RedleafSrtDiscoveryService(connection: _connection);
     _catalogs = RedleafCatalogService(connection: _connection);
-    _mediaResources = RedleafMediaResourceService(connection: _connection);
+    _mediaResources = widget.mediaResourceService ??
+        RedleafMediaResourceService(connection: _connection);
     _mediaScanner = RedleafMediaScanService(connection: _connection);
-    _transcripts = RedleafTranscriptService(connection: _connection);
-    _snapshots = RedleafProjectSnapshotService();
-    _thumbnailService = ThumbnailService();
+    _transcripts = widget.transcriptService ??
+        RedleafTranscriptService(connection: _connection);
+    _snapshots = widget.snapshotService ?? RedleafProjectSnapshotService();
+    _thumbnailService = widget.thumbnailService ?? ThumbnailService();
     _thumbnailPrefs = ExplorerViewPreferencesService();
     unawaited(_loadThumbnailPreferences());
 
@@ -133,6 +157,14 @@ class _RedleafPageState extends State<RedleafPage> {
     final oldKey = oldWidget.workspaceProject?.key;
     final newKey = widget.workspaceProject?.key;
 
+    if (oldKey != newKey || (!widget.active && oldWidget.active)) {
+      // The handoff may still be fetching a transcript or draining native
+      // thumbnails. Leaving this browser must invalidate that request.
+      _handoffSerial++;
+      _handoffLoading = false;
+      _playerHandoffSubmitted = false;
+    }
+
     if (oldKey != newKey) {
       _snapshotLoadSerial += 1;
       _loadedInstanceId = '';
@@ -157,6 +189,9 @@ class _RedleafPageState extends State<RedleafPage> {
 
   @override
   void dispose() {
+    // PROJECT can swap the gallery back to OVERVIEW mid-decode.
+    // pauseAndDrain automatically joins the global Player handoff barrier.
+    unawaited(_thumbnailService.pauseAndDrain());
     _connection.removeListener(_onConnectionChanged);
     _discovery.removeListener(_onDiscoveryChanged);
     _catalogs.removeListener(_onCatalogsChanged);
@@ -841,7 +876,35 @@ class _RedleafPageState extends State<RedleafPage> {
     });
   }
 
+  void _finishPlayerHandoff(int serial, {required bool submitted}) {
+    _pendingPlayerHandoffs.remove(serial);
+    if (submitted) {
+      // A completed callback owns the Player transition. Never restart
+      // thumbnail decoding while the shell still waits to open Player.
+      _playerHandoffSubmitted = true;
+    }
+    _maybeRecoverThumbnails();
+  }
+
+  void _maybeRecoverThumbnails() {
+    if (!mounted ||
+        !widget.active ||
+        _playerHandoffSubmitted ||
+        _pendingPlayerHandoffs.isNotEmpty ||
+        _pendingGridOpens > 0 ||
+        !_thumbnailService.paused) {
+      return;
+    }
+
+    // Only the last cancelled/failed handoff may restore browsing, and
+    // only after its native drain has fully completed. Recreate visible
+    // cards so thumbnails previously skipped while paused are retried.
+    _thumbnailService.resume();
+    setState(() => _thumbnailRecoverySerial++);
+  }
+
   Future<void> _openSelectedVerifiedMedia(String mediaPath) async {
+    if (!widget.active) return;
     if (!_connectionMatchesWorkspace) {
       setState(() {
         _handoffError =
@@ -861,62 +924,86 @@ class _RedleafPageState extends State<RedleafPage> {
       return;
     }
 
-    final transcriptAwareCallback = widget.onOpenRedleafHandoff;
-    if (transcriptAwareCallback == null) {
-      await _thumbnailService.pauseAndDrain();
-      if (!mounted || _selectedDocId != document.docId) return;
-      widget.onOpenVerifiedMedia?.call(resource);
-      return;
-    }
-
     final serial = ++_handoffSerial;
-    final docId = document.docId;
-
-    setState(() {
-      _handoffLoading = true;
-      _handoffError = null;
-    });
-
+    _pendingPlayerHandoffs.add(serial);
+    var submitted = false;
     try {
-      final transcript = await _transcripts.loadForDocument(document);
-
-      if (!mounted || serial != _handoffSerial || _selectedDocId != docId) {
+      final transcriptAwareCallback = widget.onOpenRedleafHandoff;
+      if (transcriptAwareCallback == null) {
+        await _thumbnailService.pauseAndDrain();
+        if (!mounted ||
+            !widget.active ||
+            serial != _handoffSerial ||
+            _selectedDocId != document.docId) {
+          return;
+        }
+        widget.onOpenVerifiedMedia?.call(resource);
+        submitted = widget.onOpenVerifiedMedia != null;
         return;
       }
 
-      final currentResolution = _selectedMediaResolution;
-      if (currentResolution?.isLocalFileReady != true ||
-          currentResolution?.resolvedResource?.trim() != resource) {
-        setState(() {
-          _handoffLoading = false;
-          _handoffError =
-              'The verified media resource changed before Player handoff.';
-        });
-        return;
-      }
-
-      final handoff = RedleafPlayerHandoff.fromTranscript(
-        mediaPath: resource,
-        transcript: transcript,
-      );
+      final docId = document.docId;
 
       setState(() {
-        _handoffLoading = false;
+        _handoffLoading = true;
         _handoffError = null;
       });
 
-      await _thumbnailService.pauseAndDrain();
-      if (!mounted || _selectedDocId != docId) return;
-      transcriptAwareCallback(handoff);
-    } catch (error) {
-      if (!mounted || serial != _handoffSerial || _selectedDocId != docId) {
-        return;
-      }
+      try {
+        final transcript = await _transcripts.loadForDocument(document);
 
-      setState(() {
-        _handoffLoading = false;
-        _handoffError = error.toString();
-      });
+        if (!mounted ||
+            !widget.active ||
+            serial != _handoffSerial ||
+            _selectedDocId != docId) {
+          return;
+        }
+
+        final currentResolution = _selectedMediaResolution;
+        if (currentResolution?.isLocalFileReady != true ||
+            currentResolution?.resolvedResource?.trim() != resource) {
+          setState(() {
+            _handoffLoading = false;
+            _handoffError =
+                'The verified media resource changed before Player handoff.';
+          });
+          return;
+        }
+
+        final handoff = RedleafPlayerHandoff.fromTranscript(
+          mediaPath: resource,
+          transcript: transcript,
+        );
+
+        setState(() {
+          _handoffLoading = false;
+          _handoffError = null;
+        });
+
+        await _thumbnailService.pauseAndDrain();
+        if (!mounted ||
+            !widget.active ||
+            serial != _handoffSerial ||
+            _selectedDocId != docId) {
+          return;
+        }
+        transcriptAwareCallback(handoff);
+        submitted = true;
+      } catch (error) {
+        if (!mounted ||
+            !widget.active ||
+            serial != _handoffSerial ||
+            _selectedDocId != docId) {
+          return;
+        }
+
+        setState(() {
+          _handoffLoading = false;
+          _handoffError = error.toString();
+        });
+      }
+    } finally {
+      _finishPlayerHandoff(serial, submitted: submitted);
     }
   }
 
@@ -1522,7 +1609,7 @@ class _RedleafPageState extends State<RedleafPage> {
       itemBuilder: (context, index) {
         final document = videos[index];
         return RedleafLinkedVideoCard(
-          key: ValueKey('redleaf-video-$_workspaceInstanceId-${document.docId}'),
+          key: ValueKey('redleaf-video-$_workspaceInstanceId-${document.docId}-$_thumbnailRecoverySerial'),
           document: document,
           mediaResources: _mediaResources,
           thumbnailService: _thumbnailService,
@@ -1538,15 +1625,26 @@ class _RedleafPageState extends State<RedleafPage> {
   }
 
   Future<void> _openLinkedVideoFromGrid(RedleafSrtDocument document) async {
-    // Reuse the existing verified-media and transcript-aware handoff.
-    // Never pass a raw Redleaf URL straight into native MLT.
-    await _selectDocument(document);
-    if (!mounted || document.docId != _selectedDocId) return;
-    final resolved = _selectedMediaResolution;
-    final path = resolved?.resolvedResource?.trim();
-    if (resolved?.isLocalFileReady == true &&
-        path != null && path.isNotEmpty) {
-      await _openSelectedVerifiedMedia(path);
+    // Media resolution is part of the handoff. Do not let an older,
+    // cancelled drain resume thumbnails while a newer double-click still
+    // waits for its local media path to resolve.
+    _pendingGridOpens++;
+    try {
+      // Reuse the existing verified-media and transcript-aware handoff.
+      // Never pass a raw Redleaf URL straight into native MLT.
+      await _selectDocument(document);
+      if (!mounted || !widget.active || document.docId != _selectedDocId) {
+        return;
+      }
+      final resolved = _selectedMediaResolution;
+      final path = resolved?.resolvedResource?.trim();
+      if (resolved?.isLocalFileReady == true &&
+          path != null && path.isNotEmpty) {
+        await _openSelectedVerifiedMedia(path);
+      }
+    } finally {
+      _pendingGridOpens--;
+      _maybeRecoverThumbnails();
     }
   }
 
@@ -1705,13 +1803,17 @@ class _Metric extends StatelessWidget {
           const SizedBox(height: 5),
           Row(
             children: [
-              Text(
-                label,
-                style: const TextStyle(
-                  fontSize: 8.5,
-                  fontWeight: FontWeight.w800,
-                  letterSpacing: 0.7,
-                  color: Colors.white38,
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 8.5,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 0.7,
+                    color: Colors.white38,
+                  ),
                 ),
               ),
               if (secondary != null) ...[

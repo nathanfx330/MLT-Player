@@ -25,6 +25,26 @@ class ThumbnailService {
         _generator = generator ?? generateMltThumbnail,
         _permits = _ThumbnailPermitPool(maxConcurrent);
 
+  // A browser can be disposed or made inactive while an MLT worker is
+  // decoding a frame. Keep all outstanding pause drains reachable until
+  // they finish, and make every Player entry await them.
+  static final Set<Future<void>> _detachedDrains = <Future<void>>{};
+
+  static void _trackDetachedDrain(Future<void> drain) {
+    _detachedDrains.add(drain);
+    // pauseAndDrain handles thumbnail failures internally. Retain the future
+    // until it settles so the shell can await it, even after the view is gone.
+    unawaited(drain.whenComplete(() => _detachedDrains.remove(drain)));
+  }
+
+  static Future<void> waitForDetachedDrains() async {
+    while (_detachedDrains.isNotEmpty) {
+      await Future.wait<void>(
+        _detachedDrains.toList(growable: false),
+      );
+    }
+  }
+
   static const int thumbnailWidth = 480;
   static const int thumbnailHeight = 270;
 
@@ -49,7 +69,15 @@ class ThumbnailService {
     _paused = false;
   }
 
-  Future<void> pauseAndDrain() async {
+  Future<void> pauseAndDrain() {
+    // Every paused browser is retained until its native work finishes,
+    // including still-mounted inactive tabs and already-disposed galleries.
+    final drain = _pauseAndDrain();
+    _trackDetachedDrain(drain);
+    return drain;
+  }
+
+  Future<void> _pauseAndDrain() async {
     _paused = true;
 
     // Native MLT thumbnail calls are synchronous inside a worker isolate and

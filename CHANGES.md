@@ -1,5 +1,83 @@
 # Changes
 
+## 2026-11-09: Recover Redleaf thumbnails after cancelled Player handoff
+
+- If a Redleaf handoff is cancelled or fails after pausing thumbnails, restore
+  thumbnail browsing once all local handoff drains finish and the page is active.
+- Keep native thumbnail work paused while another handoff is pending or after
+  the Player callback has been submitted to the shell.
+- Refresh visible linked-video cards on recovery so thumbnails skipped during
+  the pause can be requested again, without leaving BROWSE.
+- Add widget regression tests for selection changes, overlapping handoffs,
+  pending media resolution, and navigation away during a native drain.
+
+---
+
+## 2026-11-09: Prevent stale Player handoff after navigation
+
+- Cancel pending Player opens when switching workspace tabs, active projects,
+  or navigating through project dashboard links. Cancellation hides the
+  indicator without interrupting in-flight native MLT thumbnail decodes.
+- Recheck the captured workspace and local project identity when the drain
+  finishes; never open media with another project's metadata context.
+- Cover tab changes, project switches, return to the original project,
+  stale identity, and subsequent valid requests with regression tests.
+- Correct README PROJECT navigation instructions to say BROWSE.
+
+---
+
+## 2026-11-09: Player thumbnail drain wait feedback
+
+- Player entry from Explorer or Redleaf now shows a small amber
+  "Finishing thumbnail…" status when a pending native MLT thumbnail decode
+  holds the process-wide safety gate longer than 200 milliseconds.
+- Fast handoffs show no status, and the indicator disappears when the drain
+  finishes. There is no timeout or bypass of the drain barrier.
+- Newer Player clicks still supersede stale requests. Tests cover slow and
+  instant drains, stale requests, and disposal while waiting.
+- The PROJECT destination is labeled BROWSE rather than THUMBNAILS because
+  it can present either linked-video thumbnails or the complete SRT table.
+  The internal view switch and initial thumbnail presentation are unchanged.
+
+---
+
+
+## 2026-11-09: Redleaf PROJECT gallery import and Player handoff safeguards
+
+- PROJECT gallery mounts pass import request serial zero to RedleafPage.
+  Only an explicit Settings import routed to Explorer can trigger automatic
+  import sync; repeated OVERVIEW / THUMBNAILS navigation remains cache-first.
+- Every paused thumbnail browser automatically registers its outstanding
+  decode drain in a process-wide registry, including inactive tabs and
+  disposed galleries. Both local and Redleaf Player entry paths wait for
+  these pending drains before opening MLT media.
+- Dart minimum updated to 3.11 in pubspec.yaml, matching the committed lockfile.
+- Added regression tests for repeated PROJECT gallery mounts with an old
+  import serial and a connected cached project, and for a held native
+  thumbnail decode blocking the Player handoff barrier.
+
+---
+
+
+## 2026-11-09: Redleaf Cloud PROJECT thumbnail browser
+
+- Added an OVERVIEW / THUMBNAILS switch directly to the Redleaf Cloud PROJECT
+  tab. Users can now browse linked videos from the Project side, not only
+  Redleaf Explorer.
+- Project THUMBNAILS mounts the existing Redleaf SRT browser in thumbnail
+  mode, reusing verified local-media resolution, the exact Explorer cards,
+  native MLT thumbnail cache, search, Catalog filtering, density controls,
+  SRT TABLE fallback and transcript-aware Player handoff.
+- The original project overview and rename controls remain intact. Changing
+  Redleaf Projects resets the view to OVERVIEW.
+- Leaving the Project thumbnail browser pauses and drains outstanding
+  thumbnail work without changing Redleaf's database or forcing SYNC NOW.
+- Added widget coverage for Project switching, restored thumbnail access,
+  and the original Explorer default mode.
+
+---
+
+
 ## 2026-09-26 — Continuous Storyboard thumbnail backfill and progress
 
 - Storyboard now keeps generating exact-frame thumbnails for the full current
