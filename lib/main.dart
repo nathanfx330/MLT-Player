@@ -615,13 +615,13 @@ class RedleafProjectWorkspace extends StatefulWidget {
 }
 
 class _RedleafProjectWorkspaceState extends State<RedleafProjectWorkspace> {
-  bool _showThumbnails = false;
+  bool _showBrowser = false;
 
   @override
   void didUpdateWidget(covariant RedleafProjectWorkspace oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.project.key != widget.project.key) {
-      _showThumbnails = false;
+      _showBrowser = false;
     }
   }
 
@@ -672,20 +672,20 @@ class _RedleafProjectWorkspaceState extends State<RedleafProjectWorkspace> {
                       ),
                       ButtonSegment<bool>(
                         value: true,
-                        icon: Icon(Icons.grid_view, size: 16),
-                        label: Text('THUMBNAILS'),
+                        icon: Icon(Icons.folder_open_outlined, size: 16),
+                        label: Text('BROWSER'),
                       ),
                     ],
-                    selected: <bool>{_showThumbnails},
+                    selected: <bool>{_showBrowser},
                     onSelectionChanged: (values) {
-                      setState(() => _showThumbnails = values.single);
+                      setState(() => _showBrowser = values.single);
                     },
                   ),
                 ],
               ),
             ),
             Expanded(
-              child: _showThumbnails
+              child: _showBrowser
                   ? RedleafPage(
                       key: ValueKey('redleaf-project-gallery-${widget.project.key}'),
                       active: widget.active,
