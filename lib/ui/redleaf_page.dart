@@ -167,11 +167,9 @@ class _RedleafPageState extends State<RedleafPage> {
 
   @override
   void dispose() {
-    // PROJECT can swap the gallery back to its overview. Stop admitting
-    // native thumbnail work and drain any decode already in flight.
-    ThumbnailService.trackDetachedDrain(
-      _thumbnailService.pauseAndDrain(),
-    );
+    // PROJECT can swap the gallery back to OVERVIEW mid-decode.
+    // pauseAndDrain automatically joins the global Player handoff barrier.
+    unawaited(_thumbnailService.pauseAndDrain());
     _connection.removeListener(_onConnectionChanged);
     _discovery.removeListener(_onDiscoveryChanged);
     _catalogs.removeListener(_onCatalogsChanged);
