@@ -24,6 +24,7 @@ class RedleafPage extends StatefulWidget {
     required this.active,
     this.workspaceProject,
     this.importRequestSerial = 0,
+    this.initialThumbnailMode = false,
     this.connection,
     this.onOpenVerifiedMedia,
     this.onOpenRedleafHandoff,
@@ -40,6 +41,10 @@ class RedleafPage extends StatefulWidget {
   /// Incremented by the explicit Settings import action. Never auto-sync on
   /// ordinary navigation, reconnection, or project switching.
   final int importRequestSerial;
+
+  /// Start in the linked-video grid when mounted from the Redleaf PROJECT tab.
+  /// The Explorer tab keeps its original SRT TABLE default.
+  final bool initialThumbnailMode;
 
   final RedleafConnectionService? connection;
 
@@ -67,7 +72,7 @@ class _RedleafPageState extends State<RedleafPage> {
   final TextEditingController _searchController = TextEditingController();
   late final ThumbnailService _thumbnailService;
   late final ExplorerViewPreferencesService _thumbnailPrefs;
-  bool _thumbnailMode = false;
+  late bool _thumbnailMode;
 
   String _query = '';
   int? _selectedDocId;
@@ -98,6 +103,7 @@ class _RedleafPageState extends State<RedleafPage> {
   @override
   void initState() {
     super.initState();
+    _thumbnailMode = widget.initialThumbnailMode;
 
     _connection = widget.connection ?? RedleafConnectionService.instance;
     _discovery = RedleafSrtDiscoveryService(connection: _connection);
