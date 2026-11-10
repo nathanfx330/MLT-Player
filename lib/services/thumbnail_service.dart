@@ -25,9 +25,9 @@ class ThumbnailService {
         _generator = generator ?? generateMltThumbnail,
         _permits = _ThumbnailPermitPool(maxConcurrent);
 
-  // A Redleaf PROJECT gallery can be disposed while an MLT worker is still
-  // decoding a frame. Keep its drain future reachable until it completes,
-  // and make every Player entry wait for any such detached work.
+  // A browser can be disposed or made inactive while an MLT worker is
+  // decoding a frame. Keep all outstanding pause drains reachable until
+  // they finish, and make every Player entry await them.
   static final Set<Future<void>> _detachedDrains = <Future<void>>{};
 
   static void trackDetachedDrain(Future<void> drain) {
@@ -69,7 +69,15 @@ class ThumbnailService {
     _paused = false;
   }
 
-  Future<void> pauseAndDrain() async {
+  Future<void> pauseAndDrain() {
+    // Every paused browser is retained until its native work finishes,
+    // including still-mounted inactive tabs and already-disposed galleries.
+    final drain = _pauseAndDrain();
+    trackDetachedDrain(drain);
+    return drain;
+  }
+
+  Future<void> _pauseAndDrain() async {
     _paused = true;
 
     // Native MLT thumbnail calls are synchronous inside a worker isolate and
