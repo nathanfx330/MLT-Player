@@ -26,6 +26,7 @@ class RedleafPage extends StatefulWidget {
     this.importRequestSerial = 0,
     this.initialThumbnailMode = false,
     this.connection,
+    this.snapshotService,
     this.onOpenVerifiedMedia,
     this.onOpenRedleafHandoff,
   });
@@ -47,6 +48,9 @@ class RedleafPage extends StatefulWidget {
   final bool initialThumbnailMode;
 
   final RedleafConnectionService? connection;
+
+  /// Optional cache service for deterministic widget tests.
+  final RedleafProjectSnapshotService? snapshotService;
 
   /// Legacy D3 verified-media callback. Kept so the currently wired Explorer
   /// path remains functional until the transcript-aware handoff is connected.
@@ -111,7 +115,7 @@ class _RedleafPageState extends State<RedleafPage> {
     _mediaResources = RedleafMediaResourceService(connection: _connection);
     _mediaScanner = RedleafMediaScanService(connection: _connection);
     _transcripts = RedleafTranscriptService(connection: _connection);
-    _snapshots = RedleafProjectSnapshotService();
+    _snapshots = widget.snapshotService ?? RedleafProjectSnapshotService();
     _thumbnailService = ThumbnailService();
     _thumbnailPrefs = ExplorerViewPreferencesService();
     unawaited(_loadThumbnailPreferences());
@@ -165,7 +169,9 @@ class _RedleafPageState extends State<RedleafPage> {
   void dispose() {
     // PROJECT can swap the gallery back to its overview. Stop admitting
     // native thumbnail work and drain any decode already in flight.
-    unawaited(_thumbnailService.pauseAndDrain());
+    ThumbnailService.trackDetachedDrain(
+      _thumbnailService.pauseAndDrain(),
+    );
     _connection.removeListener(_onConnectionChanged);
     _discovery.removeListener(_onDiscoveryChanged);
     _catalogs.removeListener(_onCatalogsChanged);
