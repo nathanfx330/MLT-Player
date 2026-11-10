@@ -15,6 +15,7 @@ import 'package:mlt_player/services/redleaf_transcript_service.dart';
 import 'package:mlt_player/services/srt_subtitle_service.dart';
 import 'package:mlt_player/services/thumbnail_service.dart';
 import 'package:mlt_player/ui/redleaf_page.dart';
+import 'package:mlt_player/ui/widgets/redleaf_linked_video_card.dart';
 
 class _ConnectedRedleaf extends RedleafConnectionService {
   @override
@@ -179,12 +180,14 @@ Future<void> _mount(WidgetTester tester, _GatedThumbnails thumbnails,
 
 Future<void> _open(WidgetTester tester, String mediaName,
     _GatedThumbnails thumbnails, int expectedDrains) async {
-  await tester.ensureVisible(find.text(mediaName));
-  // WidgetTester has no doubleTap API. Two taps inside the gesture
-  // recognizer's double-tap interval exercise the real card callback.
-  await tester.tap(find.text(mediaName));
-  await tester.pump(const Duration(milliseconds: 50));
-  await tester.tap(find.text(mediaName));
+  // Exercise the actual Redleaf card's open callback, without introducing
+  // gesture recognizer timers into thumbnail lifecycle regression tests.
+  final card = tester.widget<RedleafLinkedVideoCard>(find.byWidgetPredicate(
+    (widget) =>
+        widget is RedleafLinkedVideoCard &&
+        widget.document.media.path?.endsWith('/$mediaName') == true,
+  ));
+  card.onDoubleTap();
   await tester.pump();
   await tester.pump();
   expect(thumbnails.drains.length, expectedDrains);
