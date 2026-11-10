@@ -421,6 +421,11 @@ Player entry from either Explorer or Redleaf awaits all registered drains
 before launching media. A slow drain shows a non-modal
 "Finishing thumbnail…" status after 200 milliseconds; it disappears when
 the handoff completes and never bypasses or times out the MLT safety gate.
+Navigating to another workspace tab or changing the active project cancels
+only the pending Player open and clears the indicator. Native thumbnail work
+still drains safely. Player also rechecks the initiating project identity
+before opening media, preventing stale media from using another project's
+ratings, tags, or bookmark context.
 Reopening BROWSE never
 replays the earlier Settings import sync signal, even when its serial is
 nonzero and the remote project remains connected. Selecting another Redleaf Project
