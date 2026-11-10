@@ -9,7 +9,7 @@
 - Refresh visible linked-video cards on recovery so thumbnails skipped during
   the pause can be requested again, without leaving BROWSE.
 - Add widget regression tests for selection changes, overlapping handoffs,
-  and navigation away during a native drain.
+  pending media resolution, and navigation away during a native drain.
 
 ---
 
