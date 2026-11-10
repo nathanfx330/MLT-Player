@@ -418,7 +418,10 @@ available. Switching back to OVERVIEW disposes that gallery and stops
 admitting new native thumbnail work. Pending decodes from inactive or
 disposed thumbnail browsers are retained by a process-wide drain registry;
 Player entry from either Explorer or Redleaf awaits all registered drains
-before launching media. Reopening THUMBNAILS never
+before launching media. A slow drain shows a non-modal
+"Finishing thumbnail…" status after 200 milliseconds; it disappears when
+the handoff completes and never bypasses or times out the MLT safety gate.
+Reopening THUMBNAILS never
 replays the earlier Settings import sync signal, even when its serial is
 nonzero and the remote project remains connected. Selecting another Redleaf Project
 returns to its own OVERVIEW rather than carrying over a prior gallery.
