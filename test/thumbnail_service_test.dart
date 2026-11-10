@@ -197,7 +197,8 @@ void main() {
       // Simulate PROJECT returning to OVERVIEW and disposing its browser.
       // The service object is no longer used by any live widget, but the
       // process-wide barrier must retain and await its pending native decode.
-      ThumbnailService.trackDetachedDrain(service.pauseAndDrain());
+      // The service registers its own outstanding drain automatically.
+      unawaited(service.pauseAndDrain());
 
       var playerGatePassed = false;
       final gate = ThumbnailService.waitForDetachedDrains().then((_) {
