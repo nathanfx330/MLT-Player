@@ -407,10 +407,21 @@ The current Redleaf Explorer view contains:
   transcript-aware Player handoff after thumbnail jobs drain;
 - a read-only inspector for the selected SRT.
 
-The PROJECT tab follows the same workspace switch.
+The PROJECT tab follows the same workspace switch. For a Redleaf Cloud
+Project, a visible **OVERVIEW / THUMBNAILS** switch sits above the project
+content. OVERVIEW preserves the Redleaf instance name, identity, server, and
+rename action. THUMBNAILS displays the **existing Redleaf browser**, starting
+in linked-video thumbnail mode, within the PROJECT tab itself. The browser's
+SRT TABLE switch, search, catalog filters, size slider, cached snapshot,
+verified media resolution and transcript-aware Player handoff all remain
+available. Switching back to OVERVIEW disposes that gallery and stops
+admitting new native thumbnail work. Selecting another Redleaf Project
+returns to its own OVERVIEW rather than carrying over a prior gallery.
 
-Selecting Redleaf in Explorer makes PROJECT show the Redleaf project identity.
-Selecting a local Project restores the existing local Project dashboard.
+The Redleaf Explorer continues to default to its SRT TABLE with its own
+THUMBNAILS switch. Neither Project nor Explorer silently signs in, syncs,
+or guesses local file locations. Selecting a Local Project restores the
+existing local Project dashboard.
 
 ---
 
