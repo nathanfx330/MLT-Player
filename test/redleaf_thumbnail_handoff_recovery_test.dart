@@ -58,14 +58,30 @@ class _Snapshots extends RedleafProjectSnapshotService {
 }
 
 class _MediaResources extends RedleafMediaResourceService {
-  @override
-  Future<RedleafMediaResourceResolution> resolve(
-    RedleafSrtDocument document,
-  ) async => RedleafMediaResourceResolution(
+  bool holdBetaSelection = false;
+  final Completer<RedleafMediaResourceResolution> delayedBeta =
+      Completer<RedleafMediaResourceResolution>();
+
+  RedleafMediaResourceResolution _answer(RedleafSrtDocument document) =>
+      RedleafMediaResourceResolution(
         state: RedleafMediaResourceState.localFileReady,
         redleafReference: document.media.path,
         resolvedResource: '/archive/${document.docId == 1 ? 'alpha' : 'beta'}.mp4',
       );
+
+  @override
+  Future<RedleafMediaResourceResolution> resolve(
+    RedleafSrtDocument document,
+  ) {
+    if (document.docId == 2 && holdBetaSelection) {
+      return delayedBeta.future;
+    }
+    return Future<RedleafMediaResourceResolution>.value(_answer(document));
+  }
+
+  void releaseBetaSelection() {
+    delayedBeta.complete(_answer(_document(2, 'beta')));
+  }
 }
 
 class _Transcripts extends RedleafTranscriptService {
@@ -122,6 +138,7 @@ Widget _browser(
   _GatedThumbnails thumbnails, {
   bool active = true,
   ValueChanged<RedleafPlayerHandoff>? onOpen,
+  _MediaResources? resources,
 }) => MaterialApp(
       home: Scaffold(
         body: RedleafPage(
@@ -136,7 +153,7 @@ Widget _browser(
           connection: _ConnectedRedleaf(),
           snapshotService: _Snapshots(),
           thumbnailService: thumbnails,
-          mediaResourceService: _MediaResources(),
+          mediaResourceService: resources ?? _MediaResources(),
           transcriptService: _Transcripts(),
           onOpenRedleafHandoff: onOpen ?? (_) {},
         ),
@@ -144,13 +161,15 @@ Widget _browser(
     );
 
 Future<void> _mount(WidgetTester tester, _GatedThumbnails thumbnails,
-    {ValueChanged<RedleafPlayerHandoff>? onOpen}) async {
+    {ValueChanged<RedleafPlayerHandoff>? onOpen,
+    _MediaResources? resources}) async {
   tester.view.physicalSize = const Size(1280, 860);
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
 
-  await tester.pumpWidget(_browser(thumbnails, onOpen: onOpen));
+  await tester.pumpWidget(
+      _browser(thumbnails, onOpen: onOpen, resources: resources));
   await tester.pumpAndSettle();
   expect(find.byKey(const ValueKey('redleaf-linked-video-grid')),
       findsOneWidget);
@@ -221,6 +240,42 @@ void main() {
       await tester.pump();
       expect(opened.map((handoff) => handoff.docId), <int>[2]);
       expect(thumbnails.paused, isTrue);
+      expect(thumbnails.resumes, 0);
+    },
+  );
+
+  testWidgets(
+    'a newer grid open still resolving media prevents premature resume',
+    (tester) async {
+      final thumbnails = _GatedThumbnails();
+      final resources = _MediaResources();
+      final opened = <RedleafPlayerHandoff>[];
+      await _mount(tester, thumbnails,
+          onOpen: opened.add, resources: resources);
+
+      await _open(tester, 'alpha.mp4', thumbnails, 1);
+
+      // Beta's card was resolved during mount, but its new double-click
+      // selection must now wait for a deliberately delayed media lookup.
+      resources.holdBetaSelection = true;
+      await _open(tester, 'beta.mp4', thumbnails, 1);
+
+      // Alpha finishes its native drain while beta is still resolving.
+      // Resuming here could admit fresh thumbnail work before beta opens.
+      thumbnails.drains[0].complete();
+      await tester.pump();
+      expect(thumbnails.paused, isTrue);
+      expect(thumbnails.resumes, 0);
+      expect(opened, isEmpty);
+
+      resources.releaseBetaSelection();
+      await tester.pump();
+      await tester.pump();
+      expect(thumbnails.drains.length, 2);
+
+      thumbnails.drains[1].complete();
+      await tester.pump();
+      expect(opened.map((handoff) => handoff.docId), <int>[2]);
       expect(thumbnails.resumes, 0);
     },
   );
