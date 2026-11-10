@@ -16,19 +16,20 @@ Widget _harness({
     home: Scaffold(
       body: Stack(
         children: [
-          TextButton(
-            onPressed: onOpen,
-            child: const Text('OPEN PLAYER'),
-          ),
-          if (onNavigate != null)
-            Positioned(
-              top: 52,
-              left: 0,
-              child: TextButton(
-                onPressed: onNavigate,
-                child: const Text('NAVIGATE'),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              TextButton(
+                onPressed: onOpen,
+                child: const Text('OPEN PLAYER'),
               ),
-            ),
+              if (onNavigate != null)
+                TextButton(
+                  onPressed: onNavigate,
+                  child: const Text('NAVIGATE'),
+                ),
+            ],
+          ),
           Positioned(
             right: 18,
             bottom: 18,
