@@ -106,6 +106,13 @@ void main() {
   testWidgets(
     'repeated PROJECT gallery mounts never replay an old Settings import',
     (tester) async {
+      // Exercise the full Redleaf cached summary at a normal desktop width,
+      // rather than the test harness' unusually narrow 800-pixel viewport.
+      tester.view.physicalSize = const Size(1440, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
       final connection = _ConnectedTestRedleaf('gallery-no-sync');
       final snapshots = _SnapshotTestService();
 
