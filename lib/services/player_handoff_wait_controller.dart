@@ -10,6 +10,7 @@ import 'package:flutter/foundation.dart';
 /// A newer request supersedes an older request, including one still awaiting
 /// the barrier. There is deliberately no timeout: Player must not open while
 /// any paused browser's MLT thumbnail work is still in flight.
+/// Cancellation invalidates only the Player request, never the drain.
 class PlayerHandoffWaitController extends ChangeNotifier {
   PlayerHandoffWaitController({
     required Future<void> Function() waitForDrains,
@@ -25,7 +26,20 @@ class PlayerHandoffWaitController extends ChangeNotifier {
 
   bool get showIndicator => _showIndicator;
 
-  Future<void> run(VoidCallback onReady) async {
+  /// Invalidates any pending Player open and removes its visual feedback.
+  /// Native thumbnail drains continue safely in the background.
+  void cancel() {
+    if (_disposed) return;
+    _requestSerial++;
+    _indicatorTimer?.cancel();
+    _indicatorTimer = null;
+    _setIndicatorVisible(false);
+  }
+
+  Future<void> run(
+    VoidCallback onReady, {
+    bool Function()? isStillCurrent,
+  }) async {
     final serial = ++_requestSerial;
 
     _indicatorTimer?.cancel();
@@ -41,7 +55,9 @@ class PlayerHandoffWaitController extends ChangeNotifier {
 
     try {
       await _waitForDrains();
-      if (!_disposed && serial == _requestSerial) {
+      if (!_disposed &&
+          serial == _requestSerial &&
+          (isStillCurrent?.call() ?? true)) {
         onReady();
       }
     } finally {

@@ -1,5 +1,18 @@
 # Changes
 
+## 2026-11-09: Prevent stale Player handoff after navigation
+
+- Cancel pending Player opens when switching workspace tabs, active projects,
+  or navigating through project dashboard links. Cancellation hides the
+  indicator without interrupting in-flight native MLT thumbnail decodes.
+- Recheck the captured workspace and local project identity when the drain
+  finishes; never open media with another project's metadata context.
+- Cover tab changes, project switches, return to the original project,
+  stale identity, and subsequent valid requests with regression tests.
+- Correct README PROJECT navigation instructions to say BROWSE.
+
+---
+
 ## 2026-11-09: Player thumbnail drain wait feedback
 
 - Player entry from Explorer or Redleaf now shows a small amber

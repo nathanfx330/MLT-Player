@@ -200,6 +200,7 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
       return;
     }
 
+    _playerHandoffWait.cancel();
     setState(() {
       _activeWorkspaceProject = project;
       _activeProjectId = localProjectId;
@@ -210,6 +211,7 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
     if (_activeProjectId == projectId) {
       return;
     }
+    _playerHandoffWait.cancel();
     setState(() => _activeProjectId = projectId);
   }
 
@@ -228,9 +230,15 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
     required String path,
     RedleafPlayerHandoff? handoff,
   }) {
+    // Snapshot both identities that determine Player's metadata project.
+    // Navigation cancels the request, and this guard prevents a stale
+    // callback from opening media under another project's metadata.
+    final requestedWorkspaceKey = _activeWorkspaceProject?.key;
+    final requestedLocalProjectId = _activeProjectId;
+
     // Preserve the process-wide MLT safety barrier for both Player entry
     // paths. Slow native decodes show a delayed, non-modal status indicator.
-    // Newer requests still supersede stale clicks while the barrier waits.
+    // A cancelled request never interrupts the underlying thumbnail drain.
     return _playerHandoffWait.run(() {
       if (!mounted) return;
       setState(() {
@@ -239,6 +247,10 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
         _playerOpenRequest += 1;
         _showPlayer = true;
       });
+    }, isStillCurrent: () {
+      return mounted &&
+          _activeWorkspaceProject?.key == requestedWorkspaceKey &&
+          _activeProjectId == requestedLocalProjectId;
     });
   }
 
@@ -246,6 +258,7 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
     String displayName,
     bool restoreFromTrash,
   ) async {
+    _playerHandoffWait.cancel();
     if (!_workspaceProjectService.loaded) {
       await _workspaceProjectService.load();
     }
@@ -263,6 +276,7 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
   }
 
   void _returnToExplorer() {
+    _playerHandoffWait.cancel();
     setState(() {
       _showPlayer = false;
       _workspaceSection = _WorkspaceSection.explorer;
@@ -273,11 +287,13 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
     if (_workspaceSection == section) {
       return;
     }
+    _playerHandoffWait.cancel();
     setState(() => _workspaceSection = section);
   }
 
   void _showStartupRedleafProject() {
     if (!mounted) return;
+    _playerHandoffWait.cancel();
     setState(() => _workspaceSection = _WorkspaceSection.project);
   }
 
@@ -322,6 +338,7 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
     String? colorHex,
     bool bookmarkedOnly = false,
   }) {
+    _playerHandoffWait.cancel();
     final serial = _explorerProjectViewSerial + 1;
     setState(() {
       _explorerProjectViewSerial = serial;

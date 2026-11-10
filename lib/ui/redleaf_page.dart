@@ -143,6 +143,13 @@ class _RedleafPageState extends State<RedleafPage> {
     final oldKey = oldWidget.workspaceProject?.key;
     final newKey = widget.workspaceProject?.key;
 
+    if (oldKey != newKey || (!widget.active && oldWidget.active)) {
+      // The handoff may still be fetching a transcript or draining native
+      // thumbnails. Leaving this browser must invalidate that request.
+      _handoffSerial++;
+      _handoffLoading = false;
+    }
+
     if (oldKey != newKey) {
       _snapshotLoadSerial += 1;
       _loadedInstanceId = '';
@@ -855,6 +862,7 @@ class _RedleafPageState extends State<RedleafPage> {
   }
 
   Future<void> _openSelectedVerifiedMedia(String mediaPath) async {
+    if (!widget.active) return;
     if (!_connectionMatchesWorkspace) {
       setState(() {
         _handoffError =
@@ -874,15 +882,20 @@ class _RedleafPageState extends State<RedleafPage> {
       return;
     }
 
+    final serial = ++_handoffSerial;
     final transcriptAwareCallback = widget.onOpenRedleafHandoff;
     if (transcriptAwareCallback == null) {
       await _thumbnailService.pauseAndDrain();
-      if (!mounted || _selectedDocId != document.docId) return;
+      if (!mounted ||
+          !widget.active ||
+          serial != _handoffSerial ||
+          _selectedDocId != document.docId) {
+        return;
+      }
       widget.onOpenVerifiedMedia?.call(resource);
       return;
     }
 
-    final serial = ++_handoffSerial;
     final docId = document.docId;
 
     setState(() {
@@ -893,7 +906,10 @@ class _RedleafPageState extends State<RedleafPage> {
     try {
       final transcript = await _transcripts.loadForDocument(document);
 
-      if (!mounted || serial != _handoffSerial || _selectedDocId != docId) {
+      if (!mounted ||
+          !widget.active ||
+          serial != _handoffSerial ||
+          _selectedDocId != docId) {
         return;
       }
 
@@ -919,10 +935,18 @@ class _RedleafPageState extends State<RedleafPage> {
       });
 
       await _thumbnailService.pauseAndDrain();
-      if (!mounted || _selectedDocId != docId) return;
+      if (!mounted ||
+          !widget.active ||
+          serial != _handoffSerial ||
+          _selectedDocId != docId) {
+        return;
+      }
       transcriptAwareCallback(handoff);
     } catch (error) {
-      if (!mounted || serial != _handoffSerial || _selectedDocId != docId) {
+      if (!mounted ||
+          !widget.active ||
+          serial != _handoffSerial ||
+          _selectedDocId != docId) {
         return;
       }
 
