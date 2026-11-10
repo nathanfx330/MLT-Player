@@ -673,7 +673,7 @@ class _RedleafProjectWorkspaceState extends State<RedleafProjectWorkspace> {
                       ButtonSegment<bool>(
                         value: true,
                         icon: Icon(Icons.folder_open_outlined, size: 16),
-                        label: Text('BROWSER'),
+                        label: Text('BROWSE'),
                       ),
                     ],
                     selected: <bool>{_showBrowser},
