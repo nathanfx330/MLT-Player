@@ -1718,13 +1718,17 @@ class _Metric extends StatelessWidget {
           const SizedBox(height: 5),
           Row(
             children: [
-              Text(
-                label,
-                style: const TextStyle(
-                  fontSize: 8.5,
-                  fontWeight: FontWeight.w800,
-                  letterSpacing: 0.7,
-                  color: Colors.white38,
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 8.5,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 0.7,
+                    color: Colors.white38,
+                  ),
                 ),
               ),
               if (secondary != null) ...[
