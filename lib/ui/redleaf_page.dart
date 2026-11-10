@@ -112,6 +112,7 @@ class _RedleafPageState extends State<RedleafPage> {
   String? _handoffError;
   int _handoffSerial = 0;
   final Set<int> _pendingPlayerHandoffs = <int>{};
+  int _pendingGridOpens = 0;
   bool _playerHandoffSubmitted = false;
   int _thumbnailRecoverySerial = 0;
 
@@ -882,11 +883,15 @@ class _RedleafPageState extends State<RedleafPage> {
       // thumbnail decoding while the shell still waits to open Player.
       _playerHandoffSubmitted = true;
     }
+    _maybeRecoverThumbnails();
+  }
 
+  void _maybeRecoverThumbnails() {
     if (!mounted ||
         !widget.active ||
         _playerHandoffSubmitted ||
         _pendingPlayerHandoffs.isNotEmpty ||
+        _pendingGridOpens > 0 ||
         !_thumbnailService.paused) {
       return;
     }
@@ -1620,15 +1625,26 @@ class _RedleafPageState extends State<RedleafPage> {
   }
 
   Future<void> _openLinkedVideoFromGrid(RedleafSrtDocument document) async {
-    // Reuse the existing verified-media and transcript-aware handoff.
-    // Never pass a raw Redleaf URL straight into native MLT.
-    await _selectDocument(document);
-    if (!mounted || document.docId != _selectedDocId) return;
-    final resolved = _selectedMediaResolution;
-    final path = resolved?.resolvedResource?.trim();
-    if (resolved?.isLocalFileReady == true &&
-        path != null && path.isNotEmpty) {
-      await _openSelectedVerifiedMedia(path);
+    // Media resolution is part of the handoff. Do not let an older,
+    // cancelled drain resume thumbnails while a newer double-click still
+    // waits for its local media path to resolve.
+    _pendingGridOpens++;
+    try {
+      // Reuse the existing verified-media and transcript-aware handoff.
+      // Never pass a raw Redleaf URL straight into native MLT.
+      await _selectDocument(document);
+      if (!mounted || !widget.active || document.docId != _selectedDocId) {
+        return;
+      }
+      final resolved = _selectedMediaResolution;
+      final path = resolved?.resolvedResource?.trim();
+      if (resolved?.isLocalFileReady == true &&
+          path != null && path.isNotEmpty) {
+        await _openSelectedVerifiedMedia(path);
+      }
+    } finally {
+      _pendingGridOpens--;
+      _maybeRecoverThumbnails();
     }
   }
 
