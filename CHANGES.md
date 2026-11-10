@@ -9,6 +9,9 @@
   finishes. There is no timeout or bypass of the drain barrier.
 - Newer Player clicks still supersede stale requests. Tests cover slow and
   instant drains, stale requests, and disposal while waiting.
+- The PROJECT destination is labeled BROWSER rather than THUMBNAILS because
+  it can present either linked-video thumbnails or the complete SRT table.
+  The internal view switch and initial thumbnail presentation are unchanged.
 
 ---
 
