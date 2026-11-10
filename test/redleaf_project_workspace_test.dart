@@ -80,9 +80,9 @@ void main() {
 
       expect(find.text('PROJECT OVERVIEW'), findsOneWidget);
       expect(find.byType(RedleafPage), findsNothing);
-      expect(find.text('THUMBNAILS'), findsOneWidget);
+      expect(find.text('BROWSER'), findsOneWidget);
 
-      await tester.tap(find.text('THUMBNAILS'));
+      await tester.tap(find.text('BROWSER'));
       await tester.pump();
 
       final browser = tester.widget<RedleafPage>(find.byType(RedleafPage));
@@ -124,16 +124,25 @@ void main() {
         connection: connection,
         snapshots: snapshots,
       ));
-      await tester.tap(find.text('THUMBNAILS'));
+      await tester.tap(find.text('BROWSER'));
       await tester.pumpAndSettle();
 
       expect(find.byType(RedleafPage), findsOneWidget);
       expect(snapshots.loads, 1);
       expect(connection.inventoryRefreshes, 0);
 
+      // The PROJECT destination stays BROWSER even when its internal
+      // presentation changes from thumbnails to the SRT file table.
+      expect(find.text('BROWSER'), findsOneWidget);
+      expect(find.text('SRT TABLE'), findsOneWidget);
+      await tester.tap(find.text('SRT TABLE'));
+      await tester.pump();
+      expect(find.text('BROWSER'), findsOneWidget);
+      expect(find.text('THUMBNAILS'), findsOneWidget);
+
       await tester.tap(find.text('OVERVIEW'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('THUMBNAILS'));
+      await tester.tap(find.text('BROWSER'));
       await tester.pumpAndSettle();
 
       expect(snapshots.loads, 2);
@@ -144,7 +153,7 @@ void main() {
   testWidgets('switching Redleaf projects resets the PROJECT gallery',
       (tester) async {
     await tester.pumpWidget(_workspace(_project('gallery-test-two')));
-    await tester.tap(find.text('THUMBNAILS'));
+    await tester.tap(find.text('BROWSER'));
     await tester.pump();
     expect(find.byType(RedleafPage), findsOneWidget);
 
