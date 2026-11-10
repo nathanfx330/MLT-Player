@@ -435,7 +435,7 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
               onBack: _returnToExplorer,
             ),
           ],
-        );
+        ),
         Positioned(
           right: 18,
           bottom: 18,
