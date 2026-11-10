@@ -2,9 +2,9 @@
 
 # MLT Player: Development Overview and Update Record
 
-**Record through November 9, 2026**
+**Record through November 10, 2026**
 
-This document connects MLT Player's engineering history into a single narrative. **Part I** describes the development from a precise MLT-backed player to a file-first media browser with projects, catalogs and composition tools. **Part II** records the November 2026 Redleaf integration updates and their design decisions, including authentication, Trash, the shared encrypted credential vault and linked-video thumbnail parity.
+This document connects MLT Player's engineering history into a single narrative. **Part I** describes the development from a precise MLT-backed player to a file-first media browser with projects, catalogs and composition tools. **Part II** records the November 9 Redleaf integration checkpoint, including authentication, Trash, the shared encrypted credential vault and linked-video thumbnail parity. **Part III** continues through the November 10 Gold merges, including PROJECT BROWSE, Player handoff safety, thumbnail recovery, and coordinated cross-repository CI.
 
 This is a history, not a replacement for [current architecture](architecture.md), [current Redleaf workspace behavior](redleaf-workspace.md), or the [root README](../README.md). The individual POC documents remain the detailed evidence for their stages.
 
@@ -202,7 +202,7 @@ On verified Player handoff, the linked transcript and timing information are car
 
 The next request was specific: **linked Redleaf videos must have the same thumbnail mode as normal local projects**. Simply making new colored cards would have looked similar without sharing the behavior that makes Explorer reliable.
 
-[PR #13, merged November 9](https://github.com/nathanfx330/MLT-Player/pull/13) extracted the existing Explorer media card and thumbnail widget into reusable components. The Redleaf view now provides **THUMBNAILS** and **SRT TABLE**, with the table remaining the initial view.
+[PR #13, merged November 9](https://github.com/nathanfx330/MLT-Player/pull/13) extracted the existing Explorer media card and thumbnail widget into reusable components. The Redleaf Explorer view provides **THUMBNAILS** and **SRT TABLE**, with the table remaining the initial view. The later PROJECT BROWSE destination starts in thumbnail mode, as recorded in Part III.
 
 The grid:
 
@@ -237,7 +237,7 @@ These are different failure categories. UI parity, source identity, asynchronous
 | Hub onboarding, project management and encrypted credentials | [MLT #12](https://github.com/nathanfx330/MLT-Player/pull/12) | Flutter analysis, regression tests, and cross-application GUI acceptance |
 | Shared Redleaf video thumbnails | [MLT #13](https://github.com/nathanfx330/MLT-Player/pull/13) | CI #197 passed Dart tests, native smoke, preview/export parity and native thumbnail smoke |
 
-The associated Hub changes were merged as [Hub #2](https://github.com/nathanfx330/Redleaf-Hub/pull/2) and [Hub #3](https://github.com/nathanfx330/Redleaf-Hub/pull/3). The user accepted both applications for promotion to `main`.
+The associated Hub changes were merged as [Hub #2](https://github.com/nathanfx330/Redleaf-Hub/pull/2) and [Hub #3](https://github.com/nathanfx330/Redleaf-Hub/pull/3). Both applications were approved for promotion to `main` after testing.
 
 The November 9 merge commits in this repository were `4467c3a` for Redleaf onboarding and credentials, followed by `f869416` for shared linked-video thumbnails. This is a merged-code checkpoint, not a claim that a new numbered release tag was published.
 
@@ -253,6 +253,77 @@ Several invariants should survive future work:
 4. Neither a remote media URL nor a transcript filename substitutes for verified local media access.
 5. The Player's preview, export and thumbnail decoding retain their separate lifecycles.
 6. Credential convenience does not justify hiding the shared-vault security model.
+
+# Part III. Late November 9 through November 10, 2026
+
+## Chapter 2. PROJECT browsing, native drain ownership, and vault CI
+
+This chapter documents the work merged after the November 9 afternoon checkpoint. Dates span the evening of November 9 in the US Eastern time zone and the early hours of November 10 in UTC. The preceding chapter preserves the original integration sequence rather than presenting the intermediate implementation as today's interface.
+
+### 1. PROJECT gains BROWSE without duplicating the Explorer browser
+
+[PR #17](https://github.com/nathanfx330/MLT-Player/pull/17) brought Redleaf's existing document browser into the Redleaf **PROJECT** tab. PROJECT gained an **OVERVIEW** destination and a second destination originally labeled **THUMBNAILS**. The second destination mounts the established `RedleafPage` and starts in linked-video grid mode, with the existing search, catalog membership filtering, density control, **SRT TABLE** toggle, and verified transcript-aware Player handoff still available. The Redleaf Explorer tab retains SRT TABLE as its default.
+
+[PR #19](https://github.com/nathanfx330/MLT-Player/pull/19) renamed the PROJECT destination to **BROWSE**, because it can show either thumbnails or a file table. **THUMBNAILS** remains the internal view toggle; it is not the name of the PROJECT navigation destination.
+
+The approved contract distinguishes navigation from presentation: PROJECT offers **OVERVIEW / BROWSE**; BROWSE offers **THUMBNAILS / SRT TABLE**. Project creation remains outside the BROWSE gallery, and a change to another Redleaf Project resets the PROJECT destination to OVERVIEW. Neither mounting BROWSE nor changing its presentation triggers an implicit sync.
+
+### 2. A native MLT drain must outlive the widget that started it
+
+[PR #18](https://github.com/nathanfx330/MLT-Player/pull/18) fixed two distinct lifecycle problems.
+
+First, the PROJECT gallery is mounted with `importRequestSerial: 0`. Only Explorer consumes the explicit Settings import signal. Reopening the PROJECT gallery must not replay a previous import or synchronize the archive merely because it is connected.
+
+Second, a thumbnail worker can still be decoding after its gallery has closed or become inactive. `ThumbnailService.pauseAndDrain()` registers outstanding drains in a static, process-wide set, including drains from detached or disposed browsers. The root shell makes both Explorer and Redleaf Player entry pass through `ThumbnailService.waitForDetachedDrains()` before showing Player. A native MLT thumbnail decode is allowed to finish; it is neither interrupted nor bypassed.
+
+This is a resource-ownership rule, not a cosmetic wait. The widget may disappear, but the native decode still exists and must be accounted for. The project also aligned its Dart lower SDK bound with the committed dependency lock (Dart 3.11 or later); the separate vault cadence branch later inherited that already-merged change.
+
+### 3. Make the wait visible, then invalidate stale openings
+
+The global drain gate made Player entry safe, but a slow decode left no feedback. [PR #19](https://github.com/nathanfx330/MLT-Player/pull/19) introduced a small, non-modal amber **Finishing thumbnail…** indicator after 200 milliseconds. Fast opens show no indicator. There is no timeout: the indicator reports the wait without weakening the gate.
+
+[PR #20](https://github.com/nathanfx330/MLT-Player/pull/20) closed a more serious navigation race. A user could request media from Project A, navigate to Project B while the drain continued, then see the delayed Player open under Project B's metadata context. The shell now cancels pending openings on workspace, project, tab, import and startup navigation. `PlayerHandoffWaitController.cancel()` invalidates the request serial and dismisses feedback without cancelling native work. `run(isStillCurrent: ...)` separately checks the workspace key and local Project ID captured at request time.
+
+Explorer and Redleaf also invalidate their own view-local request serials when they become inactive or change projects. This matters when the delayed operation occurs **before** the shell handoff, such as a Redleaf transcript fetch or a local thumbnail drain. No old callback may open Player after navigation. Local review passed 221 Flutter tests and the Linux GUI; the previous PR's CI rerun was cancelled during dependency installation, so that cancellation is not recorded as a green CI result.
+
+### 4. Recover browsing after a cancelled Redleaf Player handoff
+
+[PR #21](https://github.com/nathanfx330/MLT-Player/pull/21) corrected a quieter side effect. Selecting another card during an in-progress handoff invalidated the opening correctly, but `RedleafPage` could remain mounted with its `ThumbnailService` paused. New cards then stopped receiving thumbnails until the user left the page.
+
+The recovery logic tracks `_pendingPlayerHandoffs`, `_pendingGridOpens` (double-clicks still resolving media), and `_playerHandoffSubmitted` (a request already passed to the shell). It resumes only when the page is active, its service is paused, no newer operation is pending, and no submitted Player transition still owns the handoff. All handoff exits, including errors, pass through a `finally` path. On recovery, `_thumbnailRecoverySerial` changes the visible card keys so cards that skipped decoding while paused remount and retry.
+
+This prevents an old cancelled drain from admitting new thumbnail decodes during a newer handoff or while the shell waits on the global gate. The relevant test suite uses the cards' callbacks directly rather than leaving artificial double-tap gesture timers pending. The merged CI run passed Dart analysis, **225 Flutter tests**, native MLT playback smoke, preview/export parity and thumbnail smoke. Linux GUI review was also completed.
+
+A narrow edge remains deliberately documented, not patched: if the shell drops an **already submitted** Player request but the Redleaf browser stays active in the same project, the browser does not receive an acknowledgement and might remain paused. [Issue #22](https://github.com/nathanfx330/MLT-Player/issues/22) proposes an explicit per-request `opened` or `dropped` acknowledgement from the shell. Clearing the flag only on an import serial change would not close every cancellation path. The issue is low priority and does not block the November Gold checkpoint.
+
+### 5. Shared vault parity becomes a coordinated two-repository CI contract
+
+The credential vault source is deliberately byte-identical in MLT Player and Redleaf Hub. Earlier review exposed portability and reproducibility issues. [MLT PR #15](https://github.com/nathanfx330/MLT-Player/pull/15), paired with [Hub PR #5](https://github.com/nathanfx330/Redleaf-Hub/pull/5), removed an architecture-specific numeric `O_NOFOLLOW` flag, retained portable exclusive file creation, enforced the committed `pubspec.lock`, and added cross-repository source parity checks. This hardening did not change the vault record format or login flow.
+
+The first parity gate had an unavoidable merge-order problem: GitHub cannot atomically merge two repositories. A strict check on every `main` push would briefly fail while only one half of an approved pair was merged. [MLT PR #16](https://github.com/nathanfx330/MLT-Player/pull/16) and [Hub PR #6](https://github.com/nathanfx330/Redleaf-Hub/pull/6) replaced that behavior with three cases:
+
+| Event | Parity behavior |
+| --- | --- |
+| Pull request | Strict. Compare against the corresponding branch in the other repository, falling back to its `main` when that branch does not exist. |
+| Push to `main` | Advisory. Emit a warning during a legitimate cross-repository merge window rather than failing the entire build. |
+| Scheduled audit | Strict. MLT runs daily at **09:43 UTC**; Hub runs daily at **09:17 UTC**. These audit the published `main` branches. |
+
+The script resolves the counterpart ref with `git ls-remote`, then requests `redleaf_shared_credential_vault.dart` by immutable commit SHA. This avoids relying on a potentially stale CDN response for a mutable branch URL. The script itself is byte-identical across both repositories. The pair was merged into Gold on November 10, with MLT merge commit `bb2bb7e` and Hub merge commit `3e85e88`. The vault implementations and parity checker were checked again after merging and matched exactly.
+
+The checker compares the **vault implementation**, not its own script file. Its strict failure currently uses `set -e` propagation from `report_issue`, and Git terminal prompts are not explicitly disabled. Scheduled GitHub workflows may also be disabled on inactive public repositories. These are documented maintenance considerations, not blockers for the approved Gold merge.
+
+### 6. Validation and final ownership boundaries
+
+| Workstream | Merged PRs | Main result |
+| --- | --- | --- |
+| PROJECT BROWSE and gallery lifecycle | [#17](https://github.com/nathanfx330/MLT-Player/pull/17), [#18](https://github.com/nathanfx330/MLT-Player/pull/18) | Same Redleaf browser in PROJECT; no replay of Settings sync; globally tracked native thumbnail drains. |
+| Visible wait and stale opening cancellation | [#19](https://github.com/nathanfx330/MLT-Player/pull/19), [#20](https://github.com/nathanfx330/MLT-Player/pull/20) | Subtle wait indicator and request/project identity checks before Player entry. |
+| Thumbnail restoration | [#21](https://github.com/nathanfx330/MLT-Player/pull/21) | Resumes active browsing after a cancelled drain without disrupting newer requests. |
+| Vault reproducibility and CI cadence | [#15](https://github.com/nathanfx330/MLT-Player/pull/15), [#16](https://github.com/nathanfx330/MLT-Player/pull/16) | Paired vault checks with Hub, enforced lockfile, and daily strict parity audit. |
+
+The high-level division remains unchanged. Flutter owns navigation, Redleaf identity and user interaction. Native MLT owns thumbnail decoding and playback. Neither browser deactivation nor a cancelled request authorizes overlapping native decode and Player work. Redleaf Hub remains the external launcher and credential-vault peer; it was **not** modified by the Player's BROWSE or handoff changes.
+
+---
 
 ## Continuing this history
 
