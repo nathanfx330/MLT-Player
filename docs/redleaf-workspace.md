@@ -426,6 +426,12 @@ only the pending Player open and clears the indicator. Native thumbnail work
 still drains safely. Player also rechecks the initiating project identity
 before opening media, preventing stale media from using another project's
 ratings, tags, or bookmark context.
+If the user selects another Redleaf card during an in-progress handoff,
+the cancelled request waits for its already-running native decode to drain
+before resuming thumbnail generation. A newer handoff, including an unresolved grid double-click, keeps the browser
+paused until its own Player transition finishes. On cancellation, visible
+cards retry thumbnails that were skipped during the pause without needing
+to leave and reopen BROWSE.
 Reopening BROWSE never
 replays the earlier Settings import sync signal, even when its serial is
 nonzero and the remote project remains connected. Selecting another Redleaf Project
