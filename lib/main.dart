@@ -27,6 +27,7 @@ import 'ui/widgets/player_settings_button.dart';
 import 'ui/widgets/bookmark_view.dart';
 import 'ui/widgets/media_inspector.dart';
 import 'ui/explorer_page.dart';
+import 'ui/redleaf_page.dart';
 import 'ui/project_page.dart';
 import 'ui/widgets/layers_inspector.dart';
 import 'ui/widgets/storyboard_view.dart';
@@ -361,9 +362,17 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
                   ),
                   if (activeWorkspaceProject != null &&
                       activeWorkspaceProject.isRedleaf)
-                    _RedleafProjectSyncView(
+                    RedleafProjectWorkspace(
+                      key: ValueKey(
+                        'redleaf-project-workspace-${activeWorkspaceProject.key}',
+                      ),
                       project: activeWorkspaceProject,
+                      active: !_showPlayer &&
+                          _workspaceSection == _WorkspaceSection.project,
+                      importRequestSerial: _cloudImportRequestSerial,
                       onRename: _renameActiveRedleafProject,
+                      onOpenVerifiedMedia: _openInPlayer,
+                      onOpenRedleafHandoff: _openRedleafInPlayer,
                     )
                   else
                     ProjectPage(
@@ -534,6 +543,126 @@ class _WorkspaceTab extends StatelessWidget {
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The Redleaf PROJECT tab keeps its overview and exposes the same verified
+/// linked-video browser already used by Redleaf Explorer. Only one browser
+/// pane is built here at a time, so switching back to the overview disposes
+/// the PROJECT-side media browser rather than leaving its thumbnail jobs live.
+class RedleafProjectWorkspace extends StatefulWidget {
+  const RedleafProjectWorkspace({
+    super.key,
+    required this.project,
+    required this.active,
+    required this.onRename,
+    this.importRequestSerial = 0,
+    this.onOpenVerifiedMedia,
+    this.onOpenRedleafHandoff,
+  });
+
+  final WorkspaceProject project;
+  final bool active;
+  final int importRequestSerial;
+  final Future<void> Function(String name) onRename;
+  final ValueChanged<String>? onOpenVerifiedMedia;
+  final ValueChanged<RedleafPlayerHandoff>? onOpenRedleafHandoff;
+
+  @override
+  State<RedleafProjectWorkspace> createState() =>
+      _RedleafProjectWorkspaceState();
+}
+
+class _RedleafProjectWorkspaceState extends State<RedleafProjectWorkspace> {
+  bool _showThumbnails = false;
+
+  @override
+  void didUpdateWidget(covariant RedleafProjectWorkspace oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.project.key != widget.project.key) {
+      _showThumbnails = false;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF111111),
+      body: SafeArea(
+        child: Column(
+          children: [
+            Container(
+              height: 56,
+              padding: const EdgeInsets.symmetric(horizontal: 14),
+              decoration: const BoxDecoration(
+                color: Color(0xFF131313),
+                border: Border(
+                  bottom: BorderSide(color: Colors.white12),
+                ),
+              ),
+              child: Row(
+                children: [
+                  if (MediaQuery.sizeOf(context).width >= 720) ...[
+                    const Icon(
+                      Icons.cloud_outlined,
+                      color: Color(0xFFE8A33D),
+                      size: 18,
+                    ),
+                    const SizedBox(width: 9),
+                    const Text(
+                      'REDLEAF PROJECT',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 0.8,
+                        color: Colors.white70,
+                      ),
+                    ),
+                  ],
+                  const Spacer(),
+                  SegmentedButton<bool>(
+                    key: const ValueKey('redleaf-project-view-switch'),
+                    showSelectedIcon: false,
+                    segments: const [
+                      ButtonSegment<bool>(
+                        value: false,
+                        icon: Icon(Icons.dashboard_outlined, size: 16),
+                        label: Text('OVERVIEW'),
+                      ),
+                      ButtonSegment<bool>(
+                        value: true,
+                        icon: Icon(Icons.grid_view, size: 16),
+                        label: Text('THUMBNAILS'),
+                      ),
+                    ],
+                    selected: <bool>{_showThumbnails},
+                    onSelectionChanged: (values) {
+                      setState(() => _showThumbnails = values.single);
+                    },
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: _showThumbnails
+                  ? RedleafPage(
+                      key: ValueKey('redleaf-project-gallery-${widget.project.key}'),
+                      active: widget.active,
+                      workspaceProject: widget.project,
+                      importRequestSerial: widget.importRequestSerial,
+                      initialThumbnailMode: true,
+                      onOpenVerifiedMedia: widget.onOpenVerifiedMedia,
+                      onOpenRedleafHandoff: widget.onOpenRedleafHandoff,
+                    )
+                  : _RedleafProjectSyncView(
+                      project: widget.project,
+                      onRename: widget.onRename,
+                    ),
+            ),
+          ],
         ),
       ),
     );
