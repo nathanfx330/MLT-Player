@@ -296,6 +296,15 @@ The Redleaf Explorer view reports SRT totals including:
 
 Catalog filtering works from the cached membership snapshot while disconnected.
 
+**Redleaf Cloud PROJECT thumbnails:** In the PROJECT tab, choose
+**THUMBNAILS** beside **OVERVIEW** to browse Redleaf-linked videos directly
+on the project side, without switching to EXPLORER. This is the same SRT
+catalog and verified local-media thumbnail grid used in Redleaf Explorer,
+including search, Catalog filters, density slider, **SRT TABLE** toggle, and
+transcript-aware Player opening. OVERVIEW preserves the existing project
+identity, server information and rename controls. The normal Redleaf
+Explorer still opens in SRT TABLE by default.
+
 #### Exact transcript handoff
 
 When a Redleaf SRT with verified local media is opened in Player, MLT Player

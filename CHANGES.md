@@ -1,5 +1,24 @@
 # Changes
 
+## 2026-11-09: Redleaf Cloud PROJECT thumbnail browser
+
+- Added an OVERVIEW / THUMBNAILS switch directly to the Redleaf Cloud PROJECT
+  tab. Users can now browse linked videos from the Project side, not only
+  Redleaf Explorer.
+- Project THUMBNAILS mounts the existing Redleaf SRT browser in thumbnail
+  mode, reusing verified local-media resolution, the exact Explorer cards,
+  native MLT thumbnail cache, search, Catalog filtering, density controls,
+  SRT TABLE fallback and transcript-aware Player handoff.
+- The original project overview and rename controls remain intact. Changing
+  Redleaf Projects resets the view to OVERVIEW.
+- Leaving the Project thumbnail browser pauses and drains outstanding
+  thumbnail work without changing Redleaf's database or forcing SYNC NOW.
+- Added widget coverage for Project switching, restored thumbnail access,
+  and the original Explorer default mode.
+
+---
+
+
 ## 2026-09-26 — Continuous Storyboard thumbnail backfill and progress
 
 - Storyboard now keeps generating exact-frame thumbnails for the full current
