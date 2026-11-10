@@ -26,6 +26,7 @@ class RedleafPage extends StatefulWidget {
     this.importRequestSerial = 0,
     this.initialThumbnailMode = false,
     this.connection,
+    this.snapshotService,
     this.onOpenVerifiedMedia,
     this.onOpenRedleafHandoff,
   });
@@ -47,6 +48,9 @@ class RedleafPage extends StatefulWidget {
   final bool initialThumbnailMode;
 
   final RedleafConnectionService? connection;
+
+  /// Optional cache service for deterministic widget tests.
+  final RedleafProjectSnapshotService? snapshotService;
 
   /// Legacy D3 verified-media callback. Kept so the currently wired Explorer
   /// path remains functional until the transcript-aware handoff is connected.
@@ -111,7 +115,7 @@ class _RedleafPageState extends State<RedleafPage> {
     _mediaResources = RedleafMediaResourceService(connection: _connection);
     _mediaScanner = RedleafMediaScanService(connection: _connection);
     _transcripts = RedleafTranscriptService(connection: _connection);
-    _snapshots = RedleafProjectSnapshotService();
+    _snapshots = widget.snapshotService ?? RedleafProjectSnapshotService();
     _thumbnailService = ThumbnailService();
     _thumbnailPrefs = ExplorerViewPreferencesService();
     unawaited(_loadThumbnailPreferences());
@@ -163,8 +167,8 @@ class _RedleafPageState extends State<RedleafPage> {
 
   @override
   void dispose() {
-    // PROJECT can swap the gallery back to its overview. Stop admitting
-    // native thumbnail work and drain any decode already in flight.
+    // PROJECT can swap the gallery back to OVERVIEW mid-decode.
+    // pauseAndDrain automatically joins the global Player handoff barrier.
     unawaited(_thumbnailService.pauseAndDrain());
     _connection.removeListener(_onConnectionChanged);
     _discovery.removeListener(_onDiscoveryChanged);
@@ -1714,13 +1718,17 @@ class _Metric extends StatelessWidget {
           const SizedBox(height: 5),
           Row(
             children: [
-              Text(
-                label,
-                style: const TextStyle(
-                  fontSize: 8.5,
-                  fontWeight: FontWeight.w800,
-                  letterSpacing: 0.7,
-                  color: Colors.white38,
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 8.5,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 0.7,
+                    color: Colors.white38,
+                  ),
                 ),
               ),
               if (secondary != null) ...[

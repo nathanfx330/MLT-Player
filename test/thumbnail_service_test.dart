@@ -169,6 +169,51 @@ void main() {
       expect(runs, 2);
     });
 
+    test('orphaned PROJECT thumbnail drain blocks Player until decode ends',
+        () async {
+      final source = File('${root.path}${Platform.pathSeparator}held.mp4');
+      await source.writeAsBytes(<int>[1, 2, 3]);
+
+      final started = Completer<void>();
+      final releaseDecode = Completer<void>();
+      final service = ThumbnailService(
+        cacheDirectory: cache,
+        generator: ({
+          required sourcePath,
+          required outputPath,
+          required width,
+          required height,
+        }) async {
+          started.complete();
+          await releaseDecode.future;
+          await File(outputPath).writeAsBytes(<int>[2, 4, 6]);
+          return _success();
+        },
+      );
+
+      final thumbnail = service.thumbnailFor(_video(source));
+      await started.future;
+
+      // Simulate PROJECT returning to OVERVIEW and disposing its browser.
+      // The service object is no longer used by any live widget, but the
+      // process-wide barrier must retain and await its pending native decode.
+      // The service registers its own outstanding drain automatically.
+      unawaited(service.pauseAndDrain());
+
+      var playerGatePassed = false;
+      final gate = ThumbnailService.waitForDetachedDrains().then((_) {
+        playerGatePassed = true;
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(playerGatePassed, isFalse);
+      expect(service.paused, isTrue);
+
+      releaseDecode.complete();
+      await gate;
+      expect(playerGatePassed, isTrue);
+      expect(await thumbnail, isNotNull);
+    });
+
     test('unsupported items never launch a thumbnail worker', () async {
       final source = File('${root.path}${Platform.pathSeparator}sound.wav');
       await source.writeAsBytes(<int>[1, 2, 3]);

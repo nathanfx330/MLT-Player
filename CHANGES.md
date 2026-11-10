@@ -1,5 +1,22 @@
 # Changes
 
+## 2026-11-09: Redleaf PROJECT gallery import and Player handoff safeguards
+
+- PROJECT gallery mounts pass import request serial zero to RedleafPage.
+  Only an explicit Settings import routed to Explorer can trigger automatic
+  import sync; repeated OVERVIEW / THUMBNAILS navigation remains cache-first.
+- Every paused thumbnail browser automatically registers its outstanding
+  decode drain in a process-wide registry, including inactive tabs and
+  disposed galleries. Both local and Redleaf Player entry paths wait for
+  these pending drains before opening MLT media.
+- Dart minimum updated to 3.11 in pubspec.yaml, matching the committed lockfile.
+- Added regression tests for repeated PROJECT gallery mounts with an old
+  import serial and a connected cached project, and for a held native
+  thumbnail decode blocking the Player handoff barrier.
+
+---
+
+
 ## 2026-11-09: Redleaf Cloud PROJECT thumbnail browser
 
 - Added an OVERVIEW / THUMBNAILS switch directly to the Redleaf Cloud PROJECT

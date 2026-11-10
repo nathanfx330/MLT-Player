@@ -20,6 +20,9 @@ import 'services/mlt_export_frame_rate_bridge.dart';
 import 'services/mlt_export_preset_bridge.dart';
 import 'services/player_engine.dart';
 import 'services/player_settings_service.dart';
+import 'services/thumbnail_service.dart';
+import 'services/redleaf_connection_service.dart';
+import 'services/redleaf_project_snapshot_service.dart';
 import 'services/storyboard_thumbnail_service.dart';
 import 'services/srt_subtitle_service.dart';
 import 'services/workspace_project_service.dart';
@@ -159,6 +162,7 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
   String? _activeProjectId;
   WorkspaceProject? _activeWorkspaceProject;
   int _playerOpenRequest = 0;
+  int _playerHandoffSerial = 0;
   int _cloudImportRequestSerial = 0;
   bool _showPlayer = false;
   _WorkspaceSection _workspaceSection = _WorkspaceSection.explorer;
@@ -204,18 +208,31 @@ class _MltExplorerShellState extends State<_MltExplorerShell> {
   }
 
   void _openInPlayer(String path) {
-    setState(() {
-      _redleafPlayerHandoff = null;
-      _playerPath = path;
-      _playerOpenRequest += 1;
-      _showPlayer = true;
-    });
+    unawaited(_openPlayerAfterDetachedDrains(path: path));
   }
 
   void _openRedleafInPlayer(RedleafPlayerHandoff handoff) {
+    unawaited(_openPlayerAfterDetachedDrains(
+      path: handoff.mediaPath,
+      handoff: handoff,
+    ));
+  }
+
+  Future<void> _openPlayerAfterDetachedDrains({
+    required String path,
+    RedleafPlayerHandoff? handoff,
+  }) async {
+    final serial = ++_playerHandoffSerial;
+    // A PROJECT gallery may have been disposed while native thumbnail work
+    // was still running. Its drain must finish before Player takes over MLT.
+    await ThumbnailService.waitForDetachedDrains();
+    if (!mounted || serial != _playerHandoffSerial) {
+      return;
+    }
+
     setState(() {
       _redleafPlayerHandoff = handoff;
-      _playerPath = handoff.mediaPath;
+      _playerPath = path;
       _playerOpenRequest += 1;
       _showPlayer = true;
     });
@@ -560,13 +577,19 @@ class RedleafProjectWorkspace extends StatefulWidget {
     required this.active,
     required this.onRename,
     this.importRequestSerial = 0,
+    this.connection,
+    this.snapshotService,
     this.onOpenVerifiedMedia,
     this.onOpenRedleafHandoff,
   });
 
   final WorkspaceProject project;
   final bool active;
+  /// Only Explorer handles this Settings import signal. PROJECT receives it
+  /// for compatibility but must never replay it when mounting its gallery.
   final int importRequestSerial;
+  final RedleafConnectionService? connection;
+  final RedleafProjectSnapshotService? snapshotService;
   final Future<void> Function(String name) onRename;
   final ValueChanged<String>? onOpenVerifiedMedia;
   final ValueChanged<RedleafPlayerHandoff>? onOpenRedleafHandoff;
@@ -652,8 +675,11 @@ class _RedleafProjectWorkspaceState extends State<RedleafProjectWorkspace> {
                       key: ValueKey('redleaf-project-gallery-${widget.project.key}'),
                       active: widget.active,
                       workspaceProject: widget.project,
-                      importRequestSerial: widget.importRequestSerial,
+                      // PROJECT gallery mounts are navigation, not imports.
+                      importRequestSerial: 0,
                       initialThumbnailMode: true,
+                      connection: widget.connection,
+                      snapshotService: widget.snapshotService,
                       onOpenVerifiedMedia: widget.onOpenVerifiedMedia,
                       onOpenRedleafHandoff: widget.onOpenRedleafHandoff,
                     )
