@@ -5,10 +5,10 @@
 - PROJECT gallery mounts pass import request serial zero to RedleafPage.
   Only an explicit Settings import routed to Explorer can trigger automatic
   import sync; repeated OVERVIEW / THUMBNAILS navigation remains cache-first.
-- Disposing a gallery tracks its outstanding native thumbnail drain in a
-  process-wide registry. Both local and Redleaf Player entry paths wait for
-  these pending drains before opening MLT media, including when the original
-  gallery widget no longer exists.
+- Every paused thumbnail browser automatically registers its outstanding
+  decode drain in a process-wide registry, including inactive tabs and
+  disposed galleries. Both local and Redleaf Player entry paths wait for
+  these pending drains before opening MLT media.
 - Dart minimum updated to 3.11 in pubspec.yaml, matching the committed lockfile.
 - Added regression tests for repeated PROJECT gallery mounts with an old
   import serial and a connected cached project, and for a held native
