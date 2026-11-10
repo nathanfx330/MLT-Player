@@ -1,5 +1,21 @@
 # Changes
 
+## 2026-11-09: Player thumbnail drain wait feedback
+
+- Player entry from Explorer or Redleaf now shows a small amber
+  "Finishing thumbnail…" status when a pending native MLT thumbnail decode
+  holds the process-wide safety gate longer than 200 milliseconds.
+- Fast handoffs show no status, and the indicator disappears when the drain
+  finishes. There is no timeout or bypass of the drain barrier.
+- Newer Player clicks still supersede stale requests. Tests cover slow and
+  instant drains, stale requests, and disposal while waiting.
+- The PROJECT destination is labeled BROWSE rather than THUMBNAILS because
+  it can present either linked-video thumbnails or the complete SRT table.
+  The internal view switch and initial thumbnail presentation are unchanged.
+
+---
+
+
 ## 2026-11-09: Redleaf PROJECT gallery import and Player handoff safeguards
 
 - PROJECT gallery mounts pass import request serial zero to RedleafPage.
